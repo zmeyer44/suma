@@ -1,0 +1,5 @@
+{
+  "extends": "@suma/typescript-config/internal-library.json",
+  "compilerOptions": { "types": [] },
+  "include": ["src", "test"]
+}

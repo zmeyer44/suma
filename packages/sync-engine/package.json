@@ -1,0 +1,27 @@
+{
+  "name": "@suma/sync-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Client-side session sync engine: conflict resolution, tombstones, origin leases, offline queue, hydration echo suppression (PRD §8.3).",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check-types": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src test --max-warnings 0"
+  },
+  "dependencies": {
+    "@suma/config": "workspace:*",
+    "@suma/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@suma/eslint-config": "workspace:*",
+    "@suma/typescript-config": "workspace:*",
+    "eslint": "^9.39.1",
+    "fast-check": "^4.1.0",
+    "typescript": "5.9.2",
+    "vitest": "^3.2.0"
+  }
+}

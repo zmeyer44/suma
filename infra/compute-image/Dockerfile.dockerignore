@@ -1,0 +1,9 @@
+# BuildKit per-Dockerfile ignore: the context is the repo root, but the
+# image only needs the cargo workspace (all members must be present for the
+# workspace manifest to resolve).
+*
+!Cargo.toml
+!Cargo.lock
+!agent
+!sidecar
+!services/egressgw

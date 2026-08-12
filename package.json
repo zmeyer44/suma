@@ -1,0 +1,28 @@
+{
+  "name": "suma",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "test:rust": "cargo test --workspace",
+    "lint:rust": "cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check",
+    "test:all": "turbo run test && cargo test --workspace",
+    "test:e2e:gateway": "pnpm --filter @suma/desktop build && playwright test e2e/gateway-session.spec.ts e2e/native-auth-session.spec.ts e2e/oauth-popup-session.spec.ts",
+    "test:e2e:google": "pnpm --filter @suma/desktop build && playwright test e2e/google-signin-live.spec.ts",
+    "format": "prettier --write \"**/*.{ts,tsx,md}\"",
+    "check-types": "turbo run check-types"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "prettier": "^3.7.4",
+    "turbo": "^2.10.8",
+    "typescript": "5.9.2"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=18"
+  }
+}

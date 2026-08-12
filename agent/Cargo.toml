@@ -1,0 +1,21 @@
+[package]
+name = "suma-agent"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "suma-agent — in-VM daemon: mux channels, capability-gated ctl, durable PTYs (PRD §8.5, Appendix C)"
+
+[dependencies]
+anyhow = { workspace = true }
+# Same pin as the sidecar, for the same reason: 1.6+ pulls constant_time_eq
+# 0.4 (edition 2024), which the workspace's Rust 1.79 toolchain cannot parse.
+# Both crates must also stay on one version — the chunk addresses they compute
+# are the same addresses.
+blake3 = "=1.5.5"
+libc = "0.2"
+portable-pty = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

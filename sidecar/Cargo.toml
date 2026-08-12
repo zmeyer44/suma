@@ -1,0 +1,17 @@
+[package]
+name = "sumad"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "sumad — on-device daemon: local CONNECT proxy with fail-closed egress policy, agent mux client, chunk cache (PRD §7, §8.4)"
+
+[dependencies]
+anyhow = { workspace = true }
+# Pinned below 1.6: newer releases pull constant_time_eq 0.4 (edition 2024),
+# which the workspace's Rust 1.79 toolchain cannot compile.
+blake3 = "=1.5.5"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

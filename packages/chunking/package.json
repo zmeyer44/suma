@@ -1,0 +1,25 @@
+{
+  "name": "@suma/chunking",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "FastCDC content-defined chunking with BLAKE3 content addressing (PRD §7 data plane, §8.6). Byte-identical to the Rust implementation.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check-types": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src test --max-warnings 0"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.8.0"
+  },
+  "devDependencies": {
+    "@suma/eslint-config": "workspace:*",
+    "@suma/typescript-config": "workspace:*",
+    "eslint": "^9.39.1",
+    "typescript": "5.9.2",
+    "vitest": "^3.2.0"
+  }
+}

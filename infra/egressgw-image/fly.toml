@@ -1,0 +1,53 @@
+# Fly config for the identity egress gateway — Phase-0 spike topology:
+# ONE app, ONE region, ONE machine, ONE app-scoped static egress IP, so the
+# exit IP is deterministic (with several egress IPs in a region, machines
+# pick randomly — that ambiguity is exactly what the spike must not have).
+#
+# Deploy from the REPO ROOT so the whole cargo workspace is the context:
+#
+#   fly deploy . -c infra/egressgw-image/fly.toml \
+#     --dockerfile infra/egressgw-image/Dockerfile
+#
+# Full runbook: docs/egress-spike.md
+
+app = "suma-egressgw-spike"
+# Matches the control plane's default homeRegion ("iad") — gateway and
+# compute pin to the user's home region (PRD §7).
+primary_region = "iad"
+
+[env]
+  SUMA_EGRESSGW_LISTEN = "0.0.0.0:8443"
+
+# The listener itself is cleartext HTTP CONNECT (services/egressgw/README:
+# "a deployment must front it with an edge that terminates client
+# authentication"). Fly's proxy is that edge here: handlers = ["tls"]
+# terminates TLS at Fly's edge with the automatic <app>.fly.dev certificate,
+# so clients speak CONNECT-over-TLS (an "https proxy") and the cleartext
+# listener is never directly on the public internet. Token auth (407 without
+# a valid MAC'd bearer) still happens in the gateway itself.
+[[services]]
+  internal_port = 8443
+  protocol = "tcp"
+  # A proxy that autostops is a proxy that fails closed at random moments —
+  # the desktop treats a refused port as "gateway down" and blocks proxied
+  # spaces, so the spike machine stays up. At shared-cpu-1x this is ~$2/mo,
+  # billed by the second.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 8443
+    handlers = ["tls"]
+
+  # Connection-level liveness only: the gateway answers any TCP connect and
+  # waits (bounded) for a CONNECT head, so a plain TCP check is safe and an
+  # HTTP check would 407.
+  [[services.tcp_checks]]
+    interval = "30s"
+    timeout = "4s"
+    grace_period = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

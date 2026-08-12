@@ -1,0 +1,40 @@
+// Suma sync protocol (PRD v1.1 Appendix B).
+// v0 wire encoding is JSON (see src/messages.ts, the current source of truth);
+// this protobuf sketch is the v1 binary target for packages/protocol codegen
+// (TS + Rust).
+syntax = "proto3";
+
+package suma.sync.v1;
+
+message Hlc {
+  uint64 physical_ms = 1;
+  uint32 logical     = 2;
+  string device_id   = 3;
+}
+
+enum Cause {
+  CAUSE_UNSPECIFIED    = 0;
+  WRITE                = 1;
+  EXPLICIT_DELETE      = 2;
+  EXPIRED              = 3;
+  OVERWRITE            = 4;
+  EVICTED              = 5;
+  HYDRATION_ECHO       = 6;
+}
+
+message CookieRecord {
+  string space_id      = 1;
+  bytes  record_id     = 2;  // HMAC(identity tuple) — server-visible, pseudonymous
+  bytes  origin_id     = 3;  // HMAC(host key) — for leases/rollback scoping
+  bytes  sealed_record = 4;  // enc: host_key, host_only, name, path,
+                             //      partition_key, source_scheme, value,
+                             //      expiry, same_site, secure, http_only, persistent
+  Hlc    hlc           = 5;
+  bytes  causal_parent = 6;  // record_id+hlc this supersedes
+  bytes  device_sig    = 7;
+  Cause  cause         = 8;
+}
+
+message LeaseRequest   { string space_id = 1; bytes origin_id = 2; bool force = 3; }
+message HydrateRequest { string space_id = 1; uint64 since_hlc = 2; }
+message RollbackRequest{ string space_id = 1; bytes origin_id = 2; uint64 to_hlc = 3; }

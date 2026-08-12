@@ -1,0 +1,37 @@
+{
+  "name": "@suma/control",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Control plane: Hono + Drizzle + Neon — accounts, devices, spaces, key wrappers, machine lifecycle, audit trail (PRD §7).",
+  "scripts": {
+    "dev": "tsx watch src/dev-server.ts",
+    "start": "tsx src/server.ts",
+    "build": "tsc --noEmit",
+    "check-types": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src test --max-warnings 0",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "@suma/config": "workspace:*",
+    "@suma/protocol": "workspace:*",
+    "@hono/node-server": "^1.14.0",
+    "@hono/zod-validator": "^0.4.2",
+    "drizzle-orm": "^0.44.0",
+    "hono": "^4.7.0",
+    "postgres": "^3.4.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.2.17",
+    "@suma/eslint-config": "workspace:*",
+    "@suma/typescript-config": "workspace:*",
+    "@types/node": "^22.15.0",
+    "drizzle-kit": "^0.31.0",
+    "eslint": "^9.39.1",
+    "tsx": "^4.19.0",
+    "typescript": "5.9.2",
+    "vitest": "^3.2.0"
+  }
+}

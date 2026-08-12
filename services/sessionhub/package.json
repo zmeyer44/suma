@@ -1,0 +1,31 @@
+{
+  "name": "@suma/sessionhub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Session plane: Cloudflare Worker + SessionHub Durable Object — sealed records, HLC registry, origin leases, device presence (PRD §7, §8.3).",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "deploy": "wrangler deploy",
+    "check-types": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src test --max-warnings 0"
+  },
+  "dependencies": {
+    "@suma/config": "workspace:*",
+    "@suma/protocol": "workspace:*",
+    "cookie": "^1.1.1",
+    "tldts": "^7.0.15",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260730.1",
+    "@suma/eslint-config": "workspace:*",
+    "@suma/typescript-config": "workspace:*",
+    "eslint": "^9.39.1",
+    "typescript": "5.9.2",
+    "vitest": "^3.2.0",
+    "wrangler": "^4.20.0"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://turborepo.dev/schema.json",
+  "ui": "tui",
+  "globalPassThroughEnv": [
+    "DATABASE_URL",
+    "PORT",
+    "OBJECT_STORE",
+    "R2_ACCOUNT_ID",
+    "R2_ENDPOINT",
+    "R2_BUCKET",
+    "R2_REGION",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+    "FONTS_BASE_URL",
+    "SUMA_CONTROL_URL",
+    "SUMA_HUB_URL",
+    "SUMA_HUB_PUBLIC_URL",
+    "SUMA_SESSION_GATEWAY_URL",
+    "SUMA_SESSION_GATEWAY_DEV_TOKEN",
+    "SUMA_AGENT_URL",
+    "SUMA_EGRESS_URL",
+    "SUMA_WORKSPACE_ROOT",
+    "SUMA_APPLE_TEAM_ID",
+    "SUMA_BUNDLE_ID",
+    "SUMA_INVITES_REQUIRED",
+    "SUMA_MAC_DMG_URL",
+    "WAITLIST_DATABASE_URL",
+    "WAITLIST_ADMIN_TOKEN",
+    "SUMA_SAVES_MODEL",
+    "AI_GATEWAY_API_KEY",
+    "AI_GATEWAY_UPSTREAM_URL",
+    "AI_DAILY_REQUEST_CAP",
+    "VERCEL_AI_GATEWAY_API_KEY",
+    "INVITE_ADMIN_TOKEN",
+    "GATEWAY_DEV_ALLOW_PRIVATE",
+    "GATEWAY_TOKEN_ENV",
+    "ELECTRON_RENDERER_URL",
+    "SHELL",
+    "PATH"
+  ],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", ".env*"],
+      "outputs": ["dist/**", "out/**", ".wrangler/**"]
+    },
+    "lint": {
+      "dependsOn": ["^lint"]
+    },
+    "check-types": {
+      "dependsOn": ["^check-types"]
+    },
+    "test": {
+      "dependsOn": ["^check-types"],
+      "outputs": []
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    }
+  }
+}

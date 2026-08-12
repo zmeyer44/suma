@@ -1,0 +1,7 @@
+{
+  "extends": "@suma/typescript-config/internal-library.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["src/main", "src/preload", "src/shared", "test", "electron.vite.config.ts"]
+}

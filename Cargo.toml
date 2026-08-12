@@ -1,0 +1,29 @@
+# Suma Rust workspace — the three Rust planes (PRD §7, §8.4, §8.5):
+#
+#   services/egressgw  identity egress gateway (blind CONNECT, server side)
+#   agent              suma-agent, the in-VM daemon
+#   sidecar            sumad, the on-device daemon (local proxy + agent mux client)
+#
+# Transport note: all three speak TCP with length-prefixed framing in this
+# phase. MASQUE/QUIC is deliberately NOT here — PRD §8.4 names it as the V2
+# path, and pulling in quinn before the trust/cert story is settled would be
+# premature.
+[workspace]
+resolver = "2"
+members = ["agent", "sidecar", "services/egressgw"]
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "time",
+    "macros",
+    "sync",
+    "fs",
+] }
+tracing = "0.1"
+tracing-subscriber = "0.3"

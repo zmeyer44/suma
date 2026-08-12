@@ -1,0 +1,632 @@
+@import "tailwindcss";
+
+/* `static` so every variable is emitted even when only referenced through
+   var() chains or arbitrary values — the derived palette depends on it. */
+@theme static {
+  /* ── Theme knobs ────────────────────────────────────────────────────────
+     The entire chrome derives from these two colors. Change --color-base
+     (the neutral surface) or --color-accent and every surface, edge, wash,
+     and text tone below follows automatically via OKLCH relative colors —
+     the ladder only shifts lightness (and scales chroma), never the hue. */
+  /* Must stay equal to DEFAULT_DARK_THEME (lib/theme.ts) — this is what
+     paints for the frame before the theme module writes the real knobs onto
+     <html>, so a mismatch is a flash of the wrong accent on every launch.
+     The accent is Suma's royal blue lifted to the lightness the dark surface
+     ladder needs; light themes take royal at its own lightness. */
+  --color-base: #0f1115;
+  --color-accent: #588bff;
+
+  /* ── Surfaces: a lightness ladder around the base ── */
+  --color-bg: oklch(from var(--color-base) calc(l - 0.045) c h);
+  --color-panel: var(--color-base);
+  --color-raised: oklch(from var(--color-base) calc(l + 0.035) c h);
+
+  /* Browser chrome: the titlebar strip gradient (darkest, at the window
+     edge), the panel the active folder tab merges into, the tab's lighter
+     top wash, and the 1px silhouette highlight.
+
+     The strip and the tab face carry their opacity through --alpha-strip /
+     --alpha-chrome (1 by default, dialled down by the translucent block
+     below) so translucency is a pair of knobs rather than a second copy of
+     the whole ladder. The edge hairline stays opaque in both modes — it is
+     what keeps the silhouette crisp against a blurred backdrop. */
+  --color-strip-deep: oklch(from var(--color-base) calc(l - 0.03) c h / var(--alpha-strip));
+  --color-strip: oklch(from var(--color-base) calc(l + 0.01) c h / var(--alpha-strip));
+  --color-chrome: oklch(from var(--color-base) calc(l + 0.065) c h / var(--alpha-chrome));
+  --color-chrome-wash: oklch(from var(--color-base) calc(l + 0.08) c h / var(--alpha-chrome));
+  --color-chrome-edge: oklch(from var(--color-base) calc(l + 0.125) c h);
+
+  /* The active tab's face is painted ON TOP of the strip (TabStrip's
+     FolderShell sits inside the strip), so in translucent mode the two alphas
+     STACK: a 0.72 face over a 0.55 strip composites to 0.87, and the tab reads
+     as an opaque slab while everything around it blurs. These are the chrome
+     pair re-alpha'd to the INCREMENT that composites back to --alpha-chrome
+     exactly (--tab-face-scale, below). Opaque chrome scales by 1, so they are
+     then plain aliases. Surfaces that paint the chrome color straight over the
+     window backdrop rather than over the strip — the chat sidebar — keep
+     --color-chrome, whose alpha is already the opacity you see. */
+  --color-tab-face: oklch(from var(--color-chrome) l c h / calc(alpha * var(--tab-face-scale)));
+  --color-tab-wash: oklch(from var(--color-chrome-wash) l c h / calc(alpha * var(--tab-face-scale)));
+
+  /* Modal folder chrome (ui/modal.tsx): same construction one step above
+     the raised surfaces. */
+  --color-modal: oklch(from var(--color-base) calc(l + 0.055) c h);
+  --color-modal-wash: oklch(from var(--color-base) calc(l + 0.085) c h);
+  --color-modal-deep: oklch(from var(--color-base) calc(l + 0.015) c h);
+  --color-modal-edge: oklch(from var(--color-base) calc(l + 0.165) c h);
+
+  /* ── Text: near-white through dimmed, tinted with the base hue ── */
+  --color-text: oklch(from var(--color-base) 0.93 calc(c * 0.5) h);
+  --color-muted: oklch(from var(--color-base) 0.66 c h);
+  --color-faint: oklch(from var(--color-base) 0.49 c h);
+
+  /* ── Accent interaction shades (hover / pressed) ── */
+  --color-accent-bright: oklch(from var(--color-accent) calc(l + 0.05) c h);
+  --color-accent-deep: oklch(from var(--color-accent) calc(l - 0.04) c h);
+
+  /* ── Ink: the overlay color for washes, hovers, and hairline fills ──
+     White over dark surfaces, black over light ones (flipped by the
+     [data-theme="light"] block below). Use ink/N instead of white/N for
+     anything painted over a themed surface. */
+  --color-ink: #ffffff;
+
+  --color-ok: #45d19a;
+  --color-warn: #e8b45a;
+  --color-danger: #e5636c;
+  --color-hairline: rgb(255 255 255 / 0.07);
+
+  /* Recessed bands (modal caption/footer) and the modal backdrop veil.
+     Both are far gentler in light themes — see the light block below. */
+  --color-recess: rgb(0 0 0 / 0.1);
+  --color-veil: rgb(0 0 0 / 0.45);
+
+  /* Elevation drop-shadows, as filter values: the modal folder and the
+     active tab's silhouette. Dark chrome can carry heavy shadows; light
+     chrome needs them soft or the whole UI looks dirty. */
+  --drop-modal: drop-shadow(0 18px 50px rgb(0 0 0 / 0.5))
+    drop-shadow(0 2px 10px rgb(0 0 0 / 0.35));
+  --drop-tab: drop-shadow(0 -1px 5px rgb(0 0 0 / 0.35));
+
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Menlo", monospace;
+
+
+  --animate-toast-in: toast-in 180ms cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+  --animate-overlay-in: overlay-in 140ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+  --animate-backdrop-in: backdrop-in 140ms ease-out both;
+  --animate-shimmer: shimmer 1.4s linear infinite;
+  --animate-pulse-dot: pulse-dot 1.6s ease-in-out infinite;
+  --animate-terminal-cursor: terminal-cursor 1.06s steps(1, end) infinite;
+}
+
+/* The floating-surface shadow (popovers, toasts, cards). Hand-written rather
+   than a `--shadow-*` theme token because Tailwind INLINES theme shadow
+   values into the generated utility at build time — a `:root[data-theme]`
+   override of the token would silently do nothing, freezing the dark shadow
+   into light themes. Reading a plain custom property keeps it swappable at
+   runtime. (Theme *colors* are fine: their utilities do emit var() refs.) */
+:root {
+  --pop:
+    0 16px 48px rgb(0 0 0 / 0.55), 0 2px 8px rgb(0 0 0 / 0.35),
+    inset 0 1px 0 rgb(255 255 255 / 0.05);
+
+  /* Opaque chrome is the default; the translucent block below is the only
+     thing that moves these. */
+  --alpha-strip: 1;
+  --alpha-chrome: 1;
+  /* Opaque chrome hides nothing behind the tab face, so it paints at its full
+     alpha; the translucent block solves for the reduced one. */
+  --tab-face-scale: 1;
+}
+
+.shadow-pop {
+  box-shadow: var(--pop);
+}
+
+/* ── Light themes ──────────────────────────────────────────────────────────
+   Set by lib/theme.ts when the base color's luminance crosses the light
+   threshold. The ladder is not merely the dark one flipped — it inverts
+   which end the base anchors. In a dark theme the base is the BACKDROP and
+   surfaces rise toward the light; in a light theme the base is the
+   FOREGROUND (the near-white card/tab/modal face) and everything else
+   steps DOWN from it: the window strip recedes, borders go darker still.
+
+   Calibrated against a reference light UI, whose three anchors are exactly
+   reproduced at constant chroma:
+     base #fafaf8 → strip/muted-surface #f0f0ee (−0.030) → border #e1e1df (−0.075)
+   Chroma is held constant across surfaces (the reference's own ratio), so a
+   tinted base keeps an even tint instead of washing out at the top. */
+:root[data-theme="light"] {
+  --color-ink: #000000;
+  --color-hairline: rgb(0 0 0 / 0.06);
+  --color-recess: rgb(0 0 0 / 0.025);
+  --color-veil: rgb(0 0 0 / 0.2);
+
+  /* Light surfaces are separated by soft shadows, not heavy ones — the
+     reference's modal casts ~12% black at its edge and fades within ~25px. */
+  --drop-modal: drop-shadow(0 14px 34px rgb(0 0 0 / 0.13))
+    drop-shadow(0 2px 6px rgb(0 0 0 / 0.07));
+  --drop-tab: drop-shadow(0 -1px 4px rgb(0 0 0 / 0.08));
+  --pop:
+    0 12px 32px rgb(0 0 0 / 0.12), 0 2px 6px rgb(0 0 0 / 0.07),
+    inset 0 1px 0 rgb(255 255 255 / 0.7);
+
+  /* The base IS the foreground surface: panel, raised, active tab, modal.
+     The tab face restates the base through oklch() only to carry
+     --alpha-chrome; the color itself is unchanged. */
+  --color-panel: var(--color-base);
+  --color-raised: var(--color-base);
+  --color-chrome: oklch(from var(--color-base) l c h / var(--alpha-chrome));
+  --color-modal: var(--color-base);
+
+  /* Recessed: the deepest well (input fills) and the titlebar the tab sits in. */
+  --color-bg: oklch(from var(--color-base) calc(l - 0.05) c h);
+  --color-strip-deep: oklch(from var(--color-base) calc(l - 0.045) c h / var(--alpha-strip));
+  --color-strip: oklch(from var(--color-base) calc(l - 0.03) c h / var(--alpha-strip));
+
+  /* Raised faces catch a touch more light at the top; borders are the
+     reference's single #e1e1df step, not a heavy outline. */
+  --color-chrome-wash: oklch(from var(--color-base) calc(l + 0.008) c h / var(--alpha-chrome));
+  --color-chrome-edge: oklch(from var(--color-base) calc(l - 0.075) c h);
+  --color-modal-wash: oklch(from var(--color-base) calc(l + 0.008) c h);
+  --color-modal-deep: oklch(from var(--color-base) calc(l - 0.012) c h);
+  --color-modal-edge: oklch(from var(--color-base) calc(l - 0.075) c h);
+
+  /* Text ladder mirrors dark mode's contrast (≈15:1 / 6:1 / 3:1). */
+  --color-text: oklch(from var(--color-base) 0.27 calc(c * 0.8) h);
+  --color-muted: oklch(from var(--color-base) 0.52 c h);
+  --color-faint: oklch(from var(--color-base) 0.66 c h);
+}
+
+/* ── Translucent chrome ────────────────────────────────────────────────────
+   Set by lib/theme.ts when the Appearance panel turns translucency on, in
+   lockstep with main putting a macOS vibrancy layer behind the window
+   (shell-window.ts). Only the titlebar strip and the active tab's face thin
+   out — the blur belongs to the chrome AROUND the page, and the tab
+   WebContentsViews covering the content hole are opaque, so page content is
+   never veiled.
+
+   The two alphas are deliberately unequal: the strip is the backdrop and can
+   go thin, while the tab face doubles as the omnibox and has to stay legible
+   over whatever the wallpaper is doing underneath. Light themes sit closer
+   to opaque throughout — a pale surface thinned as far as a dark one goes
+   over a bright desktop loses its edges entirely.
+
+   Both alphas are the opacity you are meant to SEE. The tab face gets there
+   in two coats though (its silhouette paints over the strip), so it paints at
+   the increment that composites to --alpha-chrome rather than at
+   --alpha-chrome itself:
+     1 - (1 - a_strip)(1 - a_fill) = a_chrome
+       →  a_fill = (a_chrome - a_strip) / (1 - a_strip)
+   --tab-face-scale is that fill as a fraction of --alpha-chrome, so
+   --color-tab-face/-wash can carry it without restating the ladder. Skip it
+   and the face lands at 0.78 (dark) / 0.88 (light) — near-opaque, and the
+   wallpaper never reaches the one surface the eye goes to first. */
+:root[data-translucent="on"] {
+  --alpha-strip: 0.42;
+  --alpha-chrome: 0.62;
+  --tab-face-scale: calc(
+    (var(--alpha-chrome) - var(--alpha-strip)) /
+      ((1 - var(--alpha-strip)) * var(--alpha-chrome))
+  );
+}
+
+:root[data-theme="light"][data-translucent="on"] {
+  --alpha-strip: 0.55;
+  --alpha-chrome: 0.74;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Hover cards grow out of their anchor and shrink back into it. A transition
+   rather than a keyframe so the exit animates too: Base UI holds the popup
+   mounted through `data-ending-style`, and puts `--transform-origin` on the
+   positioner so the scale pivots on the trigger instead of the popup's center. */
+.hover-card-pop {
+  transform-origin: var(--transform-origin);
+  opacity: 1;
+  transform: scale(1);
+  transition:
+    opacity 160ms cubic-bezier(0.2, 0.8, 0.3, 1),
+    transform 160ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.hover-card-pop[data-starting-style],
+.hover-card-pop[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.96);
+}
+
+.hover-card-pop[data-ending-style] {
+  transition-duration: 110ms;
+}
+
+/* The full-window scrim every overlay lays down (modals, the command bar, the
+   passkey ceremony).
+
+   Deliberately NO backdrop-filter. A backdrop-filter makes Chromium
+   composite the region against the page's own backdrop, and everywhere the
+   chrome is transparent that backdrop is EMPTY — the window fill and the
+   tab views live outside this document. Verified against real compositor
+   output (screen capture, 2026-08-10): with a 2px blur here, opening a
+   modal over an empty space rendered the whole content hole opaque BLACK
+   instead of a dimmed empty state; without it, the veil tint composites
+   correctly in every case. The blur only ever softened the chrome's own
+   pixels (the tab strip, the empty state) — not worth a blacked-out
+   window. The same mechanism used to mask out the vibrancy layer on a
+   translucent chrome, which is why this was already conditional there. */
+.veil {
+  background: var(--color-veil);
+}
+
+/* Modal folder (ui/modal.tsx): the veil fades while the folder rises up into
+   place and sinks back on close. Transitions rather than keyframes so Base
+   UI's data-ending-style exit animates too. */
+.modal-veil {
+  opacity: 1;
+  transition: opacity 150ms ease-out;
+}
+
+.modal-veil[data-starting-style],
+.modal-veil[data-ending-style] {
+  opacity: 0;
+}
+
+.modal-pop {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transition:
+    opacity 180ms cubic-bezier(0.2, 0.8, 0.3, 1),
+    transform 180ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.modal-pop[data-starting-style],
+.modal-pop[data-ending-style] {
+  opacity: 0;
+  transform: translateY(12px) scale(0.98);
+}
+
+.modal-pop[data-ending-style] {
+  transition-duration: 120ms;
+}
+
+/* The AI chat sidebar (ChatSidebar) opens and closes by sliding, not by
+   appearing in one frame.
+
+   Width is the animated property on purpose: the sidebar is a flex SIBLING of
+   the content hole, so growing it narrows the hole every frame and main tracks
+   the tab WebContentsViews to it — the page is pushed aside live, exactly the
+   way a handle drag pushes it. The panel body is held at its final width
+   inside the clipped box, so it translates in as one piece instead of
+   reflowing its text at every intermediate width.
+
+   The class is applied only WHILE opening or closing. Leaving a width
+   transition on the sidebar permanently would make the resize handle
+   rubber-band: every per-frame width the drag sets would ease toward the
+   pointer instead of landing on it. Durations here are mirrored by OPEN_MS /
+   CLOSE_MS in ChatSidebar.tsx — the close timer is what unmounts the panel. */
+.chat-slide {
+  transition: width 220ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+/* Out a touch faster than in: a dismissal should feel immediate. */
+.chat-slide[data-closing] {
+  transition-duration: 160ms;
+}
+
+/* ── The floating overlay's glass panel (OverlayStack) ────────────────────
+   A translucent TINT, not real frost: the overlay is a WebContentsView
+   layered over the tab views (shell-window.ts), and a view cannot blur a
+   sibling view's pixels — backdrop-filter samples only its own (transparent)
+   page, and vibrancy is a window-level feature. The old vibrancy-window
+   variant had true blur but lagged shell drags and floated over other apps;
+   this trades the blur for atomic tracking. Mostly opaque on purpose:
+   without a blur underneath, anything more transparent leaves sharp page
+   text bleeding through the controls. */
+.overlay-glass {
+  background: color-mix(in oklab, var(--color-chrome) 88%, transparent);
+}
+
+/* ── Save-preview cards (SavePreviewOverlay, its own WebContentsView) ─────
+   One mechanism for every size change: each card sits in a grid cell whose
+   rows transition 0fr↔1fr. Appearing expands the cell, the model landing
+   expands the .save-preview-grow section inside the card, and dismissal
+   collapses the cell — so the stack below always slides, never jumps, and
+   the view's height (reported per frame via ResizeObserver →
+   savePreview:bounds) follows the same curve. The horizontal slide is a
+   separate transform on the card so entry reads as "in from the right",
+   matching the top-right anchor. LEAVE_MS in SavePreviewOverlay.tsx must
+   outlast these durations — it is what unmounts the card. */
+.save-preview-cell {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 240ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.save-preview-cell-open {
+  grid-template-rows: 1fr;
+}
+
+/* The audio player's cells collapse BOTH axes: the glass panel is w-fit, so
+   a closed card must stop contributing its 320px width or the panel (and
+   the window) stays card-wide around the lone pill. Save-card cells stay
+   vertical-only — their width is the panel's width while they live. */
+.player-cell {
+  display: grid;
+  grid-template-rows: 0fr;
+  grid-template-columns: 0fr;
+  transition:
+    grid-template-rows 240ms cubic-bezier(0.2, 0.8, 0.3, 1),
+    grid-template-columns 240ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.player-cell-open {
+  grid-template-rows: 1fr;
+  grid-template-columns: 1fr;
+}
+
+.save-preview-card {
+  transition:
+    transform 240ms cubic-bezier(0.2, 0.8, 0.3, 1),
+    opacity 180ms ease,
+    border-color 100ms ease;
+}
+
+.save-preview-card-in {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+.save-preview-card-out {
+  transform: translateX(24px);
+  opacity: 0;
+}
+
+/* The loading→loaded growth: the description/author section unfolds when
+   the extraction settles instead of the card snapping to its final size. */
+.save-preview-grow {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 240ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.save-preview-grown {
+  grid-template-rows: 1fr;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Cards still come and go on the same schedule — they just land in place
+     instead of travelling there. */
+  .save-preview-cell,
+  .player-cell,
+  .save-preview-card,
+  .save-preview-grow {
+    transition: none;
+  }
+}
+
+/* ── suma://settings sidebar: the menu push ────────────────────────────────
+   Drilling into a nav group slides its menu in from the right over the one
+   that opened it; the back control slides the parent back in from the left.
+   Owned here rather than inline because the two halves of a push have to
+   share a duration and curve to read as one stack moving — see
+   components/settings/SettingsNav.tsx, whose PUSH_MS must outlast these.
+
+   The outgoing menu trails at a QUARTER of the distance: full-distance
+   parallax reads as two unrelated panels sliding past each other, a quarter
+   reads as one stack being pushed. Its fade is a SECOND animation on a
+   shorter clock rather than an extra keyframe stop, so the travel keeps one
+   uninterrupted easing curve while the opacity empties over the first half —
+   before the sliver of it still exposed at the edge gets narrow enough to
+   look like a rendering artifact. */
+@keyframes settings-slide-in-fwd {
+  from {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes settings-slide-in-back {
+  from {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes settings-slide-out-fwd {
+  to {
+    transform: translateX(-26%);
+  }
+}
+
+@keyframes settings-slide-out-back {
+  to {
+    transform: translateX(26%);
+  }
+}
+
+@keyframes settings-menu-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes settings-menu-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.settings-menu-in-fwd,
+.settings-menu-in-back,
+.settings-menu-out-fwd,
+.settings-menu-out-back {
+  --settings-push: 300ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+.settings-menu-in-fwd {
+  animation: settings-slide-in-fwd var(--settings-push);
+}
+
+.settings-menu-in-back {
+  animation: settings-slide-in-back var(--settings-push);
+}
+
+.settings-menu-out-fwd {
+  animation:
+    settings-slide-out-fwd var(--settings-push),
+    settings-menu-fade-out 160ms linear both;
+}
+
+.settings-menu-out-back {
+  animation:
+    settings-slide-out-back var(--settings-push),
+    settings-menu-fade-out 160ms linear both;
+}
+
+/* Reduced motion drops the travel — the part the preference is actually about
+   — but keeps a transition rather than a cut, which would read as a rendering
+   glitch. The two fades are SEQUENCED rather than crossed so the old and new
+   label sets are never legible on top of each other: the same constraint the
+   push solves by occluding. */
+@media (prefers-reduced-motion: reduce) {
+  .settings-menu-in-fwd,
+  .settings-menu-in-back {
+    animation: settings-menu-fade-in 160ms linear 100ms both;
+  }
+
+  .settings-menu-out-fwd,
+  .settings-menu-out-back {
+    animation: settings-menu-fade-out 100ms linear both;
+  }
+}
+
+@keyframes backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: -200% 0;
+  }
+  to {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* The terminal block cursor (§8.5), blinking the way Terminal.app does: the
+   cell inverts and un-inverts rather than fading, so the glyph underneath
+   stays legible through the off phase. Animating fill/ink instead of opacity
+   is what keeps that character visible. */
+@keyframes terminal-cursor {
+  0%,
+  50% {
+    background-color: var(--color-text);
+    color: var(--color-bg);
+  }
+  50.01%,
+  100% {
+    background-color: transparent;
+    color: var(--color-text);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The sidebar still mounts and unmounts on the same schedule — it just
+     lands at its width instead of travelling there. */
+  .chat-slide {
+    transition: none;
+  }
+
+  .animate-terminal-cursor {
+    animation: none;
+    background-color: var(--color-text);
+    color: var(--color-bg);
+  }
+}
+
+/* The window itself must stay transparent: the tab WebContentsView shows
+   through the content hole. Chrome surfaces paint their own backgrounds. */
+html,
+body,
+#root {
+  height: 100%;
+  background: transparent;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+input,
+textarea {
+  user-select: text;
+}
+
+.drag-region {
+  -webkit-app-region: drag;
+}
+
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--color-ink) 12%, transparent);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--color-ink) 20%, transparent);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}

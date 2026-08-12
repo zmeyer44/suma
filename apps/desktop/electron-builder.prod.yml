@@ -1,0 +1,18 @@
+# Production overlay for the signed + notarized DMG.
+#
+#   pnpm --filter @suma/desktop dist:mac:prod
+#
+# Requires a "Developer ID Application" identity (keychain or CSC_LINK) and
+# notarization credentials in the environment — the full runbook, including
+# the castLabs/Widevine step, is docs/release-macos.md.
+extends: ./electron-builder.yml
+
+mac:
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.inherit.plist
+  notarize: true
+  extendInfo:
+    NSMicrophoneUsageDescription: "Sites you visit can ask to use the microphone."
+    NSCameraUsageDescription: "Sites you visit can ask to use the camera."

@@ -1,0 +1,16 @@
+[package]
+name = "suma-egressgw"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Suma identity egress gateway — blind CONNECT tunnels exiting from the user's static IP (PRD §8.4)"
+
+[dependencies]
+anyhow = { workspace = true }
+# Keyed BLAKE3 is the MAC behind SharedSecretVerifier (src/auth.rs). Same
+# `=1.5.5` pin as sidecar/: newer releases pull constant_time_eq 0.4
+# (edition 2024), which the workspace's Rust 1.79 toolchain cannot compile.
+blake3 = "=1.5.5"
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

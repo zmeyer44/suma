@@ -1,0 +1,8 @@
+{
+  "extends": "@suma/typescript-config/internal-library.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "types": ["vite/client"]
+  },
+  "include": ["src/renderer", "src/shared"]
+}

@@ -1,0 +1,27 @@
+name = "suma-sessionhub"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+
+# Wrangler's default dev port is 8787, which the control plane already owns —
+# and which apps/desktop hardcodes as DEFAULT_CONTROL_URL. Both bind it
+# successfully (workerd sets SO_REUSEADDR), so sharing it silently routes
+# requests to whichever process the OS picks. Set SUMA_HUB_URL to
+# ws://localhost:8788/v1/hub/ws to point the desktop at local dev — the
+# worker routes only /v1/hub/ws (everything else 404s), and WsTransport
+# dials the URL verbatim.
+#
+# Production deploy: `pnpm deploy:hub` (root) or `wrangler deploy` here,
+# then `wrangler secret put CONTROL_PUBLIC_KEY` with the control plane's
+# /v1/auth/jwks publicKey — REQUIRED, or the hub accepts forgeable
+# hbr_dev_ stub tokens. Set SUMA_HUB_PUBLIC_URL on the control plane to
+# wss://<worker-host>/v1/hub/ws so /v1/me serves it to desktops.
+[dev]
+port = 8788
+
+[[durable_objects.bindings]]
+name = "SESSION_HUB"
+class_name = "SessionHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SessionHub"]

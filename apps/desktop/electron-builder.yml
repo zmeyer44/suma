@@ -1,0 +1,54 @@
+# Packaging for the macOS DMG (PRD: macOS 14+, Apple Silicon).
+#
+# This base config builds UNSIGNED — `dist:mac` sets
+# CSC_IDENTITY_AUTO_DISCOVERY=false so a dev build never picks up whatever
+# certificate happens to be in the keychain. Signed + notarized releases go
+# through electron-builder.prod.yml (`dist:mac:prod`, runbook in
+# docs/release-macos.md), and additionally need the castLabs ECS Electron for
+# Widevine/VMP (see package.json description) — this config packages whatever
+# `electron` resolves to in node_modules.
+appId: com.sumabrowser.app
+productName: Suma
+
+directories:
+  buildResources: build
+  output: dist
+
+# Main/preload/renderer are already bundled into out/ by electron-vite;
+# externalized runtime deps (ai, node-pty, nostr-tools, tldts) are picked up
+# from node_modules automatically.
+files:
+  - out/**
+  - "!out/**/*.map"
+
+# node-pty ships a native addon and a spawn-helper binary that must live on
+# the real filesystem, not inside the asar.
+asarUnpack:
+  - "**/node_modules/node-pty/**"
+
+mac:
+  category: public.app-category.productivity
+  icon: build/icon.icns
+  minimumSystemVersion: "14.0.0"
+  target:
+    - target: dmg
+      arch: [arm64]
+
+dmg:
+  # build/background.png (660x400) + background@2x.png — dmg-builder folds the
+  # pair into one HiDPI tiff. Regenerate with scripts/generate-dmg-background.mjs.
+  background: build/background.png
+  iconSize: 128
+  window:
+    width: 660
+    height: 400
+  # Icon centers, origin top-left: app over the arrow's tail, Applications
+  # alias past its head.
+  contents:
+    - x: 170
+      y: 200
+      type: file
+    - x: 490
+      y: 200
+      type: link
+      path: /Applications
