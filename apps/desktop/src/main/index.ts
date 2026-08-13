@@ -120,6 +120,16 @@ const updates = new UpdateService();
 /** Whether --disable-quic was appended before app ready — gates proxying (§8.4). */
 let quicDisabledAtStartup = false;
 
+// Packaged builds get their own userData ("Suma"); dev runs keep Electron's
+// default derived from package.json name ("@suma/desktop"). Without this the
+// two share one directory — and one single-instance lock, so an installed
+// Suma and `pnpm dev` silently refuse to start while the other runs. Must
+// precede the singleton lock AND the first getPath("userData") read below.
+if (app.isPackaged) {
+  app.setName("Suma");
+  app.setPath("userData", path.join(app.getPath("appData"), "Suma"));
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {

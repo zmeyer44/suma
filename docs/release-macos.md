@@ -23,10 +23,22 @@ This runbook produces the real thing. Config lives in
    → Integrations → App Store Connect API → Team Keys → "+", role
    **Developer**. Download the `.p8` once, note the **Key ID** and **Issuer
    ID**. (Alternative: an Apple ID + app-specific password, below.)
-4. The keychain access group in `build/entitlements.mac.plist` must resolve to
-   `<TEAM_ID>.com.sumabrowser.app.webauthn` — the plist uses
-   `$(AppIdentifierPrefix)`; verify it expanded after the first signed build
-   (step 4) and hardcode the team id prefix if it did not.
+4. **Touch ID passkeys are OFF in shipped builds for now** — learned the hard
+   way in 0.0.2: `keychain-access-groups` is a *restricted* entitlement, and
+   a Developer ID app carrying it without an embedded provisioning profile is
+   killed by AMFI at spawn ("Launchd job spawn failed", POSIX error 163) on
+   every launch. Notarization does not catch it; the app passes `spctl` and
+   still won't start. The entitlement is deliberately absent from
+   `build/entitlements.mac.plist`. To enable passkeys later:
+   - Portal → Identifiers: register `com.sumabrowser.app`; Profiles: create a
+     **Developer ID** provisioning profile for it (Account Holder only).
+   - Wire it via `mac.provisioningProfile` in `electron-builder.prod.yml`
+     and re-add `keychain-access-groups` =
+     `<TEAM_ID>.com.sumabrowser.app.webauthn` to the entitlements.
+   - Bake the team id into the build (webauthn-policy.ts currently reads
+     `SUMA_APPLE_TEAM_ID` from the runtime env, which no user machine has —
+     it must become a build-time constant for the plan to report passkeys
+     available).
 
 ## 1. Environment for the release shell
 
