@@ -19,6 +19,15 @@ import {
 
 export const DEFAULT_CONTROL_URL = "http://localhost:8787";
 
+/**
+ * The hosted control plane packaged builds talk to. A `.app` launched from
+ * Finder inherits no shell environment, so SUMA_CONTROL_URL is never set
+ * there — without this a shipped build reported itself local-only and hid
+ * the "Link this Mac" path in onboarding (§8.2). SUMA_CONTROL_URL still wins
+ * when it IS set, so dev runs and the e2e harness are unaffected.
+ */
+export const PROD_CONTROL_URL = "https://api.sumabrowser.com";
+
 export interface ControlUser {
   id: string;
   email: string;

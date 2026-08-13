@@ -143,7 +143,9 @@ by design (documented).
     control and returns the RevocationReceipt.
 - Enrollment status persisted in workspace-store/device.ts; emit
   `auth:changed`.
-- If `SUMA_CONTROL_URL` is unset, AuthService runs in "local-only" mode:
+- If `SUMA_CONTROL_URL` is unset **in a dev run**, AuthService runs in
+  "local-only" mode (packaged builds fall back to `PROD_CONTROL_URL`,
+  https://api.sumabrowser.com, since a `.app` inherits no shell env):
   status unenrolled, sync uses LoopbackTransport (current default). Everything
   must still work offline/local with no control plane — Phase 1 must not break
   the local dev experience.

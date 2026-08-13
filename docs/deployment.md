@@ -139,9 +139,13 @@ revision (commit and push first; the other Mac pulls):
 git pull
 pnpm install
 pnpm --filter @suma/desktop build
-SUMA_CONTROL_URL=https://control-production-c40c.up.railway.app \
+SUMA_CONTROL_URL=https://api.sumabrowser.com \
   pnpm --filter @suma/desktop start
 ```
+
+A packaged build (`dist:mac:prod` / `release:mac`) needs no env var: it
+defaults to `https://api.sumabrowser.com` (`PROD_CONTROL_URL` in
+`src/main/control-client.ts`). `SUMA_CONTROL_URL` still overrides it when set.
 
 Do **not** set `SUMA_SESSION_GATEWAY_URL` / `SUMA_SESSION_GATEWAY_DEV_TOKEN`
 against the deployed stack — those pin a dev gateway and bypass discovery.

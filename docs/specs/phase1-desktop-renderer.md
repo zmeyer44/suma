@@ -24,8 +24,9 @@ mount.
 - `OnboardingWizard.tsx` — first-run/enrollment flow shown when auth status is
   "unenrolled" or "signed-up" (and dismissible to try local-only). Steps:
   1. Account: email (+ optional display name) → `auth:signup`; if
-     SUMA_CONTROL_URL unset, show "Running locally — sync is on this Mac
-     only" and let them continue.
+     no control plane is configured (dev run with SUMA_CONTROL_URL unset),
+     show "Running locally — sync is on this Mac only", hide the "Link this
+     Mac" path, and let them continue.
   2. Device credential: `auth:enroll` then
      `auth:registerDeviceCredential` (default). Offer "Use a passkey instead"
      → `auth:passkeyBegin`, run `navigator.credentials.create(options)` in the

@@ -140,7 +140,7 @@ pnpm check-types  # typecheck everything
 
 | Service                 | Port      | Notes                                                                    |
 | ----------------------- | --------- | ------------------------------------------------------------------------ |
-| `services/control`      | 8787      | `apps/desktop` defaults to this (`SUMA_CONTROL_URL`)                     |
+| `services/control`      | 8787      | dev runs default here (`SUMA_CONTROL_URL`); packaged builds use `https://api.sumabrowser.com` |
 | `services/sessionhub`   | 8788      | `wrangler dev`; point the desktop at it with `SUMA_HUB_URL`              |
 | `apps/desktop` renderer | 5173/5174 | whichever port Vite finds free (`ELECTRON_RENDERER_URL`)                 |
 | `apps/files`            | 5173/5174 |                                                                          |

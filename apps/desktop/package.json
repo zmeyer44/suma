@@ -1,6 +1,6 @@
 {
   "name": "@suma/desktop",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": true,
   "type": "module",
   "description": "Suma desktop shell — Electron + React (minimal daily-driver shell, PRD §8.1). Production builds use the castLabs ECS Electron for Widevine/VMP; development uses stock Electron.",

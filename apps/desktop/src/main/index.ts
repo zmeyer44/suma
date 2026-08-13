@@ -26,6 +26,7 @@ import { applyDevDockIcon } from "./app-icon";
 import { AuditService } from "./audit-service";
 import { TtsService } from "./audio/tts-service";
 import { AuthService } from "./auth-service";
+import { PROD_CONTROL_URL } from "./control-client";
 import { ChatService } from "./chat/chat-service";
 import { loadDotEnv } from "./env";
 import { TcpAgentClient } from "./compute/agent-client";
@@ -436,7 +437,12 @@ async function startServices(ctx: {
   const auth = new AuthService({
     device,
     store,
-    controlUrl: process.env["SUMA_CONTROL_URL"] ?? null,
+    // Packaged builds get the hosted plane by default — they never see a
+    // shell env. Dev runs stay null (local-only) unless SUMA_CONTROL_URL is
+    // exported, which also overrides the packaged default.
+    controlUrl:
+      process.env["SUMA_CONTROL_URL"] ??
+      (app.isPackaged ? PROD_CONTROL_URL : null),
     emitChanged: (status) => emit("auth:changed", status),
     onTokenChanged: () => {
       sync.refreshAuth();
