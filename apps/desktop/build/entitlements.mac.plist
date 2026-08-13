@@ -11,11 +11,13 @@
     are injected via extendInfo in electron-builder.prod.yml.
   - keychain-access-groups: Touch ID passkeys live here; must equal the
     runtime group <TEAM_ID>.<BUNDLE_ID>.webauthn (docs/auth-flows.md).
-    NOTE: verify after signing that $(AppIdentifierPrefix) was expanded
-    (codesign historically does not expand Xcode variables):
-      codesign -d --entitlements - dist/mac-arm64/Suma.app | grep webauthn
-    Hardcoded to team PHSRT54C87 (2026-08-13): electron-builder passes this
-    plist to codesign verbatim — $(AppIdentifierPrefix) never expands here.
+    Hardcoded to team PHSRT54C87 (2026-08-13): electron-builder hands this
+    plist to codesign verbatim, so $(AppIdentifierPrefix) never expands.
+    Verify after signing (grep webauthn in the entitlements codesign prints;
+    the exact command is in docs/release-macos.md section 4). Beware: a
+    double hyphen is ILLEGAL inside an XML comment, and Apple's entitlement
+    parser (AMFIUnserializeXML) hard-fails the whole signing step on it, so
+    never paste flag-bearing commands into this comment.
 -->
 <plist version="1.0">
   <dict>
