@@ -939,6 +939,12 @@ export interface SumaInvokeMap {
   "savePreview:bounds": { args: { height: number; width?: number }; result: void };
   /** A card was clicked: open the Saves panel in the chrome on this item. */
   "savePreview:activate": { args: { id: string }; result: void };
+  /**
+   * "Open" tapped on a download-complete card. Same id space as
+   * `downloads:open` — main resolves it to the completed item's savePath, so
+   * the overlay never handles (or could invent) a path of its own.
+   */
+  "downloadOverlay:open": { args: { id: string }; result: void };
 
   /* ---- Selection toolbar (its own WebContentsView; see SelectionToolbar) ---- */
   /** A button tapped in the floating selection toolbar. Main hides the
@@ -1115,6 +1121,10 @@ export interface SumaEventMap {
   "savePreview:item": SavedItem;
   /** To the preview overlay: nothing was saved, and here is why. */
   "savePreview:error": { message: string };
+  /** To the preview overlay: a local download just landed on disk — show the
+   *  completion card with its Open action. Only `completed` items are
+   *  pushed; a cancelled or interrupted one has no file to open. */
+  "downloadOverlay:completed": DownloadItemInfo;
   /** To the preview overlay: the chrome's playback state (relayed
    *  `audio:publishState`) — what the floating player renders. */
   "audioOverlay:state": AudioOverlayState;
@@ -1298,6 +1308,7 @@ export const INVOKE_CHANNELS: ReadonlyArray<InvokeChannel> = [
   "glance:goForward",
   "savePreview:bounds",
   "savePreview:activate",
+  "downloadOverlay:open",
   "selectionToolbar:action",
   "audio:publishState",
   "audioOverlay:requestState",
@@ -1358,6 +1369,7 @@ export const EVENT_CHANNELS: ReadonlyArray<EventChannel> = [
   "saves:openDetail",
   "savePreview:item",
   "savePreview:error",
+  "downloadOverlay:completed",
   "audioOverlay:state",
   "audio:control",
   "selection:readAloud",

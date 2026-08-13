@@ -26,6 +26,7 @@
 
 import { useEffect, useRef } from "react";
 import { FloatingAudioPlayer } from "./AudioPlayer";
+import { DownloadCompleteOverlay } from "./DownloadCompleteOverlay";
 import { NostrApprovalOverlay } from "./NostrApprovalOverlay";
 import { SavePreviewOverlay } from "./SavePreviewOverlay";
 import { VoiceHud } from "./VoiceHud";
@@ -101,6 +102,9 @@ export function OverlayStack() {
         {/* Approval cards above save cards: they are actionable and waiting
             on the user, while a save card is a receipt. */}
         <NostrApprovalOverlay />
+        {/* Download receipts above save receipts only because a finished
+            download is the one the user was waiting on. */}
+        <DownloadCompleteOverlay />
         <SavePreviewOverlay />
       </div>
     </div>

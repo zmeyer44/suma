@@ -1411,6 +1411,17 @@ export function registerIpc(deps: IpcDeps): void {
     deps.shell.focusChrome();
   });
 
+  // "Open" on a download-complete card. The overlay is the only surface that
+  // can show one over a page, so it needs this channel; it stays id-based, so
+  // the reachable set is exactly the completed downloads main already knows
+  // about — no caller-supplied path (downloads.ts). No focusChrome: the file
+  // opens in another app, and stealing focus first would fight it.
+  handlePreview("downloadOverlay:open", (args) => {
+    deps.downloads.open(
+      requireString(requireRecord(args, "downloadOverlay:open")["id"], "id"),
+    );
+  });
+
   /* ------------------- Nostr signer (NIP-07, shared/nostr.ts) ------------- */
 
   handle("nostr:settings", () => deps.nostr.settings());

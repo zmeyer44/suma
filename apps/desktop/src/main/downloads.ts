@@ -22,6 +22,13 @@ export interface DownloadDeps {
   emit: (items: DownloadItemInfo[]) => void;
   /** Where local downloads land — `app.getPath("downloads")` in the app. */
   downloadsDir: () => string;
+  /**
+   * One file finished writing. Separate from `emit`, which pushes the whole
+   * list on every progress tick: this fires exactly once per download, which
+   * is what a completion card can be built on (DownloadCompleteOverlay).
+   * A cancelled or interrupted item never reaches it — there is no file.
+   */
+  onCompleted?: (item: DownloadItemInfo) => void;
 }
 
 export class DownloadManager {
@@ -105,6 +112,10 @@ export class DownloadManager {
         });
         // Only completed metadata persists — a restart cannot resume the rest.
         this.deps.store.setDownloads(this.items.filter((i) => i.state === "completed"));
+        // The reduced row, not the raw item: it carries the id the Open
+        // action comes back with, and the same shape the panel renders.
+        const landed = this.items.find((i) => i.id === id);
+        if (landed !== undefined) this.deps.onCompleted?.({ ...landed });
       } else {
         this.apply({ type: state, id });
       }

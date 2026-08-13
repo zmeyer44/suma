@@ -329,6 +329,17 @@ async function startServices(ctx: {
     if (!chrome.isDestroyed()) chrome.send(channel, payload);
   };
 
+  // The floating overlay is its own WebContentsView (shell-window.ts) — the
+  // card stack lives there, not in the chrome, so it stays visible above the
+  // page without raising the chrome.
+  const emitPreview = <C extends EventChannel>(
+    channel: C,
+    payload: SumaEventMap[C],
+  ): void => {
+    const wc = win.savePreviewWebContents;
+    if (!wc.isDestroyed()) wc.send(channel, payload);
+  };
+
   // The app-level updater, reaching this account graph's chrome. The
   // unsubscribe belongs to teardown — a sign-out must not leave the old
   // graph's emitter attached.
@@ -411,6 +422,11 @@ async function startServices(ctx: {
     store,
     emit: (items) => emit("downloads:updated", items),
     downloadsDir: () => app.getPath("downloads"),
+    // The completion card goes to the floating overlay, NOT the chrome: a
+    // download finishes while the user is on a page, and the chrome renders
+    // below the tab views, so a card drawn there would be invisible exactly
+    // when it matters.
+    onCompleted: (item) => emitPreview("downloadOverlay:completed", item),
   });
   spaces.onSessionCreated((ses, spaceId) => downloads.attachTo(ses, spaceId));
 
@@ -584,17 +600,6 @@ async function startServices(ctx: {
   });
 
   /* ------------------- Saves: smart bookmarking (double-Shift) ------------ */
-
-  // The preview overlay is its own WebContentsView (shell-window.ts) — the
-  // card stack lives there, not in the chrome, so it stays visible above the
-  // page without raising the chrome.
-  const emitPreview = <C extends EventChannel>(
-    channel: C,
-    payload: SumaEventMap[C],
-  ): void => {
-    const wc = win.savePreviewWebContents;
-    if (!wc.isDestroyed()) wc.send(channel, payload);
-  };
 
   /* --------------------------- Voice assistant ---------------------------- */
 
