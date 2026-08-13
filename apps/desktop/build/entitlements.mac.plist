@@ -14,8 +14,8 @@
     NOTE: verify after signing that $(AppIdentifierPrefix) was expanded
     (codesign historically does not expand Xcode variables):
       codesign -d --entitlements - dist/mac-arm64/Suma.app | grep webauthn
-    If it shows the literal "$(AppIdentifierPrefix)", replace it here with
-    your team id prefix, e.g. ABCDE12345.com.sumabrowser.app.webauthn.
+    Hardcoded to team PHSRT54C87 (2026-08-13): electron-builder passes this
+    plist to codesign verbatim — $(AppIdentifierPrefix) never expands here.
 -->
 <plist version="1.0">
   <dict>
@@ -31,7 +31,7 @@
     <true/>
     <key>keychain-access-groups</key>
     <array>
-      <string>$(AppIdentifierPrefix)com.sumabrowser.app.webauthn</string>
+      <string>PHSRT54C87.com.sumabrowser.app.webauthn</string>
     </array>
   </dict>
 </plist>
