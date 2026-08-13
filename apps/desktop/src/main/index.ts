@@ -20,6 +20,7 @@ import {
   type Session,
 } from "electron";
 import type { EventChannel, SumaEventMap } from "../shared/ipc";
+import { settingsUrl } from "../shared/internal-pages";
 import type { SavedItem } from "../shared/saves";
 import { applyDevDockIcon } from "./app-icon";
 import { AuditService } from "./audit-service";
@@ -80,6 +81,7 @@ import { SpaceManager } from "./spaces";
 import { SyncService } from "./sync/service";
 import { isAllowedTabUrl, NEW_TAB_URL } from "./tab-policy";
 import { TabManager } from "./tabs";
+import { UpdateService } from "./updates/update-service";
 import { VoiceService } from "./voice/voice-service";
 import { WebAuthnService } from "./webauthn";
 import { resolveWorkspaceRoot, WorkspaceFsService } from "./workspace-fs";
@@ -99,12 +101,22 @@ interface AppInstance {
   noteClientCertificate: (url: string) => void;
   newTab: () => void;
   openFiles: () => void;
+  /** Open suma://settings/about — the menu's Check for Updates… lands there. */
+  openAboutSettings: () => void;
   /** Every webContents' before-input-event — the double-Shift save gesture. */
   noteKeyInput: (input: Input) => void;
 }
 
 let shell: ShellWindow | null = null;
 let live: AppInstance | null = null;
+/**
+ * App self-updates — APP-level like the window and the menu, never rebuilt
+ * with the account graph: electron-updater's autoUpdater is a process
+ * singleton, and a per-account service would stack duplicate listeners on it
+ * across sign-outs. Graphs subscribe in `startServices`, unsubscribe in
+ * their teardown.
+ */
+const updates = new UpdateService();
 /** Whether --disable-quic was appended before app ready — gates proxying (§8.4). */
 let quicDisabledAtStartup = false;
 
@@ -229,7 +241,10 @@ async function bootstrap(): Promise<void> {
   app.on("select-client-certificate", (_event, _webContents, url) => {
     live?.noteClientCertificate(url);
   });
-  app.on("before-quit", () => live?.teardown({ leavingAccount: false }));
+  app.on("before-quit", () => {
+    updates.stop();
+    live?.teardown({ leavingAccount: false });
+  });
 
   buildMenu({
     newTab: () => {
@@ -243,7 +258,17 @@ async function bootstrap(): Promise<void> {
     // The Files page has no IPC channel of its own to open it (the Phase-3
     // contract is files/transfers only), so the menu is how it opens.
     openFiles: () => live?.openFiles(),
+    // The menu answer to "am I on the latest?": kick a check and land on the
+    // About page, where the state (and the restart button) lives.
+    checkForUpdates: () => {
+      updates.check();
+      live?.openAboutSettings();
+      win.focusChrome();
+    },
   });
+
+  // Packaged builds start the check cadence; dev builds stay `unsupported`.
+  updates.start();
 
   live = await startServices({ userData, win, filesSession });
 }
@@ -293,6 +318,13 @@ async function startServices(ctx: {
   ): void => {
     if (!chrome.isDestroyed()) chrome.send(channel, payload);
   };
+
+  // The app-level updater, reaching this account graph's chrome. The
+  // unsubscribe belongs to teardown — a sign-out must not leave the old
+  // graph's emitter attached.
+  const offUpdates = updates.onChanged((state) =>
+    emit("updates:changed", state),
+  );
 
   const popups = new PopupManager(win);
   // The Glance preview (shift-click / pinned-tab links). Its tab-opener is
@@ -923,6 +955,7 @@ async function startServices(ctx: {
     // Answer any pending ceremony before tearing down — an unanswered
     // select-webauthn-account leaves the page hanging.
     webauthn.cancelAll();
+    offUpdates();
     glance.close();
     popups.closeAll();
     filesWindow.close();
@@ -995,6 +1028,7 @@ async function startServices(ctx: {
     tts,
     chat,
     voice,
+    updates,
     devices,
     machines,
     terminals,
@@ -1033,6 +1067,11 @@ async function startServices(ctx: {
       if (active !== null) tabs.create({ spaceId: active });
     },
     openFiles: () => filesWindow.open(),
+    openAboutSettings: () => {
+      const active = spaces.activeSpaceId;
+      if (active !== null)
+        tabs.create({ spaceId: active, url: settingsUrl("about") });
+    },
     noteKeyInput: (input) => {
       // Chromium hands the browser-side pre-handler a RawKeyDown for physical
       // presses — "keyDown" alone would miss every real keystroke.
@@ -1057,13 +1096,35 @@ interface MenuActions {
   newTab: () => void;
   toggleCommandBar: () => void;
   openFiles: () => void;
+  checkForUpdates: () => void;
 }
 
 /** Cmd+T / Cmd+K plus standard Edit/Window roles — copy/paste must work (§8.1). */
 function buildMenu(actions: MenuActions): void {
   const template: MenuItemConstructorOptions[] = [
+    // The stock appMenu role, re-spelled only to slot Check for Updates…
+    // where every Mac app keeps it, under About.
     ...(process.platform === "darwin"
-      ? [{ role: "appMenu" } as MenuItemConstructorOptions]
+      ? [
+          {
+            role: "appMenu",
+            submenu: [
+              { role: "about" },
+              {
+                label: "Check for Updates…",
+                click: () => actions.checkForUpdates(),
+              },
+              { type: "separator" },
+              { role: "services" },
+              { type: "separator" },
+              { role: "hide" },
+              { role: "hideOthers" },
+              { role: "unhide" },
+              { type: "separator" },
+              { role: "quit" },
+            ],
+          } as MenuItemConstructorOptions,
+        ]
       : []),
     {
       label: "File",

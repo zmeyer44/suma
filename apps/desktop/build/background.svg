@@ -1,0 +1,19 @@
+<!-- DMG installer ground, drawn deterministically (the AI-generated original
+     from scripts/generate-dmg-background.mjs is equivalent; either works).
+     Finder composites the real app icon (center x=170) and the Applications
+     alias (x=490) on top at y=200 — electron-builder.yml positions them —
+     so this draws only the ground, the arrow between them, and the label. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
+  <rect width="660" height="400" fill="#F3F1EA"/>
+  <g stroke="#1A1A1A" stroke-opacity="0.04" stroke-width="1">
+    <path d="M0 20H660 M0 60H660 M0 100H660 M0 140H660 M0 180H660 M0 220H660 M0 260H660 M0 300H660 M0 340H660 M0 380H660"/>
+    <path d="M20 0V400 M60 0V400 M100 0V400 M140 0V400 M180 0V400 M220 0V400 M260 0V400 M300 0V400 M340 0V400 M380 0V400 M420 0V400 M460 0V400 M500 0V400 M540 0V400 M580 0V400 M620 0V400"/>
+  </g>
+  <g fill="#4353D9">
+    <rect x="268" y="194" width="94" height="12"/>
+    <path d="M362 182 L392 200 L362 218 Z"/>
+  </g>
+  <text x="330" y="72" text-anchor="middle" fill="#4353D9"
+        font-family="Helvetica Neue"
+        font-size="13" font-weight="600" letter-spacing="6">DRAG TO APPLICATIONS</text>
+</svg>

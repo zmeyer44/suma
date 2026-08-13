@@ -23,6 +23,7 @@ import { settingsUrl, SETTINGS_URL } from "../../../../shared/internal-pages";
 import { useSumaStore } from "../../store";
 import { SumaMark } from "../ui/suma-mark";
 import { SettingsNav } from "./SettingsNav";
+import { AboutPage } from "./sections/about";
 import { AppearancePage } from "./sections/appearance";
 import { AssistantPage } from "./sections/assistant";
 import {
@@ -61,6 +62,7 @@ const PAGES: Record<SettingsSection, () => React.ReactElement> = {
   "account/sync": SyncPage,
   "account/recovery": RecoveryPage,
   import: ImportPage,
+  about: AboutPage,
 };
 
 export function SettingsPage({

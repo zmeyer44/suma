@@ -72,14 +72,29 @@ A first signed release without DRM can skip this section.
 ## 3. Build
 
 ```sh
-pnpm --filter @suma/desktop dist:mac:prod
+# Bump the version first — electron-builder tags the GitHub release v<version>
+# and electron-updater compares against it, so shipping the same version twice
+# is a no-op for existing installs.
+#   edit apps/desktop/package.json "version"
+
+pnpm --filter @suma/desktop dist:mac:prod    # build only, publish nothing
 ```
 
 This runs `electron-vite build`, packages with the hardened runtime and
 entitlements, signs every binary with the Developer ID identity, submits to
 Apple's notary service, and staples the ticket. Notarization typically takes
-1–15 minutes; electron-builder waits. Output:
-`apps/desktop/dist/Suma-<version>-arm64.dmg`.
+1–15 minutes; electron-builder waits. Output in `apps/desktop/dist/`:
+
+- `Suma-<version>-arm64.dmg` — what people download from the site
+- `Suma-<version>-arm64-mac.zip` (+ `.blockmap`) — what the auto-updater
+  consumes (Squirrel.Mac updates from a zip, never a dmg)
+- `latest-mac.yml` — the update feed manifest pointing at the zip
+
+If the Widevine step (§2) is in play, note that `castlabs_evs.vmp sign-pkg`
+re-signs the already-packaged `.app` — the dmg/zip built *before* that step
+don't contain the VMP signature. Run the VMP signing from an electron-builder
+`afterSign` hook instead, so the artifacts (and therefore every auto-update)
+carry it.
 
 ## 4. Verify before shipping
 
@@ -101,15 +116,65 @@ If the webauthn grep prints a literal `$(AppIdentifierPrefix)`, edit
 `ABCDE12345.com.sumabrowser.app.webauthn` form and rebuild — Touch ID
 passkeys silently fail without the resolved group (docs/auth-flows.md).
 
-## 5. Publish
+## 5. Publish — GitHub Releases is the update feed
 
-Upload the DMG wherever releases live and point the marketing site at it:
-set `SUMA_MAC_DMG_URL=https://…/Suma-<version>-arm64.dmg` in the `apps/www`
-deployment. The `/download` button follows `/download/macos`, which 302s to
-that URL (falls back to `public/downloads/` for local dev).
+Releases live on the public `zmeyer44/suma` repo: `electron-builder.yml`'s
+`publish` block is baked into the app as `app-update.yml`, so every packaged
+build knows to look there. Because the repo is public, running apps need no
+token to check or download.
+
+```sh
+export GH_TOKEN=<a token with repo scope on zmeyer44/suma>
+pnpm --filter @suma/desktop release:mac
+```
+
+Same build as §3, then uploads the dmg, zip, blockmap, and `latest-mac.yml`
+to a **draft** GitHub release tagged `v<version>`. Drafts are invisible to
+the updater — installed apps see nothing until the release is published, so:
+
+1. Verify the draft's assets (all four files present).
+2. Drag-install the dmg on a clean machine, run §4's checks.
+3. Publish the release on GitHub. Within four hours (or on their next
+   launch, or via Suma menu → Check for Updates…) every install downloads it
+   in the background and swaps it in on quit. Settings → About & updates
+   shows the cycle and offers "Restart to update".
+
+Then point the marketing site at the new dmg: set
+`SUMA_MAC_DMG_URL=https://github.com/zmeyer44/suma/releases/download/v<version>/Suma-<version>-arm64.dmg`
+in the `apps/www` deployment. The `/download` button follows
+`/download/macos`, which 302s to that URL (falls back to `public/downloads/`
+for local dev).
+
+### How the auto-update works (and its edges)
+
+- The client is `electron-updater` in main
+  (`apps/desktop/src/main/updates/update-service.ts`): check ~20s after
+  launch and every 4h, download silently, install on quit; the About page
+  and the app menu are the only UI. macOS updates require the app to be
+  Developer ID-signed — the unsigned `dist:mac` build reports "This build
+  isn't signed for automatic updates" and that is correct behavior.
+- **Installs that predate the updater** (anything ≤ 0.1.0) have no updater
+  to run — those users must download the next dmg by hand once. Every
+  install from then on self-updates.
+- **Staged rollout**: after publishing, you can edit `latest-mac.yml` on the
+  release to add `stagingPercentage: 10` — electron-updater rolls the dice
+  per install. Raise it as confidence grows.
+- **Rollback**: publishing a new release with a higher version is the only
+  rollback path — installs never downgrade (`allowDowngrade` is off).
 
 ## Regenerating the DMG art
 
-- App icon: `apps/desktop/scripts/build-icons.mjs`
-- Installer background: `apps/desktop/scripts/generate-dmg-background.mjs`
+The SVG sources are committed (`build/icon.svg`, `build/background.svg`);
+the rasters they produce are gitignored and must be regenerated on a fresh
+clone before packaging:
+
+- App icon: `node apps/desktop/scripts/build-icons.mjs` (rasterizes
+  `build/icon.svg` — the site mark from `apps/www/public/mark.svg` refit to
+  the macOS icon grid — into `icon.png` + `icon.icns`; needs ImageMagick)
+- Installer background, deterministic path (used for 0.0.1):
+  `rsvg-convert -w 1320 -h 800 build/background.svg -o build/background@2x.png`
+  then `magick build/background@2x.png -resize 660x400 build/background.png`
+  (`brew install librsvg imagemagick`)
+- Installer background, AI path (the original art direction):
+  `apps/desktop/scripts/generate-dmg-background.mjs`
   (needs `AI_GATEWAY_API_KEY`; writes `build/background.png` + `@2x`)

@@ -41,6 +41,7 @@ import type { AuditService } from "./audit-service";
 import type { SpeakRequest, TtsService } from "./audio/tts-service";
 import type { ChatRunEmitter, ChatService } from "./chat/chat-service";
 import type { VoiceService } from "./voice/voice-service";
+import type { UpdateService } from "./updates/update-service";
 import type { AuthService } from "./auth-service";
 import type { MachineService } from "./compute/machine-service";
 import type { PortsService } from "./compute/ports-service";
@@ -93,6 +94,8 @@ export interface IpcDeps {
   chat: ChatService;
   /** The voice assistant — wake word + Gemini Live session in main. */
   voice: VoiceService;
+  /** App self-updates — app-level singleton, outlives sign-out (§8.2). */
+  updates: UpdateService;
   devices: DeviceCollaborationService;
   machines: MachineService;
   terminals: TerminalService;
@@ -759,6 +762,19 @@ export function registerIpc(deps: IpcDeps): void {
   handlePreview("voice:stop", () => deps.voice.stopSession());
 
   /* ------------------------------- devices ------------------------------ */
+
+  /* ------------------------------ app updates ---------------------------- */
+
+  handle("updates:state", () => deps.updates.state());
+  // Kick the check and answer with the state as of the kick; the transitions
+  // stream back as updates:changed events.
+  handle("updates:check", () => {
+    deps.updates.check();
+    return deps.updates.state();
+  });
+  handle("updates:install", () => {
+    deps.updates.install();
+  });
 
   handle("devices:list", () => deps.devices.list(true));
 

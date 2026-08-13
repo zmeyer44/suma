@@ -14,6 +14,7 @@ import {
   Clock,
   Globe,
   Import,
+  Info,
   KeyRound,
   Zap,
   Laptop,
@@ -179,6 +180,17 @@ export const SETTINGS_NAV: NavSection[] = [
         section: "import",
         label: "Import & migrate",
         note: "Chrome or Arc",
+      },
+    ],
+  },
+  {
+    key: "app",
+    items: [
+      {
+        key: "about",
+        icon: Info,
+        section: "about",
+        note: "Version, updates",
       },
     ],
   },

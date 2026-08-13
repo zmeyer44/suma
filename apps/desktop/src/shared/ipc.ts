@@ -48,6 +48,7 @@ import type {
   TtsSettingsPatch,
   TtsVoice,
 } from "./tts";
+import type { UpdateState } from "./updates";
 import type {
   VoiceAudioInArgs,
   VoiceAudioOutEvent,
@@ -637,6 +638,18 @@ export interface SumaInvokeMap {
   /** End the conversation; the assistant returns to armed listening. */
   "voice:stop": { args: void; result: void };
 
+  /**
+   * App self-updates (shared/updates.ts). The updater runs in MAIN
+   * (main/updates/update-service.ts) against the GitHub releases feed; the
+   * About settings page renders the state and can only nudge it — kick off
+   * a check, or restart into an already-downloaded version.
+   */
+  "updates:state": { args: void; result: UpdateState };
+  /** Fire-and-forget; progress arrives via `updates:changed`. */
+  "updates:check": { args: void; result: UpdateState };
+  /** Quit and swap in the staged build. No-op unless phase is `ready`. */
+  "updates:install": { args: void; result: void };
+
   "devices:list": { args: void; result: ConnectedDeviceInfo[] };
   "devices:rename": {
     args: { deviceId: string; name: string };
@@ -1025,6 +1038,9 @@ export interface SumaEventMap {
   "voice:audioOut": VoiceAudioOutEvent;
   /** To the overlay: barge-in — drop every scheduled reply chunk now. */
   "voice:interrupted": void;
+
+  /** The updater moved (checking/downloading/ready/…) — About page repaints. */
+  "updates:changed": UpdateState;
   "spaces:updated": SpaceInfo[];
   "sync:statusChanged": SyncStatus;
   "health:changed": PlaneHealth;
@@ -1187,6 +1203,9 @@ export const INVOKE_CHANNELS: ReadonlyArray<InvokeChannel> = [
   "tts:voices",
   "tts:speak",
   "tts:cancel",
+  "updates:state",
+  "updates:check",
+  "updates:install",
   "devices:list",
   "devices:rename",
   "workspaceSync:get",
@@ -1304,6 +1323,7 @@ export const EVENT_CHANNELS: ReadonlyArray<EventChannel> = [
   "voice:transcript",
   "voice:audioOut",
   "voice:interrupted",
+  "updates:changed",
   "spaces:updated",
   "sync:statusChanged",
   "health:changed",

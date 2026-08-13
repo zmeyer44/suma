@@ -50,6 +50,7 @@ export const SETTINGS_SECTIONS = {
   "account/sync": "Sync",
   "account/recovery": "Recovery",
   import: "Import",
+  about: "About & updates",
 } as const;
 
 export type SettingsSection = keyof typeof SETTINGS_SECTIONS;

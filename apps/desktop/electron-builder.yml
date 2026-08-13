@@ -33,9 +33,25 @@ mac:
   category: public.app-category.productivity
   icon: build/icon.icns
   minimumSystemVersion: "14.0.0"
+  # DMG is what people download; ZIP is what the auto-updater consumes
+  # (Squirrel.Mac updates from a zip archive, never a dmg). Both must ship
+  # every release or electron-updater's latest-mac.yml has nothing to point at.
   target:
     - target: dmg
       arch: [arm64]
+    - target: zip
+      arch: [arm64]
+
+# Where released builds live and where running apps look for updates
+# (main/updates/update-service.ts). electron-builder bakes this into the
+# packaged app as app-update.yml and, on `--publish always`, uploads the
+# artifacts + latest-mac.yml to the zmeyer44/suma GitHub release for the
+# version being built (repo is public, so the update feed needs no token).
+# Runbook: docs/release-macos.md §5.
+publish:
+  provider: github
+  owner: zmeyer44
+  repo: suma
 
 dmg:
   # build/background.png (660x400) + background@2x.png — dmg-builder folds the
