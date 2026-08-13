@@ -26,7 +26,7 @@ import {
 } from "./selection-core";
 import type { ShellWindow } from "./shell-window";
 import type { SpaceManager } from "./spaces";
-import { focusAfterClose } from "./tab-focus";
+import { focusAfterClose, focusAfterSelect } from "./tab-focus";
 import {
   isAllowedTabTarget,
   isAllowedTabUrl,
@@ -358,17 +358,16 @@ export class TabManager {
     if (tab === undefined) throw new Error(`unknown tab ${tabId}`);
     if (tab.crashed || tab.discarded) this.revive(tab);
     tab.lastActiveAtMs = Date.now();
-    // Selecting the split-pane tab swaps the panes: it becomes the active
-    // (left) tab and the tab it displaces takes the split pane. Both stay
-    // visible; focus follows the click.
-    const previousActive = this.activeTabId(tab.spaceId);
-    if (
-      this.splitTabId(tab.spaceId) === tabId &&
-      previousActive !== null &&
-      previousActive !== tabId
-    ) {
-      this.store.setSplitTabFor(tab.spaceId, previousActive);
-    }
+    // Which panes survive the click is tab-focus.ts's rule: the split half
+    // swaps the panes, any other tab ends the split and fills the hole.
+    const prevSplit = this.splitTabId(tab.spaceId);
+    const focus = focusAfterSelect({
+      selectedId: tabId,
+      activeId: this.activeTabId(tab.spaceId),
+      splitId: prevSplit,
+    });
+    if (focus.splitId !== prevSplit)
+      this.store.setSplitTabFor(tab.spaceId, focus.splitId);
     this.setActive(tab.spaceId, tabId);
     this.store.publishCurrentWorkspaceFocus();
     this.emit(tab.spaceId);

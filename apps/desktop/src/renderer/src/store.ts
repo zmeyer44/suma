@@ -1295,9 +1295,24 @@ export const useSumaStore = create<SumaState>()((set, get) => {
     },
 
     selectTab: async (tabId) => {
-      set((s) => ({
-        tabs: s.tabs.map((t) => ({ ...t, active: t.id === tabId })),
-      }));
+      // Mirror main's rule (tabs.ts select) so the panes don't flash a wrong
+      // layout before the refresh: selecting a tab that is in neither pane of
+      // a split ends the split rather than displacing one of its tabs.
+      set((s) => {
+        const target = s.tabs.find((t) => t.id === tabId) ?? null;
+        const endsSplit =
+          target !== null &&
+          !target.active &&
+          !target.split &&
+          s.tabs.some((t) => t.split);
+        return {
+          tabs: s.tabs.map((t) => ({
+            ...t,
+            active: t.id === tabId,
+            split: endsSplit ? false : t.split,
+          })),
+        };
+      });
       await call("tabs:select", { tabId });
       await refreshTabs();
     },

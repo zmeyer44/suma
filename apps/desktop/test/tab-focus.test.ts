@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { focusAfterClose } from "../src/main/tab-focus";
+import { focusAfterClose, focusAfterSelect } from "../src/main/tab-focus";
 
 /**
  * A split holds exactly two tabs in two panes. Closing either one leaves a
@@ -80,5 +80,36 @@ describe("focusAfterClose", () => {
         splitId: null,
       }),
     ).toEqual({ activeId: null, splitId: null });
+  });
+});
+
+/**
+ * The split's two tabs are the only ones the layout is made of — clicking
+ * either one moves focus inside it, and clicking anything else leaves it.
+ */
+describe("focusAfterSelect", () => {
+  it("swaps the panes when the split half is selected", () => {
+    expect(
+      focusAfterSelect({ selectedId: "b", activeId: "a", splitId: "b" }),
+    ).toEqual({ activeId: "b", splitId: "a" });
+  });
+
+  it("keeps the split when the active half is selected", () => {
+    expect(
+      focusAfterSelect({ selectedId: "a", activeId: "a", splitId: "b" }),
+    ).toEqual({ activeId: "a", splitId: "b" });
+  });
+
+  it("ends the split when a tab outside it is selected", () => {
+    // "c" fills the hole on its own — it does NOT take "a"'s pane beside "b".
+    expect(
+      focusAfterSelect({ selectedId: "c", activeId: "a", splitId: "b" }),
+    ).toEqual({ activeId: "c", splitId: null });
+  });
+
+  it("just moves focus when there is no split", () => {
+    expect(
+      focusAfterSelect({ selectedId: "c", activeId: "a", splitId: null }),
+    ).toEqual({ activeId: "c", splitId: null });
   });
 });
