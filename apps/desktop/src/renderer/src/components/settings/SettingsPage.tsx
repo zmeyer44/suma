@@ -36,6 +36,7 @@ import { GeneralPage } from "./sections/general";
 import { ImportPage } from "./sections/import";
 import { NostrPage } from "./sections/nostr";
 import { VoicePage } from "./sections/voice";
+import { VoiceAssistantPage } from "./sections/voice-assistant";
 import {
   AuditPage,
   EgressPage,
@@ -49,6 +50,7 @@ const PAGES: Record<SettingsSection, () => React.ReactElement> = {
   favorites: FavoritesPage,
   voice: VoicePage,
   assistant: AssistantPage,
+  "voice-assistant": VoiceAssistantPage,
   privacy: SignInPage,
   nostr: NostrPage,
   "privacy/history": HistoryPage,

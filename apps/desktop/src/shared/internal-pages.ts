@@ -39,6 +39,7 @@ export const SETTINGS_SECTIONS = {
   favorites: "Favorite sites",
   voice: "Voice & audio",
   assistant: "Assistant",
+  "voice-assistant": "Voice assistant",
   privacy: "Sign-in & passkeys",
   nostr: "Nostr",
   "privacy/history": "Browsing history",

@@ -9,6 +9,7 @@ import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   app,
+  globalShortcut,
   Menu,
   nativeTheme,
   safeStorage,
@@ -79,6 +80,7 @@ import { SpaceManager } from "./spaces";
 import { SyncService } from "./sync/service";
 import { isAllowedTabUrl, NEW_TAB_URL } from "./tab-policy";
 import { TabManager } from "./tabs";
+import { VoiceService } from "./voice/voice-service";
 import { WebAuthnService } from "./webauthn";
 import { resolveWorkspaceRoot, WorkspaceFsService } from "./workspace-fs";
 import { resetWorkspaceHlc, WorkspaceStore } from "./workspace-store";
@@ -552,6 +554,42 @@ async function startServices(ctx: {
     if (!wc.isDestroyed()) wc.send(channel, payload);
   };
 
+  /* --------------------------- Voice assistant ---------------------------- */
+
+  // "Suma, …" — wake word + Gemini Live session in main; the overlay
+  // renderer (the same view that hosts the floating audio player, always
+  // alive and layered above the pages) owns the microphone, the speakers,
+  // and the HUD. Browser-tool permissions are the chat sidebar's own
+  // Assistant-page toggles, read per session.
+  const voice = new VoiceService({
+    userDataDir: userData,
+    browser: { spaces, tabs },
+    chatToolSettings: () => {
+      const info = chat.settings();
+      return { model: info.model, tools: info.tools };
+    },
+    emit: {
+      status: (status) => {
+        // Both surfaces: the overlay renders the HUD, the chrome's settings
+        // page shows a live status line.
+        emit("voice:statusChanged", status);
+        emitPreview("voice:statusChanged", status);
+      },
+      transcript: (event) => emitPreview("voice:transcript", event),
+      audioOut: (data) => emitPreview("voice:audioOut", { data }),
+      interrupted: () => emitPreview("voice:interrupted", undefined),
+    },
+  });
+
+  // Push-to-talk from anywhere on the Mac — the hands-free promise includes
+  // "without focusing Suma first". Inert while the assistant is disabled.
+  const VOICE_SHORTCUT = "Alt+Space";
+  try {
+    globalShortcut.register(VOICE_SHORTCUT, () => voice.toggleSession());
+  } catch (err) {
+    console.error("suma voice: could not register the shortcut:", err);
+  }
+
   // Rides the TTS service's Vercel gateway key (read per save, so adding one
   // in settings upgrades the next save); with no key, saves still land from
   // the page's own og tags.
@@ -894,6 +932,8 @@ async function startServices(ctx: {
     saves.stop();
     videos.stop();
     chat.stopAll();
+    voice.stop();
+    globalShortcut.unregister(VOICE_SHORTCUT);
     tts.stop();
     ports.stop();
     machines.stop();
@@ -954,6 +994,7 @@ async function startServices(ctx: {
     credentials,
     tts,
     chat,
+    voice,
     devices,
     machines,
     terminals,

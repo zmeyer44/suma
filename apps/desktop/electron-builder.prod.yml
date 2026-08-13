@@ -14,5 +14,5 @@ mac:
   entitlementsInherit: build/entitlements.mac.inherit.plist
   notarize: true
   extendInfo:
-    NSMicrophoneUsageDescription: "Sites you visit can ask to use the microphone."
+    NSMicrophoneUsageDescription: "Suma's voice assistant listens for your wake word and voice commands, and sites you visit can ask to use the microphone."
     NSCameraUsageDescription: "Sites you visit can ask to use the camera."

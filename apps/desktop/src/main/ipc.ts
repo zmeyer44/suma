@@ -36,9 +36,11 @@ import {
   type ChatSettingsPatch,
   type ChatToolGroupId,
 } from "../shared/chat";
+import type { VoiceSettingsPatch } from "../shared/voice";
 import type { AuditService } from "./audit-service";
 import type { SpeakRequest, TtsService } from "./audio/tts-service";
 import type { ChatRunEmitter, ChatService } from "./chat/chat-service";
+import type { VoiceService } from "./voice/voice-service";
 import type { AuthService } from "./auth-service";
 import type { MachineService } from "./compute/machine-service";
 import type { PortsService } from "./compute/ports-service";
@@ -89,6 +91,8 @@ export interface IpcDeps {
   tts: TtsService;
   /** The assistant's agent loop — model calls and browser tools in main. */
   chat: ChatService;
+  /** The voice assistant — wake word + Gemini Live session in main. */
+  voice: VoiceService;
   devices: DeviceCollaborationService;
   machines: MachineService;
   terminals: TerminalService;
@@ -716,6 +720,43 @@ export function registerIpc(deps: IpcDeps): void {
       requireString(requireRecord(args, "chat:stop")["requestId"], "requestId"),
     );
   });
+
+  /* ----------------------------- voice assistant ------------------------- */
+
+  // Settings come from the chrome (settings page); mic frames and session
+  // controls come from the overlay view (the HUD owns the microphone) — the
+  // same two-sender trust as the audioOverlay:* channels, so handlePreview.
+  handlePreview("voice:settings", () => deps.voice.settings());
+
+  handlePreview("voice:updateSettings", (args) => {
+    const a = optionalRecord(args);
+    const patch: VoiceSettingsPatch = {};
+    if (typeof a["enabled"] === "boolean") patch.enabled = a["enabled"];
+    if (typeof a["wakeWordEnabled"] === "boolean") {
+      patch.wakeWordEnabled = a["wakeWordEnabled"];
+    }
+    if (typeof a["wakeWord"] === "string") patch.wakeWord = a["wakeWord"];
+    if (typeof a["model"] === "string") patch.model = a["model"];
+    if (typeof a["voice"] === "string") patch.voice = a["voice"];
+    // The key crosses IPC exactly once, inward; voice:settings reports only
+    // whether one exists (the tts:updateSettings contract).
+    if (typeof a["apiKey"] === "string") patch.apiKey = a["apiKey"];
+    return deps.voice.updateSettings(patch);
+  });
+
+  handlePreview("voice:status", () => deps.voice.status());
+
+  handlePreview("voice:audio", (args) => {
+    const data = requireRecord(args, "voice:audio")["data"];
+    if (!(data instanceof Uint8Array)) {
+      throw new Error("voice:audio data must be a Uint8Array");
+    }
+    deps.voice.acceptAudio(data);
+  });
+
+  handlePreview("voice:start", () => deps.voice.startSession());
+
+  handlePreview("voice:stop", () => deps.voice.stopSession());
 
   /* ------------------------------- devices ------------------------------ */
 

@@ -48,6 +48,14 @@ import type {
   TtsSettingsPatch,
   TtsVoice,
 } from "./tts";
+import type {
+  VoiceAudioInArgs,
+  VoiceAudioOutEvent,
+  VoiceSettingsInfo,
+  VoiceSettingsPatch,
+  VoiceStatus,
+  VoiceTranscriptEvent,
+} from "./voice";
 
 /* ------------------------------------------------------------------ *
  * Data shapes
@@ -609,6 +617,26 @@ export interface SumaInvokeMap {
   "chat:start": { args: ChatStreamRequest; result: void };
   "chat:stop": { args: { requestId: string }; result: void };
 
+  /**
+   * The voice assistant (shared/voice.ts). The wake-word engine and the
+   * Gemini Live session run in MAIN (main/voice/voice-service.ts) — the key
+   * and the browser tools live there. The overlay renderer owns the
+   * microphone and the speakers: `voice:audio` carries 16 kHz PCM16 mic
+   * frames inward while the assistant is armed or in a session; reply audio
+   * comes back as `voice:audioOut` events. Settings calls come from the
+   * chrome (settings page); audio and session controls come from the overlay
+   * (HUD) — both senders are trusted for the voice:* channels.
+   */
+  "voice:settings": { args: void; result: VoiceSettingsInfo };
+  "voice:updateSettings": { args: VoiceSettingsPatch; result: VoiceSettingsInfo };
+  /** Pull on mount — status pushes sent before a surface existed are gone. */
+  "voice:status": { args: void; result: VoiceStatus };
+  "voice:audio": { args: VoiceAudioInArgs; result: void };
+  /** Start a conversation now (HUD tap — the push-to-talk path sans hotkey). */
+  "voice:start": { args: void; result: void };
+  /** End the conversation; the assistant returns to armed listening. */
+  "voice:stop": { args: void; result: void };
+
   "devices:list": { args: void; result: ConnectedDeviceInfo[] };
   "devices:rename": {
     args: { deviceId: string; name: string };
@@ -989,6 +1017,14 @@ export interface SumaEventMap {
   "chat:end": { requestId: string };
   /** The run failed; `message` is safe to show the user. */
   "chat:error": ChatErrorEvent;
+  /** The voice assistant's lifecycle moved (armed/connecting/active/off). */
+  "voice:statusChanged": VoiceStatus;
+  /** Live captions for the HUD — each line replaces the last for its role. */
+  "voice:transcript": VoiceTranscriptEvent;
+  /** To the overlay: one chunk of 24 kHz PCM16 reply audio to schedule. */
+  "voice:audioOut": VoiceAudioOutEvent;
+  /** To the overlay: barge-in — drop every scheduled reply chunk now. */
+  "voice:interrupted": void;
   "spaces:updated": SpaceInfo[];
   "sync:statusChanged": SyncStatus;
   "health:changed": PlaneHealth;
@@ -1140,6 +1176,12 @@ export const INVOKE_CHANNELS: ReadonlyArray<InvokeChannel> = [
   "chat:updateSettings",
   "chat:start",
   "chat:stop",
+  "voice:settings",
+  "voice:updateSettings",
+  "voice:status",
+  "voice:audio",
+  "voice:start",
+  "voice:stop",
   "tts:settings",
   "tts:updateSettings",
   "tts:voices",
@@ -1258,6 +1300,10 @@ export const EVENT_CHANNELS: ReadonlyArray<EventChannel> = [
   "chat:chunk",
   "chat:end",
   "chat:error",
+  "voice:statusChanged",
+  "voice:transcript",
+  "voice:audioOut",
+  "voice:interrupted",
   "spaces:updated",
   "sync:statusChanged",
   "health:changed",

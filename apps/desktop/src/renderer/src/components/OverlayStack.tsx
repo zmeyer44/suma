@@ -28,6 +28,7 @@ import { useEffect, useRef } from "react";
 import { FloatingAudioPlayer } from "./AudioPlayer";
 import { NostrApprovalOverlay } from "./NostrApprovalOverlay";
 import { SavePreviewOverlay } from "./SavePreviewOverlay";
+import { VoiceHud } from "./VoiceHud";
 
 export function OverlayStack() {
   const stackRef = useRef<HTMLDivElement>(null);
@@ -91,6 +92,11 @@ export function OverlayStack() {
         data-overlay-panel
         className="overlay-glass flex w-max flex-col items-end overflow-hidden rounded-xl border border-ink/15"
       >
+        {/* The voice assistant first: while a conversation is live it is the
+            row the user is talking to — and this row also OWNS the mic and
+            speakers for the feature (see VoiceHud.tsx), so it must live in
+            this always-alive view, not the chrome. */}
+        <VoiceHud />
         <FloatingAudioPlayer />
         {/* Approval cards above save cards: they are actionable and waiting
             on the user, while a save card is a receipt. */}

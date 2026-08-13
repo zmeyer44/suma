@@ -22,9 +22,12 @@ files:
   - "!out/**/*.map"
 
 # node-pty ships a native addon and a spawn-helper binary that must live on
-# the real filesystem, not inside the asar.
+# the real filesystem, not inside the asar; sherpa-onnx (the voice
+# assistant's on-device wake word) ships a native addon + dylibs the same way.
 asarUnpack:
   - "**/node_modules/node-pty/**"
+  - "**/node_modules/sherpa-onnx-node/**"
+  - "**/node_modules/sherpa-onnx-darwin-arm64/**"
 
 mac:
   category: public.app-category.productivity
