@@ -293,8 +293,107 @@ describe("rotating-auth lease gating", () => {
     expect(a.transport.leaseCalls[0]?.spaceId).toBe(spaceId);
   });
 
-  it("explicit deletes on rotating-auth origins publish without a lease", async () => {
+  it("explicit deletes propagate from the active writer, keeping their cause", async () => {
     const spaceId = "space-lease-3";
+    const clock = new ManualClock();
+    const a = await createEngine(spaceId, "dev-a", clock);
+
+    clock.tick(1);
+    // This write acquires the origin lease, making dev-a the active writer.
+    must(
+      await a.engine.localChange(
+        identityFor(spaceId),
+        attrsFor("v0"),
+        false,
+        "explicit",
+      ),
+    );
+    expect(a.transport.leaseCalls).toHaveLength(1);
+    clock.tick(1);
+    const del = must(
+      await a.engine.localChange(identityFor(spaceId), null, true, "explicit"),
+    );
+    expect(del.cause).toBe("EXPLICIT_DELETE");
+    expect(a.transport.published.map((r) => r.recordId)).toContain(
+      del.recordId,
+    );
+    expect(a.engine.queueDepth).toBe(0);
+  });
+
+  it("stale-session deletes on a passive device stay local and demote to EXPIRED", async () => {
+    const spaceId = "space-lease-passive-delete";
+    const clock = new ManualClock();
+    const a = await createEngine(spaceId, "dev-a", clock);
+    const b = await createEngine(spaceId, "dev-b", clock);
+    a.transport.leaseGranted = false; // another Mac owns this origin
+
+    clock.tick(1);
+    must(
+      await a.engine.localChange(
+        identityFor(spaceId),
+        attrsFor("stale-generation"),
+        false,
+        "explicit",
+      ),
+    );
+    const before = a.transport.published.length;
+
+    // The server kills dev-a's stale copy (Chromium reports an explicit
+    // clear). It must not cross the wire — it would sign the healthy Mac out.
+    clock.tick(1);
+    const del = must(
+      await a.engine.localChange(identityFor(spaceId), null, true, "explicit"),
+    );
+    expect(a.transport.published).toHaveLength(before);
+    expect(a.engine.queueDepth).toBe(0);
+    expect(del.cause).toBe("EXPIRED");
+    expect(must(a.engine.getRecord(del.recordId)).plain.deleted).toBe(true);
+
+    // No EXPLICIT fence: the healthy Mac's next rotation — whose ancestry
+    // never saw dev-a's local tombstone — wins back by plain LWW instead of
+    // being resurrection-blocked for the tombstone retention window.
+    clock.tick(1);
+    const rotated = must(
+      await b.engine.localChange(
+        identityFor(spaceId),
+        attrsFor("fresh-rotation"),
+        false,
+        "explicit",
+      ),
+    );
+    expect(await a.engine.applyRemote([rotated])).toEqual(["applied"]);
+    expect(a.applier.applied.at(-1)?.plain.attributes?.value).toBe(
+      "fresh-rotation",
+    );
+  });
+
+  it("passive rotating-auth deletes do not queue offline for later replay", async () => {
+    const spaceId = "space-lease-offline-delete";
+    const clock = new ManualClock();
+    const a = await createEngine(spaceId, "dev-a", clock);
+
+    clock.tick(1);
+    must(
+      await a.engine.localChange(
+        identityFor(spaceId),
+        attrsFor("v0"),
+        false,
+        "explicit",
+      ),
+    );
+    // Going offline releases the lease — a wake-after-sleep Mac is a passive
+    // device, and its stale-death deletions must not drain onto the hub later.
+    a.engine.setOnline(false);
+    clock.tick(1);
+    const del = must(
+      await a.engine.localChange(identityFor(spaceId), null, true, "explicit"),
+    );
+    expect(del.cause).toBe("EXPIRED");
+    expect(a.engine.queueDepth).toBe(0);
+  });
+
+  it("explicit-intent deletions (manual state push) bypass the writer guard", async () => {
+    const spaceId = "space-lease-push-delete";
     const clock = new ManualClock();
     const a = await createEngine(spaceId, "dev-a", clock);
     a.transport.leaseGranted = false;
@@ -308,15 +407,16 @@ describe("rotating-auth lease gating", () => {
         "explicit",
       ),
     );
-    expect(a.engine.queueDepth).toBe(0);
     clock.tick(1);
     const del = must(
-      await a.engine.localChange(identityFor(spaceId), null, true, "explicit"),
+      await a.engine.localChange(identityFor(spaceId), null, true, "explicit", {
+        explicitIntent: true,
+      }),
     );
+    expect(del.cause).toBe("EXPLICIT_DELETE");
     expect(a.transport.published.map((r) => r.recordId)).toContain(
       del.recordId,
     );
-    expect(a.engine.queueDepth).toBe(0);
   });
 
   it("going offline releases held leases", async () => {

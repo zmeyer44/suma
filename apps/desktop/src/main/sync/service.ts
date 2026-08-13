@@ -43,6 +43,7 @@ import type { WorkspaceStore } from "../workspace-store";
 import { attachCookieCapture, type CookieCapture } from "./capture";
 import { attributesForCookie, identityForCookie } from "./cookie-map";
 import { ElectronCookieApplier } from "./cookie-applier";
+import { partitionLiveRecords } from "./live-partition";
 import {
   LoopbackTransport,
   WsTransport,
@@ -136,7 +137,9 @@ export class SyncService {
           if (state === "connected") {
             // Only the first linked-device hydration gates browsing and
             // applies automatically. Reconnect/live snapshots are staged for
-            // the explicit Sync control, avoiding races with a running site.
+            // the explicit Sync control, avoiding races with a running site —
+            // except rotating-auth origins, which onRecords applies live
+            // because a staged rotation is a dead session (see live-partition).
             if (!space.hasHydratedOnce && !space.hydrating) {
               space.hydrating = true;
               void space.engine.beginHydration();
@@ -166,7 +169,7 @@ export class SyncService {
         );
         if (space !== undefined && records.length > 0) {
           if (space.hasHydratedOnce) {
-            let changed = false;
+            const candidates: CookieRecordWire[] = [];
             for (const record of records) {
               // Hub echoes of this device's own acknowledged publish are not
               // remote work and must not light the sync button.
@@ -178,16 +181,60 @@ export class SyncService {
               ) {
                 continue;
               }
-              const current = space.pendingRemoteRecords.get(record.recordId);
-              if (
-                current === undefined ||
-                compareHlc(record.hlc, current.hlc) > 0
-              ) {
-                space.pendingRemoteRecords.set(record.recordId, record);
-                changed = true;
-              }
+              candidates.push(record);
             }
-            if (changed) this.pushWorkspaceSyncStatus();
+            if (candidates.length === 0) return;
+            // Rotating-auth records must be applied live, not staged: the
+            // server retires the previous cookie generation on rotation, so
+            // holding it back signs this device out (the Mac-A-goes-stale
+            // incident). Cookie-jar writes are transparent to open tabs and
+            // per-record echo suppression absorbs the capture feedback, so no
+            // navigation gate or reload is needed. Queue behind recordQueue to
+            // serialize with hydration applies.
+            space.recordQueue = space.recordQueue
+              .then(async () => {
+                if (this.spaces.get(spaceId) !== space) return;
+                const { autoApply, stage } = await partitionLiveRecords(
+                  space.engine,
+                  candidates,
+                );
+                let stagedChanged = false;
+                for (const record of stage) {
+                  const current = space.pendingRemoteRecords.get(
+                    record.recordId,
+                  );
+                  if (
+                    current === undefined ||
+                    compareHlc(record.hlc, current.hlc) > 0
+                  ) {
+                    space.pendingRemoteRecords.set(record.recordId, record);
+                    stagedChanged = true;
+                  }
+                }
+                if (autoApply.length > 0) {
+                  autoApply.sort((a, b) => compareHlc(a.hlc, b.hlc));
+                  await space.engine.applyRemote(autoApply);
+                  console.log(
+                    `[suma cookie-sync] space ${spaceId}: live-applied ${autoApply.length} rotating-auth record(s)`,
+                  );
+                  for (const record of autoApply) {
+                    // A superseded staged copy of the same cookie must not
+                    // keep the sync pill lit or roll back on a later pull.
+                    const pending = space.pendingRemoteRecords.get(
+                      record.recordId,
+                    );
+                    if (
+                      pending !== undefined &&
+                      compareHlc(pending.hlc, record.hlc) <= 0
+                    ) {
+                      space.pendingRemoteRecords.delete(record.recordId);
+                      stagedChanged = true;
+                    }
+                  }
+                }
+                if (stagedChanged) this.pushWorkspaceSyncStatus();
+              })
+              .catch((err: unknown) => this.logError(err));
             return;
           }
           // Close the browser-load gate synchronously, before a following
@@ -788,7 +835,11 @@ export class SyncService {
       if (localRecordIds.has(record.recordId)) continue;
       const identity = await space.engine.inspectRemoteIdentity(record);
       if (identity === null) continue;
-      await space.engine.localChange(identity, null, true, "explicit");
+      // The user chose "push this Mac's state": these deletions are intent,
+      // not server churn, so they bypass the rotating-auth writer guard.
+      await space.engine.localChange(identity, null, true, "explicit", {
+        explicitIntent: true,
+      });
     }
     space.pendingRemoteRecords.clear();
     await this.seedExistingCookies(space, undefined, true);

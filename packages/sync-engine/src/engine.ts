@@ -25,6 +25,14 @@
  *     the server TTL), policy gating, offline queue with HLC-ordered drain,
  *     tombstone GC with retention, per-origin snapshot/rollback, and
  *     optional device-signature verification of remote records.
+ *   - Rotating-auth deletions are writer-scoped: only the device holding the
+ *     origin lease may propagate them. On a passive device, cookie deletions
+ *     for a rotating-auth origin are overwhelmingly the server killing a
+ *     STALE generation (the active device rotated; this copy died), so they
+ *     stay local and EXPLICIT_DELETE demotes to EXPIRED — no resurrection
+ *     fence — letting the peer's live session win back by plain LWW instead
+ *     of being blocked for the tombstone retention window. An explicit-intent
+ *     flag (manual "push this Mac's state") bypasses the guard.
  */
 
 import {
@@ -239,11 +247,12 @@ export class SpaceSyncEngine {
     attrs: CookieAttributes | null,
     removed: boolean,
     chromiumCause: string,
+    opts: { explicitIntent?: boolean } = {},
   ): Promise<CookieRecordWire | null> {
     if (identity.spaceId !== this.spaceId) {
       throw new Error("cookie identity belongs to another space");
     }
-    const cause = causeForChange(chromiumCause, removed);
+    let cause = causeForChange(chromiumCause, removed);
     if (cause === null) return null;
     if (!removed && attrs === null) {
       throw new Error(
@@ -258,6 +267,34 @@ export class SpaceSyncEngine {
     const recordId = await computeRecordIdHex(this.keys.idKey, identity);
     if (this.consumeEcho(recordId, plain)) return null;
     if (!this.isSynced(identity.hostKey)) return null;
+    const policy = matchOriginPolicy(
+      this.policies,
+      normalizedHost(identity.hostKey),
+    );
+    // Writer-scoped deletions (see header): on a rotating-auth origin, a
+    // deletion observed while this device is NOT the active writer is almost
+    // always the server retiring a stale generation, not user intent. It must
+    // neither propagate (it would sign the healthy device out) nor leave an
+    // EXPLICIT fence (it would resurrection-block the peer's live session for
+    // the whole tombstone retention window). Record it locally as EXPIRED so
+    // the peer's next rotation wins back by plain LWW.
+    let localOnly = false;
+    if (
+      policy.rotatingAuth &&
+      DELETION_CAUSES.has(cause) &&
+      opts.explicitIntent !== true
+    ) {
+      const originId = await computeOriginIdHex(
+        this.keys.idKey,
+        this.spaceId,
+        identity.hostKey,
+      );
+      const grant = this.grantedLeases.get(originId);
+      if (grant === undefined || grant <= this.nowFn()) {
+        localOnly = true;
+        if (cause === "EXPLICIT_DELETE") cause = "EXPIRED";
+      }
+    }
     const hlc = this.clock.send();
     const current = this.records.get(recordId);
     const causalParent = current
@@ -275,12 +312,10 @@ export class SpaceSyncEngine {
     this.noteFence(wire);
     if (DELETION_CAUSES.has(cause)) this.noteTombstone(wire, plain);
     this.store(wire, plain);
-    const policy = matchOriginPolicy(
-      this.policies,
-      normalizedHost(identity.hostKey),
-    );
-    const needsLease = policy.rotatingAuth && !DELETION_CAUSES.has(cause);
-    await this.publishOrQueue(wire, needsLease);
+    if (!localOnly) {
+      const needsLease = policy.rotatingAuth && !DELETION_CAUSES.has(cause);
+      await this.publishOrQueue(wire, needsLease);
+    }
     await this.retryParked(recordId);
     return wire;
   }
