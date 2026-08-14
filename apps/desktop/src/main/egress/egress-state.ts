@@ -23,6 +23,9 @@ import type { EgressStatus } from "../../shared/ipc";
 export interface StoredSpaceEgress {
   siteBypass: string[];
   mediaBypass: boolean;
+  /** Hosted checkout bypass. Absent in workspaces written before it existed —
+   *  read through the default (on) rather than treated as off. */
+  checkoutBypass?: boolean;
 }
 
 export function buildSpaceEgressConfig(
@@ -30,6 +33,8 @@ export function buildSpaceEgressConfig(
   policy: "suma-ip" | "direct",
   stored: StoredSpaceEgress | null,
   temporaryDirectOverride: boolean,
+  /** Merchant-branded checkout hosts detected this session (in-memory, §8.4). */
+  detectedCheckoutHosts: ReadonlyArray<string> = [],
 ): SpaceEgressConfig {
   const base = defaultSpaceEgress(spaceId);
   return {
@@ -37,6 +42,8 @@ export function buildSpaceEgressConfig(
     policy,
     siteBypass: stored === null ? [...base.siteBypass] : [...stored.siteBypass],
     mediaBypass: stored === null ? base.mediaBypass : stored.mediaBypass,
+    checkoutBypass: stored?.checkoutBypass ?? base.checkoutBypass,
+    detectedCheckoutHosts: [...detectedCheckoutHosts],
     temporaryDirectOverride,
   };
 }
@@ -57,6 +64,8 @@ export function egressStatusFor(
     gateway,
     temporaryDirectOverride: config.temporaryDirectOverride,
     mediaBypass: config.mediaBypass,
+    checkoutBypass: config.checkoutBypass,
+    detectedCheckoutHosts: [...config.detectedCheckoutHosts],
     siteBypass: [...config.siteBypass],
     // Not "failing closed" when the reason is a pending restart — the space
     // simply isn't proxied yet, and restartRequired says so explicitly.

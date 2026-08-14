@@ -7,7 +7,11 @@ import { CredentialFill } from "./components/CredentialFill";
 import { DownloadsPanel } from "./components/DownloadsPanel";
 import { GlanceOverlay } from "./components/GlanceOverlay";
 import { ImagePreviewModal } from "./components/ImagePreviewModal";
-import { BypassSuggestions, EgressBanner } from "./components/EgressBanner";
+import {
+  BypassSuggestions,
+  CheckoutBypassNotices,
+  EgressBanner,
+} from "./components/EgressBanner";
 import { MigrationWizard } from "./components/MigrationWizard";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { NostrRequestPanel } from "./components/NostrRequestPanel";
@@ -182,6 +186,7 @@ export function App() {
           clicks from the page. */}
       <div className="pointer-events-none fixed bottom-3 left-3 z-50 flex w-[320px] flex-col gap-2">
         <BypassSuggestions />
+        <CheckoutBypassNotices />
         {/* Last in the column so the toast pile grows up from the corner.
             Its viewport collapses to zero height when empty. */}
         <Toaster />

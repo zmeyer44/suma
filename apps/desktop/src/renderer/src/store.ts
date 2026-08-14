@@ -114,6 +114,15 @@ export interface BypassSuggestion {
   reason: string;
 }
 
+/** A hosted checkout page already routed direct (§8.4) — a notice, not an
+ *  offer: a proxied checkout is rejected before it can render, so there is no
+ *  version of the page the user could have looked at and decided about. */
+export interface CheckoutBypassNotice {
+  spaceId: string;
+  host: string;
+  label: string;
+}
+
 export interface OriginPopoverAnchor {
   host: string;
   /** Viewport coordinates of the dot that opened the popover. */
@@ -207,6 +216,7 @@ interface SumaState {
   ports: PortForwardInfo[];
   egressBySpace: Record<string, EgressStatus>;
   bypassSuggestions: BypassSuggestion[];
+  checkoutBypassNotices: CheckoutBypassNotice[];
   audit: AuditEntry[];
   auditLoaded: boolean;
 
@@ -534,6 +544,7 @@ interface SumaState {
     host: string,
   ) => Promise<EgressDecisionInfo | undefined>;
   dismissBypassSuggestion: (spaceId: string, host: string) => void;
+  dismissCheckoutBypassNotice: (spaceId: string, host: string) => void;
   refreshAudit: () => Promise<void>;
 }
 
@@ -838,6 +849,7 @@ export const useSumaStore = create<SumaState>()((set, get) => {
     ports: [],
     egressBySpace: {},
     bypassSuggestions: [],
+    checkoutBypassNotices: [],
     audit: [],
     auditLoaded: false,
 
@@ -1049,6 +1061,16 @@ export const useSumaStore = create<SumaState>()((set, get) => {
                   ),
               ),
               suggestion,
+            ],
+          })),
+        ),
+        window.suma.on("egress:checkoutBypassed", (notice) =>
+          set((s) => ({
+            checkoutBypassNotices: [
+              ...s.checkoutBypassNotices.filter(
+                (n) => !(n.spaceId === notice.spaceId && n.host === notice.host),
+              ),
+              notice,
             ],
           })),
         ),
@@ -2015,6 +2037,13 @@ export const useSumaStore = create<SumaState>()((set, get) => {
       set((s) => ({
         bypassSuggestions: s.bypassSuggestions.filter(
           (b) => !(b.spaceId === spaceId && b.host === host),
+        ),
+      })),
+
+    dismissCheckoutBypassNotice: (spaceId, host) =>
+      set((s) => ({
+        checkoutBypassNotices: s.checkoutBypassNotices.filter(
+          (n) => !(n.spaceId === spaceId && n.host === host),
         ),
       })),
 

@@ -17,7 +17,11 @@
  * one implementation of the rules.
  */
 
-import { MEDIA_BYPASS_DOMAINS, SEEDED_HOSTILE_DOMAINS } from "@suma/config";
+import {
+  HOSTED_CHECKOUT_RULES,
+  MEDIA_BYPASS_DOMAINS,
+  SEEDED_HOSTILE_DOMAINS,
+} from "@suma/config";
 import { normalizedHost } from "@suma/protocol";
 
 export type EgressRoute = "gateway" | "direct" | "blocked";
@@ -28,6 +32,7 @@ export type EgressReason =
   | "private_range"
   | "vpn_route"
   | "media_bypass"
+  | "hosted_checkout"
   | "site_bypass"
   | "gateway_down_override"
   | "gateway_down_failclosed"
@@ -51,6 +56,19 @@ export interface SpaceEgressConfig {
   /** High-bandwidth media bypass — on by default, configurable. */
   mediaBypass: boolean;
   /**
+   * Hosted checkout bypass — on by default. Payment processors refuse proxied
+   * requests outright rather than challenge them, so these pages are routed
+   * direct automatically (see HOSTED_CHECKOUT_RULES).
+   */
+  checkoutBypass: boolean;
+  /**
+   * Merchant-branded checkout hosts recognised at runtime by their path shape
+   * (`buy.example.com/checkouts/cn/…`). A host list cannot know these ahead of
+   * time, so the client discovers them per navigation and holds them for the
+   * session only — a checkout host is never permanently pinned to direct.
+   */
+  detectedCheckoutHosts: ReadonlyArray<string>;
+  /**
    * One-click "browse direct for now" after a fail-closed banner. Resets on
    * reconnect — it is deliberately not sticky (§8.4).
    */
@@ -70,6 +88,8 @@ export function defaultSpaceEgress(spaceId: string): SpaceEgressConfig {
     policy: "direct",
     siteBypass: [],
     mediaBypass: true,
+    checkoutBypass: true,
+    detectedCheckoutHosts: [],
     temporaryDirectOverride: false,
   };
 }
@@ -126,8 +146,59 @@ export function isKnownHostileToDatacenterIps(host: string): boolean {
   return SEEDED_HOSTILE_DOMAINS.some((d) => hostMatches(host, d));
 }
 
+/* ------------------------------------------------------------------ *
+ * Hosted checkout detection
+ * ------------------------------------------------------------------ */
+
+/** Checkout hosts known by name — these can be bypassed before any request. */
+export const HOSTED_CHECKOUT_DOMAINS: ReadonlyArray<string> = HOSTED_CHECKOUT_RULES.filter(
+  (rule) => rule.host !== undefined && rule.path === undefined,
+).map((rule) => rule.host as string);
+
+export interface HostedCheckoutMatch {
+  /** The host to route direct, normalized. */
+  host: string;
+  /** Which processor was recognised, for the notice shown to the user. */
+  label: string;
+}
+
+/**
+ * Does this URL look like a hosted checkout page? Matches the processors' own
+ * domains and — the case a host list cannot cover — merchant-branded checkout
+ * domains identified by their path shape.
+ *
+ * Returns the match rather than a boolean so the caller can name the processor
+ * when it tells the user the page is browsing direct.
+ */
+export function matchHostedCheckout(url: string): HostedCheckoutMatch | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  for (const rule of HOSTED_CHECKOUT_RULES) {
+    if (rule.host !== undefined && !hostMatches(parsed.hostname, rule.host)) continue;
+    if (rule.path !== undefined && !rule.path.test(parsed.pathname)) continue;
+    if (rule.host === undefined && rule.path === undefined) continue;
+    return { host: normalizedHost(parsed.hostname), label: rule.label };
+  }
+  return null;
+}
+
+export function isHostedCheckoutHost(host: string): boolean {
+  return HOSTED_CHECKOUT_DOMAINS.some((d) => hostMatches(host, d));
+}
+
 function matchesVpnRoute(host: string, routes: ReadonlyArray<string>): boolean {
   return routes.some((r) => hostMatches(host, r));
+}
+
+/** A known checkout domain, or one recognised by path earlier this session. */
+function isCheckoutBypassHost(host: string, space: SpaceEgressConfig): boolean {
+  if (isHostedCheckoutHost(host)) return true;
+  return space.detectedCheckoutHosts.some((h) => hostMatches(host, h));
 }
 
 /* ------------------------------------------------------------------ *
@@ -174,6 +245,17 @@ export function decideEgress(
       route: "direct",
       reason: "site_bypass",
       explanation: "You chose to browse this site direct.",
+    };
+  }
+  // Not a silent fallback: this is a policy rule with the same standing as
+  // the media bypass, it is reported by explain(), and the user is told the
+  // first time a checkout host is routed direct.
+  if (space.checkoutBypass && isCheckoutBypassHost(host, space)) {
+    return {
+      route: "direct",
+      reason: "hosted_checkout",
+      explanation:
+        "Hosted checkout pages refuse proxied requests, so this payment page browses direct.",
     };
   }
   if (space.mediaBypass && isMediaHost(host)) {
@@ -223,6 +305,16 @@ export interface ChromiumProxyConfig {
   disableQuic: boolean;
 }
 
+/**
+ * Chromium matches a bare hostname in proxyBypassRules EXACTLY — `stripe.com`
+ * does not cover `checkout.stripe.com`. `hostMatches` above is a suffix match,
+ * so emit both forms or the network stack and the policy module disagree about
+ * which hosts are bypassed.
+ */
+function bypassPatternsFor(hosts: ReadonlyArray<string>): string[] {
+  return hosts.flatMap((h) => [h, `*.${h}`]);
+}
+
 export const LOCAL_BYPASS_RULES = "<local>;localhost;127.0.0.1/8;::1;10.0.0.0/8;172.16.0.0/12;192.168.0.0/16;169.254.0.0/16;fc00::/7;fe80::/10";
 
 export function proxyConfigFor(
@@ -235,6 +327,13 @@ export function proxyConfigFor(
   }
   const bypass = [LOCAL_BYPASS_RULES, ...space.siteBypass];
   if (space.mediaBypass) bypass.push(...MEDIA_BYPASS_DOMAINS);
+  if (space.checkoutBypass) {
+    // Known processor domains need no detection; the detected list carries the
+    // merchant-branded ones found by path this session.
+    bypass.push(
+      ...bypassPatternsFor([...HOSTED_CHECKOUT_DOMAINS, ...space.detectedCheckoutHosts]),
+    );
+  }
   if (net.vpnActive) bypass.push(...net.vpnRoutes);
   return {
     proxyRules: `https=127.0.0.1:${localProxyPort};http=127.0.0.1:${localProxyPort}`,

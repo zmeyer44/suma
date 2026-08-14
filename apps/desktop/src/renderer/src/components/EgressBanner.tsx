@@ -96,3 +96,46 @@ export function BypassSuggestions() {
     </>
   );
 }
+
+/** §8.4 hosted-checkout notices — already applied, so these report rather than
+ *  ask. A proxied checkout is rejected before it renders, so there is no page
+ *  the user could have seen to decide about; the honest surface is telling
+ *  them which host left the identity IP, and why. */
+export function CheckoutBypassNotices() {
+  const notices = useSumaStore((s) => s.checkoutBypassNotices);
+  const spaces = useSumaStore((s) => s.spaces);
+  const dismiss = useSumaStore((s) => s.dismissCheckoutBypassNotice);
+
+  if (notices.length === 0) return null;
+  return (
+    <>
+      {notices.map((n) => {
+        const spaceName = spaces.find((sp) => sp.id === n.spaceId)?.name ?? "this space";
+        return (
+          <div
+            key={`${n.spaceId}|${n.host}`}
+            className="animate-toast-in pointer-events-auto w-full rounded-lg border border-float-edge bg-raised p-3 shadow-pop"
+          >
+            <p className="text-[12px] leading-snug text-text">
+              <span className="font-mono">{n.host}</span> is browsing direct in {spaceName}, not
+              through your identity IP.
+            </p>
+            <p className="mt-1 text-[11px] leading-snug text-faint">
+              {n.label} pages reject payments from proxied connections, so Suma routed this one
+              direct.
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => dismiss(n.spaceId, n.host)}
+                className="cursor-pointer rounded-md bg-accent/15 px-2 py-1 text-[11px] font-medium text-accent hover:bg-accent/25"
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </>
+  );
+}

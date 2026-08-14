@@ -85,6 +85,72 @@ export const MEDIA_BYPASS_DOMAINS: ReadonlyArray<string> = [
   "cloudfront.net",
 ];
 
+/**
+ * Hosted checkout / payment pages (§8.4).
+ *
+ * Payment processors score the *network* the card details arrive from, not
+ * just the card. A datacenter or residential-proxy exit is a fraud signal, so
+ * these pages answer a proxied request with a flat "Request forbidden" rather
+ * than a challenge the user can solve — there is no bypass suggestion the user
+ * could accept, because the page never renders. They are therefore routed
+ * direct automatically (see `checkoutBypass` in @suma/egress-policy).
+ *
+ * Two kinds of rule, because a host list alone cannot cover this:
+ *
+ *  - `host` — the processor's own checkout domain. Matches the host and its
+ *    subdomains.
+ *  - `path` — a path shape distinctive enough to name the processor on ANY
+ *    host. This is what catches merchant-branded checkout domains
+ *    (`buy.example.com/checkouts/cn/…` is a Shopify checkout), which no host
+ *    list can enumerate ahead of time.
+ *
+ * A rule carrying both must match both. Expand this list as new hosted
+ * checkout surfaces turn up — that is the intended maintenance path.
+ */
+export interface HostedCheckoutRule {
+  /** Named in the "browsing direct" notice, so the routing is never a mystery. */
+  label: string;
+  host?: string;
+  path?: RegExp;
+}
+
+export const HOSTED_CHECKOUT_RULES: ReadonlyArray<HostedCheckoutRule> = [
+  // ---- Processor-owned checkout domains ------------------------------
+  { label: "Stripe Checkout", host: "checkout.stripe.com" },
+  { label: "Stripe payment link", host: "buy.stripe.com" },
+  { label: "Stripe payment page", host: "pay.stripe.com" },
+  // Stripe's card element and Radar fingerprint beacons. They ship the
+  // signals the checkout is scored on, so routing them through a different
+  // exit than the page itself is what trips the fraud check.
+  { label: "Stripe payment element", host: "js.stripe.com" },
+  { label: "Stripe fraud signals", host: "m.stripe.com" },
+  { label: "Stripe fraud signals", host: "m.stripe.network" },
+  { label: "Stripe Link", host: "link.com" },
+  { label: "Shopify checkout", host: "checkout.shopify.com" },
+  { label: "Shop Pay", host: "shop.app" },
+  { label: "PayPal checkout", host: "checkout.paypal.com" },
+  { label: "Adyen checkout", host: "checkout.adyen.com" },
+  { label: "Braintree checkout", host: "checkout.braintreegateway.com" },
+  { label: "Square checkout", host: "checkout.square.site" },
+  { label: "Paddle checkout", host: "buy.paddle.com" },
+  { label: "Paddle checkout", host: "checkout.paddle.com" },
+  { label: "Lemon Squeezy checkout", host: "checkout.lemonsqueezy.com" },
+  { label: "Chargebee checkout", host: "checkout.chargebee.com" },
+  { label: "Razorpay checkout", host: "checkout.razorpay.com" },
+  { label: "Klarna checkout", host: "checkout.klarna.com" },
+  { label: "Affirm checkout", host: "checkout.affirm.com" },
+  { label: "Google Pay", host: "pay.google.com" },
+
+  // ---- Path shapes, matched on any host ------------------------------
+  // Shopify hosted checkout, including merchant-branded domains:
+  //   buy.maticrobots.com/checkouts/cn/<token>
+  { label: "Shopify checkout", path: /(?:^|\/)checkouts\/(?:cn|co|c)\// },
+  // Stripe Checkout on a merchant's custom checkout domain: /c/pay/cs_live_…
+  { label: "Stripe Checkout", path: /(?:^|\/)c\/pay\/cs_/ },
+  // PayPal's hosted flow, which merchants also front with their own domain.
+  { label: "PayPal checkout", path: /^\/(?:checkoutnow|webapps\/hermes)(?:$|[/?])/ },
+];
+
 /** Seeded hostile-domain list: origins known to challenge datacenter IPs;
  * per-site bypass is auto-suggested on challenge detection (§8.4). */
 export const SEEDED_HOSTILE_DOMAINS: ReadonlyArray<string> = [

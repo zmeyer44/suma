@@ -5,6 +5,13 @@
  * unreachable, and watches for challenge status codes to SUGGEST a per-site
  * bypass — never to apply one silently.
  *
+ * The one exception is hosted checkout pages, which are bypassed
+ * automatically. A suggestion is only useful when the user can see the page
+ * to decide about it; payment processors score the exit network and reject a
+ * proxied checkout outright ("Request forbidden"), so the page never renders
+ * and there is nothing to accept. Those hosts are routed direct and the user
+ * is TOLD (egress:checkoutBypassed) rather than asked. See HOSTED_CHECKOUT_RULES.
+ *
  * Fail-closed mechanics: proxied spaces point at sumad's localhost CONNECT
  * proxy. When the gateway (or the daemon) is down, that port refuses
  * connections, so proxied traffic is blocked at the network stack — the
@@ -20,10 +27,11 @@
  */
 
 import { clearInterval, setInterval } from "node:timers";
-import type { OnCompletedListenerDetails, Session } from "electron";
+import { webContents, type OnCompletedListenerDetails, type Session } from "electron";
 import { normalizedHost } from "@suma/protocol";
 import {
   decideEgress,
+  matchHostedCheckout,
   proxyConfigFor,
   suggestBypassOnChallenge,
   type GatewayState,
@@ -61,6 +69,7 @@ export interface EgressDeps {
   quicDisabledAtStartup: boolean;
   emitChanged: (status: EgressStatus) => void;
   emitBypassSuggested: (suggestion: { spaceId: string; host: string; reason: string }) => void;
+  emitCheckoutBypassed: (event: { spaceId: string; host: string; label: string }) => void;
   fetchImpl?: typeof fetch;
 }
 
@@ -70,15 +79,27 @@ export class EgressService {
   private readonly overrides = new Set<string>();
   /** `${spaceId}|${host}` pairs already suggested — suggest once, not per request. */
   private readonly suggested = new Set<string>();
+  /**
+   * Merchant-branded checkout hosts recognised by path, per space. In-memory
+   * by design: detection is proactive, so a fresh run rediscovers the host on
+   * the first checkout navigation — and no payment host is silently pinned to
+   * direct across restarts (§8.4).
+   */
+  private readonly detectedCheckout = new Map<string, Set<string>>();
+  /** `${spaceId}|${host}` pairs already reloaded after a forbidden checkout. */
+  private readonly checkoutRetried = new Set<string>();
   private readonly sessions = new Map<string, Session>();
   private timer: NodeJS.Timeout | null = null;
 
   constructor(private readonly deps: EgressDeps) {}
 
-  /** SpaceManager session hook — proxy rules + challenge watcher per session. */
+  /** SpaceManager session hook — proxy rules + checkout/challenge watchers. */
   attachTo(ses: Session, spaceId: string): void {
     this.sessions.set(spaceId, ses);
     void this.applyProxy(spaceId);
+    ses.webRequest.onBeforeRequest({ urls: ["http://*/*", "https://*/*"] }, (details, callback) => {
+      void this.onBeforeRequest(spaceId, details.url, callback);
+    });
     ses.webRequest.onCompleted({ urls: ["http://*/*", "https://*/*"] }, (details) =>
       this.onRequestCompleted(spaceId, details),
     );
@@ -163,7 +184,67 @@ export class EgressService {
       this.deps.spaces.get(spaceId)?.egressPolicy ?? "direct",
       this.deps.store.egressConfig(spaceId),
       this.overrides.has(spaceId),
+      [...(this.detectedCheckout.get(spaceId) ?? [])],
     );
+  }
+
+  /**
+   * Hosted checkout pre-flight. Payment processors answer a proxied request
+   * with a flat rejection rather than a challenge, so there is nothing for the
+   * user to accept after the fact — the page simply never renders. When a URL
+   * is recognised as a checkout (by processor domain, or by the path shape
+   * that identifies a merchant-branded checkout domain), its host is added to
+   * the space's bypass and the request is HELD until the new proxy rules are
+   * applied, so the very first request already goes direct.
+   *
+   * The listener is blocking, so `callback` must run on every path — a thrown
+   * error here would hang the request forever.
+   */
+  private async onBeforeRequest(
+    spaceId: string,
+    url: string,
+    callback: (response: { cancel?: boolean }) => void,
+  ): Promise<void> {
+    try {
+      const match = this.checkoutHostToBypass(spaceId, url);
+      if (match === null) return;
+      let detected = this.detectedCheckout.get(spaceId);
+      if (detected === undefined) {
+        detected = new Set<string>();
+        this.detectedCheckout.set(spaceId, detected);
+      }
+      // Recorded before the await so the burst of subresource requests a
+      // checkout page fires does not each trigger its own setProxy round trip:
+      // checkoutHostToBypass sees the host as already direct from here on.
+      detected.add(match.host);
+      await this.applyProxy(spaceId);
+      this.deps.emitChanged(this.status(spaceId));
+      this.deps.emitCheckoutBypassed({ spaceId, host: match.host, label: match.label });
+    } catch {
+      // Fall through to callback — a detection failure must not block browsing.
+    } finally {
+      callback({});
+    }
+  }
+
+  /**
+   * The checkout host this URL needs bypassed, or null if there is nothing to
+   * do — not a checkout, the space is not proxied, the bypass is off, or the
+   * host is already routed direct.
+   */
+  private checkoutHostToBypass(
+    spaceId: string,
+    url: string,
+  ): { host: string; label: string } | null {
+    const match = matchHostedCheckout(url);
+    if (match === null) return null;
+    // A space that cannot be proxied this run is already browsing direct, so
+    // there is nothing to bypass and nothing to tell the user about.
+    if (!mayProxyThisRun(this.deps.quicDisabledAtStartup)) return null;
+    const config = this.configFor(spaceId);
+    if (config.policy !== "suma-ip" || !config.checkoutBypass) return null;
+    if (decideEgress(match.host, config, this.net()).route === "direct") return null;
+    return match;
   }
 
   private net(): NetworkContext {
@@ -212,6 +293,11 @@ export class EgressService {
     } catch {
       return;
     }
+    // A checkout page that was rejected anyway: the bypass is in place by now
+    // (onBeforeRequest applied it), but this request had already picked its
+    // proxy. Reload once so the retry goes direct. Once per host, so a
+    // checkout that is forbidden for some other reason cannot loop.
+    if (this.retryForbiddenCheckout(spaceId, details.url, details.webContentsId)) return;
     const suggestion = suggestBypassOnChallenge(host, details.statusCode, this.configFor(spaceId));
     if (suggestion === null) return;
     const key = `${spaceId}|${suggestion.host}`;
@@ -220,6 +306,32 @@ export class EgressService {
     // Suggestion only — silently moving a site off the identity IP would
     // undermine the promise the space policy makes (§8.4).
     this.deps.emitBypassSuggested({ spaceId, host: suggestion.host, reason: suggestion.reason });
+  }
+
+  /**
+   * Safety net for the race the pre-flight cannot win: Chromium resolves a
+   * request's proxy once, so a checkout navigation already in flight when the
+   * bypass was applied still exits through the gateway and comes back
+   * forbidden. Reload it — the retry sees the new rules and goes direct.
+   * Returns whether a reload was issued.
+   */
+  private retryForbiddenCheckout(
+    spaceId: string,
+    url: string,
+    webContentsId: number | undefined,
+  ): boolean {
+    const match = matchHostedCheckout(url);
+    if (match === null || webContentsId === undefined) return false;
+    if (!mayProxyThisRun(this.deps.quicDisabledAtStartup)) return false;
+    const config = this.configFor(spaceId);
+    if (config.policy !== "suma-ip" || !config.checkoutBypass) return false;
+    const key = `${spaceId}|${match.host}`;
+    if (this.checkoutRetried.has(key)) return false;
+    this.checkoutRetried.add(key);
+    // Ignoring cache: the forbidden response is what Chromium would otherwise
+    // hand back for the same URL.
+    webContents.fromId(webContentsId)?.reloadIgnoringCache();
+    return true;
   }
 
   private async probe(): Promise<void> {

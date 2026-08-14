@@ -386,6 +386,11 @@ export interface EgressStatus {
   /** One-click "browse direct for now", reset on reconnect. */
   temporaryDirectOverride: boolean;
   mediaBypass: boolean;
+  /** Hosted checkout pages route direct — payment processors refuse proxied
+   *  requests outright rather than challenge them (§8.4). */
+  checkoutBypass: boolean;
+  /** Merchant-branded checkout hosts recognised this session; not persisted. */
+  detectedCheckoutHosts: string[];
   siteBypass: string[];
   /** Set when the gateway is down and requests are being blocked. */
   failClosed: boolean;
@@ -1101,6 +1106,10 @@ export interface SumaEventMap {
   "egress:changed": EgressStatus;
   /** A site challenged us; offer a per-site bypass rather than acting silently. */
   "egress:bypassSuggested": { spaceId: string; host: string; reason: string };
+  /** A hosted checkout page was routed direct automatically (§8.4). Applied,
+   *  not offered — the page never renders through the proxy — so the user is
+   *  told after the fact instead of being asked. */
+  "egress:checkoutBypassed": { spaceId: string; host: string; label: string };
 
   /* ---- Nostr signer ---- */
   /** The approval queue changed — full list, oldest first. Pushed to BOTH
@@ -1381,6 +1390,7 @@ export const EVENT_CHANNELS: ReadonlyArray<EventChannel> = [
   "ports:updated",
   "egress:changed",
   "egress:bypassSuggested",
+  "egress:checkoutBypassed",
   "nostr:pendingChanged",
   "nostr:openDetail",
   "nostr:settingsChanged",

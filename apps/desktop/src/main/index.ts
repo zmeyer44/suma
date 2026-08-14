@@ -915,6 +915,7 @@ async function startServices(ctx: {
     },
     emitBypassSuggested: (suggestion) =>
       emit("egress:bypassSuggested", suggestion),
+    emitCheckoutBypassed: (event) => emit("egress:checkoutBypassed", event),
   });
   spaces.onSessionCreated((ses, spaceId) => egress.attachTo(ses, spaceId));
   const audit = new AuditService(() => auth.controlClient());
