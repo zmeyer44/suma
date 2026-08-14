@@ -18,6 +18,7 @@ import { NostrRequestPanel } from "./components/NostrRequestPanel";
 import { OriginControls } from "./components/OriginControls";
 import { PasskeyPicker } from "./components/PasskeyPicker";
 import { SavesPanel } from "./components/SavesPanel";
+import { SideRail } from "./components/SideRail";
 import { DegradedBanner } from "./components/StatusPills";
 import { TabPreviewStrip } from "./components/TabPreviewStrip";
 import { TabStrip } from "./components/TabStrip";
@@ -53,9 +54,12 @@ export function App() {
   // paneResizing rides the same mechanism: a divider drag needs the chrome on
   // top so pointer moves crossing the panes aren't swallowed by the sites.
   // tabDragging is the same story for a tab dragged out of the strip.
+  // railExpanded too: the hovered tool rail slides over the content hole
+  // instead of pushing it, so its overhang is invisible until chrome rises.
   const modalOpen = useSumaStore(
     (s) =>
       s.overlay !== "none" ||
+      s.railExpanded ||
       s.originPopover !== null ||
       s.statusPopoverOpen ||
       s.passkeyRequest !== null ||
@@ -159,6 +163,10 @@ export function App() {
         <SavesPanel />
         <VideosPanel />
         <NostrRequestPanel />
+        {/* Last in the row: the rail owns the window's right edge, and DOM
+            order is what lets its expanded panel paint over the panels
+            beside it without a z-index arms race. */}
+        <SideRail />
       </div>
 
       <OriginControls />

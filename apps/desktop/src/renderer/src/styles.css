@@ -360,6 +360,41 @@
   transition-duration: 160ms;
 }
 
+/* The right tool rail (SideRail) is the chat sidebar's opposite: its layout
+   column never moves, so the page is never pushed. The panel inside is a
+   fixed 260px slab anchored past the window's right edge, and expansion is
+   ONE translateX on that slab — icons, labels, edge line, and fill ride the
+   same transform, so nothing inside can drift out of step with the reveal.
+   Transform also keeps the whole ride on the compositor: no per-frame layout,
+   unlike the width-animated chat slide (which needs layout on purpose, to
+   push the hole). The transition lives on the class permanently — there is no
+   drag-resize here to rubber-band (the reason chat-slide is applied only
+   while animating). CLOSE_MS in SideRail.tsx must outlast the collapsed
+   duration: it is what lowers the chrome view after the retreat lands. */
+.rail-slide {
+  transition: transform 240ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.rail-slide[data-collapsed] {
+  transition-duration: 180ms;
+}
+
+/* Each row's hover pill. Fixed at full row width it would be sliced by the
+   window edge while collapsed, so its RIGHT edge moves between states —
+   wrapping just the icon collapsed, the whole row (label and shortcut too)
+   expanded — on exactly the slide's clock and curve, so pill and reveal edge
+   arrive together. The color fade keeps its own quick clock: hover feedback
+   shouldn't wait on a 240ms ease. */
+.rail-slide .rail-pill {
+  transition:
+    right 240ms cubic-bezier(0.2, 0.8, 0.3, 1),
+    background-color 150ms ease;
+}
+
+.rail-slide[data-collapsed] .rail-pill {
+  transition-duration: 180ms, 150ms;
+}
+
 /* The active tab's silhouette shadow (FolderShell), removable: while the
    preview shelf is open the folder merges into the shelf's shared surface,
    and even this soft cast bleeding below the base reads as a gray divider
@@ -646,10 +681,17 @@
 
 @media (prefers-reduced-motion: reduce) {
   /* The sidebar still mounts and unmounts on the same schedule — it just
-     lands at its width instead of travelling there. Same for the shelf. */
+     lands at its width instead of travelling there. Same for the shelf and
+     the tool rail. */
   .chat-slide,
-  .tab-preview-slide {
+  .tab-preview-slide,
+  .rail-slide {
     transition: none;
+  }
+
+  /* The pill jumps with the panel it tracks, but keeps its hover fade. */
+  .rail-slide .rail-pill {
+    transition: background-color 150ms ease;
   }
 
   .animate-terminal-cursor {

@@ -413,6 +413,15 @@ interface SumaState {
   tabDragging: boolean;
   setTabDragging: (dragging: boolean) => void;
 
+  /** The right tool rail (SideRail) is expanded over the content hole. The
+   *  rail's layout column stays 50px — expansion paints the panel OVER the
+   *  page rather than pushing it — so the extra width needs the chrome view
+   *  raised (same overlay mechanism as modals) to be visible and clickable
+   *  above the tab WebContentsViews. Stays true through the collapse slide so
+   *  the retreating panel isn't cut off mid-animation. */
+  railExpanded: boolean;
+  setRailExpanded: (expanded: boolean) => void;
+
   /** Page snapshots for the preview shelf, keyed by tab id (`tabs:thumbnail`). */
   tabThumbnails: Record<string, TabThumbnail>;
   /** The preview shelf under the strip is open — it takes layout height, so
@@ -1629,6 +1638,12 @@ export const useSumaStore = create<SumaState>()((set, get) => {
       if (get().paneResizing === resizing) return;
       set({ paneResizing: resizing });
       if (!resizing) saveSplitRatios(get().splitRatios);
+    },
+
+    railExpanded: false,
+    setRailExpanded: (expanded) => {
+      if (get().railExpanded === expanded) return;
+      set({ railExpanded: expanded });
     },
 
     tabDragging: false,
