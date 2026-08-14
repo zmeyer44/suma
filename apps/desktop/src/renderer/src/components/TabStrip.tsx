@@ -63,15 +63,21 @@ import { StatusPills } from "./StatusPills";
  *   fill = panel color with a faint lighter wash at the top,
  *   and one uniform 1px highlight tracing the whole silhouette (it continues
  *   into the strip's bottom hairline, which is the panel's top edge).
+ *
+ * The tab is 34px on a 40px strip — Chrome's own tab metrics, so a Suma
+ * window sitting beside a Chrome one has its tabs at the same height. Every
+ * other dimension in the strip is derived from those two: the folder's radii
+ * follow the ratios above, and the strip's 6px of headroom is what the
+ * inactive tabs' bottom gap is measured against.
  */
-const TAB_H = 40;
-const FLARE = 9;
-const RADIUS = 11;
-const TAPER = 3;
+const TAB_H = 34;
+const FLARE = 7;
+const RADIUS = 9.5;
+const TAPER = 2.5;
 /** The active tab's silhouette, shared with the modal chrome (lib/folder). */
 const FOLDER = { h: TAB_H, flare: FLARE, radius: RADIUS, taper: TAPER };
 
-/** The folder-shaped backdrop behind the active tab; flares overflow 9px per side. */
+/** The folder-shaped backdrop behind the active tab; flares overflow FLARE per side. */
 function FolderShell() {
   const [ref, width] = useMeasuredWidth();
   const gradientId = useId();
@@ -84,7 +90,8 @@ function FolderShell() {
     <div
       ref={ref}
       aria-hidden="true"
-      className="pointer-events-none absolute -inset-x-[9px] bottom-0 h-[40px]"
+      className="pointer-events-none absolute bottom-0"
+      style={{ left: -FLARE, right: -FLARE, height: TAB_H }}
     >
       {width > 0 ? (
         <svg
@@ -124,8 +131,8 @@ function FolderShell() {
   );
 }
 
-const HOVER_H = 32;
-const HOVER_R = 9;
+const HOVER_H = 28;
+const HOVER_R = 8;
 /** Visual gap between the active tab's silhouette and an adjacent raised fill. */
 const GAP = 5;
 
@@ -627,11 +634,11 @@ function Tab({
   const inactiveShape =
     activeSide !== null
       ? "text-muted hover:text-text"
-      : "rounded-[9px] text-muted hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text";
+      : "rounded-[8px] text-muted hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text";
 
   const shape = tab.active
-    ? "z-10 h-[40px] pb-[5px] text-text"
-    : `mb-2 h-8 ${inactiveShape}`;
+    ? "z-10 h-[34px] pb-[4px] text-text"
+    : `mb-1.5 h-7 ${inactiveShape}`;
 
   return (
     <div
@@ -834,7 +841,7 @@ function SplitTab({
       // Two panes' worth of row: flex-[2] against the single tabs' flex-1, so
       // a split takes twice the share of whatever space the row has.
       className={cn(
-        "no-drag relative flex h-[40px] min-w-[264px] max-w-[520px] flex-[2] items-center px-1 pb-[5px] text-text",
+        "no-drag relative flex h-[34px] min-w-[264px] max-w-[520px] flex-[2] items-center px-1 pb-[4px] text-text",
         dragging
           ? "z-30 cursor-grabbing touch-none"
           : "z-10 cursor-pointer touch-none",
@@ -885,14 +892,14 @@ function NewTabCluster() {
   return (
     <div
       data-flip-id="__new-tab"
-      className="no-drag group/new mb-2 ml-1 flex shrink-0 items-center"
+      className="no-drag group/new mb-1.5 ml-1 flex shrink-0 items-center"
     >
       <button
         type="button"
         title="New tab (⌘T)"
         aria-label="New tab"
         onClick={() => void createTab()}
-        className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-[9px] text-faint hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text"
+        className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-[8px] text-faint hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text"
       >
         <Plus className="size-3.5" aria-hidden="true" />
       </button>
@@ -911,7 +918,7 @@ function NewTabCluster() {
         title="New terminal — a shell on your Suma machine"
         aria-label="New terminal"
         onClick={() => void newTerminal()}
-        className="pointer-events-none grid size-8 shrink-0 -translate-x-2 scale-90 cursor-pointer place-items-center rounded-[9px] text-faint opacity-0 transition-[opacity,translate,scale] duration-200 ease-out group-hover/new:pointer-events-auto group-hover/new:translate-x-0 group-hover/new:scale-100 group-hover/new:opacity-100 hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text focus-visible:pointer-events-auto focus-visible:translate-x-0 focus-visible:scale-100 focus-visible:opacity-100"
+        className="pointer-events-none grid size-7 shrink-0 -translate-x-2 scale-90 cursor-pointer place-items-center rounded-[8px] text-faint opacity-0 transition-[opacity,translate,scale] duration-200 ease-out group-hover/new:pointer-events-auto group-hover/new:translate-x-0 group-hover/new:scale-100 group-hover/new:opacity-100 hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text focus-visible:pointer-events-auto focus-visible:translate-x-0 focus-visible:scale-100 focus-visible:opacity-100"
       >
         <SquareTerminal className="size-3.5" aria-hidden="true" />
       </button>
@@ -970,7 +977,7 @@ function ActiveTabUrl({ tab, onEdit }: { tab: TabInfo; onEdit: () => void }) {
         onEdit();
       }}
       onDoubleClick={(e) => e.stopPropagation()}
-      className="pointer-events-none absolute inset-x-0 inset-y-[4px] flex w-full min-w-0 cursor-text items-center rounded-[7px] px-1.5 text-left font-mono text-[11.5px] text-muted opacity-0 transition-opacity duration-150 hover:bg-ink/8 hover:text-text focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none group-hover:pointer-events-auto group-hover:opacity-100"
+      className="pointer-events-none absolute inset-x-0 inset-y-[3px] flex w-full min-w-0 cursor-text items-center rounded-[7px] px-1.5 text-left font-mono text-[11.5px] text-muted opacity-0 transition-opacity duration-150 hover:bg-ink/8 hover:text-text focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none group-hover:pointer-events-auto group-hover:opacity-100"
     >
       <span className="min-w-0 truncate">
         {shown.length > 0 ? (
@@ -1645,7 +1652,7 @@ export function TabStrip() {
   };
 
   return (
-    <div className="drag-region relative flex h-12 shrink-0 items-end bg-[linear-gradient(180deg,var(--color-strip-deep)_0%,var(--color-strip)_100%)]">
+    <div className="drag-region relative flex h-10 shrink-0 items-end bg-[linear-gradient(180deg,var(--color-strip-deep)_0%,var(--color-strip)_100%)]">
       {drag !== null && contentBounds !== null ? (
         <SplitDropZones
           bounds={contentBounds}
@@ -1708,7 +1715,7 @@ export function TabStrip() {
           <NewTabCluster />
         </div>
 
-        <div className="no-drag mb-2 flex h-8 shrink-0 items-center gap-1.5">
+        <div className="no-drag mb-1.5 flex h-7 shrink-0 items-center gap-1.5">
           <StatusPills />
           {/* The chat toggle sits at the right end of the strip, above the
               sidebar it opens. It stays lit while the sidebar is open — the

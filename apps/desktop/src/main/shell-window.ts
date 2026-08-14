@@ -52,6 +52,13 @@ function backgroundFor(dark: boolean): string {
 const VIBRANCY_MATERIAL = "sidebar" as const;
 
 /**
+ * Height of the tab strip (TabStrip.tsx), used only to guess the content hole
+ * before the renderer has measured and reported its own. The renderer's report
+ * is the source of truth the moment it arrives.
+ */
+const STRIP_H = 40;
+
+/**
  * The floating overlay (OverlayStack.tsx): a transparent WebContentsView
  * layered ABOVE the tab views inside the shell window, sized to exactly what
  * it shows — the floating audio player (AudioPlayer.tsx) stacked above the
@@ -167,8 +174,9 @@ export class ShellWindow {
       minHeight: 600,
       title: "Suma",
       titleBarStyle: "hiddenInset",
-      // Center the traffic lights in the 48px tab strip (TabStrip.tsx).
-      trafficLightPosition: { x: 18, y: 17 },
+      // Center the traffic lights in the 40px tab strip (TabStrip.tsx) — the
+      // same offset Chrome uses, since the strip is now the same height.
+      trafficLightPosition: { x: 18, y: 14 },
       // The window exists before the renderer has read its theme, so it opens
       // on whatever this Mac asks for — the same thing lib/theme.ts will pick.
       backgroundColor: backgroundFor(this.darkBackground),
@@ -433,7 +441,7 @@ export class ShellWindow {
     if (hole === null) {
       // Before the renderer's first report: below where the strip will be.
       const { width, height } = this.window.getContentBounds();
-      hole = { x: 0, y: 48, width, height: Math.max(height - 48, 0) };
+      hole = { x: 0, y: STRIP_H, width, height: Math.max(height - STRIP_H, 0) };
     }
     const bounds = savePreviewBounds(
       hole,
@@ -477,7 +485,7 @@ export class ShellWindow {
   private pipHole(): ContentBounds {
     if (this.lastContentBounds !== null) return this.lastContentBounds;
     const { width, height } = this.window.getContentBounds();
-    return { x: 0, y: 48, width, height: Math.max(height - 48, 0) };
+    return { x: 0, y: STRIP_H, width, height: Math.max(height - STRIP_H, 0) };
   }
 
   /** Show the player (placing it bottom-right on first use) and top it. */
