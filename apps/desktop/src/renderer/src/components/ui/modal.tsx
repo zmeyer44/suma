@@ -23,12 +23,12 @@ import { useMeasuredWidth } from "../../lib/measure";
  *   </Modal>
  */
 
-/** The title tab's silhouette — the active tab's geometry at ~90% scale. */
-const TAB: FolderGeometry = { h: 36, flare: 8, radius: 10, taper: 3 };
+/** The title tab's silhouette — the active tab's ratios (TabStrip) at h 36. */
+const TAB: FolderGeometry = { h: 36, flare: 9.5, radius: 12.5, taper: 3 };
 
 /**
- * The folder-shaped backdrop behind the title tab; flares overflow 8px per
- * side. The gradient's bottom stop is exactly the panel's top color and the
+ * The folder-shaped backdrop behind the title tab; flares overflow TAB.flare
+ * per side. The gradient's bottom stop is exactly the panel's top color and the
  * fill overdraws the panel's border row (the header renders above the panel,
  * which is pulled up 1px), so tab and panel read as one surface.
  */
@@ -40,7 +40,8 @@ function FolderTabShell() {
     <div
       ref={ref}
       aria-hidden="true"
-      className="pointer-events-none absolute inset-y-0 -inset-x-2"
+      className="pointer-events-none absolute inset-y-0"
+      style={{ left: -TAB.flare, right: -TAB.flare }}
     >
       {width > 0 ? (
         <svg

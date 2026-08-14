@@ -57,12 +57,19 @@ import { StatusPills } from "./StatusPills";
  * hover. The active tab is
  * a manila-folder silhouette — rounded top corners, sides tapering ~4°
  * outward, and concave bottom flares — drawn as an SVG path so it merges
- * seamlessly into the chrome panel below. Geometry and shading were sampled
- * frame-by-frame from the reference capture:
- *   top radius ≈ 0.28·H, flare radius ≈ 0.21·H, side taper ≈ 0.07·H,
- *   fill = panel color with a faint lighter wash at the top,
- *   and one uniform 1px highlight tracing the whole silhouette (it continues
- *   into the strip's bottom hairline, which is the panel's top edge).
+ * seamlessly into the chrome panel below. Shading was sampled frame-by-frame
+ * from the reference capture — fill = panel color with a faint lighter wash at
+ * the top, and one uniform 1px highlight tracing the whole silhouette (it
+ * continues into the strip's bottom hairline, which is the panel's top edge).
+ *
+ * The silhouette's proportions are:
+ *   top radius ≈ 0.35·H, flare radius ≈ 0.26·H, side taper ≈ 0.07·H.
+ * The two radii are opened up from what the capture measured (0.28·H / 0.21·H)
+ * so the corners ease in and out over most of the tab's height instead of
+ * turning over a short arc — at 34px a tighter radius reads as a hard corner.
+ * They are what is left of the height once both arcs are drawn that sets how
+ * much straight taper remains (DY below), so raising either one softens the
+ * whole outline rather than just its ends.
  *
  * The tab is 34px on a 40px strip — Chrome's own tab metrics, so a Suma
  * window sitting beside a Chrome one has its tabs at the same height. Every
@@ -71,8 +78,8 @@ import { StatusPills } from "./StatusPills";
  * inactive tabs' bottom gap is measured against.
  */
 const TAB_H = 34;
-const FLARE = 7;
-const RADIUS = 9.5;
+const FLARE = 9;
+const RADIUS = 12;
 const TAPER = 2.5;
 /** The active tab's silhouette, shared with the modal chrome (lib/folder). */
 const FOLDER = { h: TAB_H, flare: FLARE, radius: RADIUS, taper: TAPER };
@@ -132,7 +139,8 @@ function FolderShell() {
 }
 
 const HOVER_H = 28;
-const HOVER_R = 8;
+/** Same 0.35·H the folder's top corners use, at the raised fill's height. */
+const HOVER_R = 10;
 /** Visual gap between the active tab's silhouette and an adjacent raised fill. */
 const GAP = 5;
 
@@ -634,7 +642,7 @@ function Tab({
   const inactiveShape =
     activeSide !== null
       ? "text-muted hover:text-text"
-      : "rounded-[8px] text-muted hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text";
+      : "rounded-[10px] text-muted hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text";
 
   const shape = tab.active
     ? "z-10 h-[34px] pb-[4px] text-text"
@@ -899,7 +907,7 @@ function NewTabCluster() {
         title="New tab (⌘T)"
         aria-label="New tab"
         onClick={() => void createTab()}
-        className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-[8px] text-faint hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text"
+        className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-[10px] text-faint hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text"
       >
         <Plus className="size-3.5" aria-hidden="true" />
       </button>
@@ -918,7 +926,7 @@ function NewTabCluster() {
         title="New terminal — a shell on your Suma machine"
         aria-label="New terminal"
         onClick={() => void newTerminal()}
-        className="pointer-events-none grid size-7 shrink-0 -translate-x-2 scale-90 cursor-pointer place-items-center rounded-[8px] text-faint opacity-0 transition-[opacity,translate,scale] duration-200 ease-out group-hover/new:pointer-events-auto group-hover/new:translate-x-0 group-hover/new:scale-100 group-hover/new:opacity-100 hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text focus-visible:pointer-events-auto focus-visible:translate-x-0 focus-visible:scale-100 focus-visible:opacity-100"
+        className="pointer-events-none grid size-7 shrink-0 -translate-x-2 scale-90 cursor-pointer place-items-center rounded-[10px] text-faint opacity-0 transition-[opacity,translate,scale] duration-200 ease-out group-hover/new:pointer-events-auto group-hover/new:translate-x-0 group-hover/new:scale-100 group-hover/new:opacity-100 hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text focus-visible:pointer-events-auto focus-visible:translate-x-0 focus-visible:scale-100 focus-visible:opacity-100"
       >
         <SquareTerminal className="size-3.5" aria-hidden="true" />
       </button>
