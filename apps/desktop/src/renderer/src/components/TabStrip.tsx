@@ -242,6 +242,26 @@ function HoverShell({ side }: { side: "left" | "right" }) {
 }
 
 /**
+ * Chrome's hairline between two adjacent inactive tabs. Inactive tabs are
+ * bare until hovered, so without it a row of them reads as one run of text —
+ * the line is what marks where one tab ends and the next begins.
+ *
+ * It is drawn on the RIGHT edge of the left tab of the pair, and that side is
+ * load-bearing: the line has to vanish while either neighbour is hovered (the
+ * raised fill runs to the tab's own edge, and a line hard against it reads as
+ * a border on the fill rather than as a divider), and CSS can look forward to
+ * a next sibling — `:has(+ *:hover)` — but never back to a previous one.
+ */
+function TabSeparator() {
+  return (
+    <span
+      aria-hidden="true"
+      className="pointer-events-none absolute top-1/2 right-0 h-4 w-px -translate-y-1/2 bg-ink/15 transition-opacity duration-150 group-hover:opacity-0 [:has(+*:hover)>&]:opacity-0"
+    />
+  );
+}
+
+/**
  * A tab's origin — "" for an internal page (`suma://settings`), which has
  * none. Empty is exactly what ContinuityDot renders as a spacer and what
  * keeps the sync corpus from being consulted about a host called "settings".
@@ -668,6 +688,7 @@ function Tab({
   tab,
   iconOnly,
   activeSide,
+  separator = false,
   dragging = false,
   onActivate,
   onEditAddress,
@@ -677,6 +698,8 @@ function Tab({
   iconOnly?: boolean;
   /** Which side of this tab the active tab sits on, if directly adjacent. */
   activeSide: "left" | "right" | null;
+  /** Draw the divider on this tab's right edge — the next tab is inactive too. */
+  separator?: boolean;
   /** This tab is the one being dragged: it rides above the row, not with it. */
   dragging?: boolean;
   /** Select — routed through the strip so a drag doesn't read as a click. */
@@ -741,6 +764,7 @@ function Tab({
       {!tab.active && activeSide !== null ? (
         <HoverShell side={activeSide} />
       ) : null}
+      {separator ? <TabSeparator /> : null}
       <span
         className={cn(
           "relative flex min-w-0 items-center gap-2",
@@ -1707,6 +1731,16 @@ export function TabStrip() {
     if (i === activeIndex - 1) return "right";
     return null;
   };
+  // The divider is a property of the SEAM between two inactive tabs, drawn by
+  // the one on its left (TabSeparator). Nothing is drawn while a drag is live:
+  // the carried tab rides out of its slot on a transform, so the seams it is
+  // part of are not where layout says they are.
+  const separatorAfter = (i: number): boolean => {
+    const here = view[i];
+    const next = view[i + 1];
+    if (drag !== null || here === undefined || next === undefined) return false;
+    return !here.active && !next.active;
+  };
 
   return (
     <div className="drag-region relative flex h-10 shrink-0 items-end bg-[linear-gradient(180deg,var(--color-strip-deep)_0%,var(--color-strip)_100%)]">
@@ -1751,6 +1785,7 @@ export function TabStrip() {
                 tab={first}
                 iconOnly={item.pinned}
                 activeSide={sideOf(i)}
+                separator={separatorAfter(i)}
                 dragging={drag?.id === item.id}
                 onActivate={() => activate(first.id)}
                 onEditAddress={() => editAddress(first.id)}
