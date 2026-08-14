@@ -36,6 +36,7 @@ import type { ContentBounds, SpaceInfo, TabInfo } from "../../../shared/ipc";
 import { cn } from "../lib/cn";
 import { folderOutline, n } from "../lib/folder";
 import { useMeasuredWidth } from "../lib/measure";
+import { previewZoneEnter, previewZoneLeave } from "../lib/tab-preview";
 import { hostOf, prettyUrl } from "../lib/url";
 import { useSumaStore } from "../store";
 import { ContinuityDot } from "./ContinuityDot";
@@ -231,8 +232,9 @@ function tabHost(tab: TabInfo): string {
  * A tab's 16px mark. Internal pages get one of Suma's own glyphs rather than
  * the initial-letter tile: they have no favicon to fail over from, and the
  * letter would change as the sidebar walked between settings sections.
+ * Exported for the preview shelf's cards (TabPreviewStrip).
  */
-function TabMark({ tab }: { tab: TabInfo }) {
+export function TabMark({ tab }: { tab: TabInfo }) {
   const route = parseInternalUrl(tab.url);
   if (route === null)
     return <Favicon src={tab.faviconUrl} seed={tabHost(tab) || tab.title} />;
@@ -1644,7 +1646,15 @@ export function TabStrip() {
       />
       {/* pl clears the macOS traffic lights */}
       <div className="flex min-w-0 flex-1 items-end gap-1.5 pr-2.5 pl-[84px]">
-        <div ref={tabsRef} className="flex min-w-0 flex-1 items-end">
+        {/* Lingering over the tab row (not the utility cluster) slides the
+            preview shelf open under the strip — lib/tab-preview owns the
+            hover intent shared with the shelf itself. */}
+        <div
+          ref={tabsRef}
+          className="flex min-w-0 flex-1 items-end"
+          onPointerEnter={previewZoneEnter}
+          onPointerLeave={previewZoneLeave}
+        >
           {view.map((item, i) => {
             const [first, second] = item.tabs;
             if (first === undefined) return null;

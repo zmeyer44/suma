@@ -506,6 +506,14 @@ export function registerIpc(deps: IpcDeps): void {
     deps.tabs.setSplit(requireString(a["tabId"], "tabId"), split);
   });
 
+  handle("tabs:thumbnails", (args) => {
+    const a = requireRecord(args, "tabs:thumbnails");
+    // The shelf is opening: refresh what is on screen now. The fresh frames
+    // arrive as `tabs:thumbnail` pushes; the reply is the cache as it stands.
+    deps.tabs.captureVisibleTabs();
+    return deps.tabs.thumbnails(requireString(a["spaceId"], "spaceId"));
+  });
+
   /* ------------------------- browsing history (§8.3) ---------------------- */
 
   handle("history:list", (args) => {

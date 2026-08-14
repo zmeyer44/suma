@@ -83,6 +83,7 @@ import type {
   SpaceInfo,
   SyncStatus,
   TabInfo,
+  TabThumbnail,
   TerminalInfo,
   TransfersUpdate,
   WorkspaceFile,
@@ -401,6 +402,15 @@ interface SumaState {
    *  tab WebContentsViews, and its drop zones are drawn over them. */
   tabDragging: boolean;
   setTabDragging: (dragging: boolean) => void;
+
+  /** Page snapshots for the preview shelf, keyed by tab id (`tabs:thumbnail`). */
+  tabThumbnails: Record<string, TabThumbnail>;
+  /** The preview shelf under the strip is open — it takes layout height, so
+   *  the content hole (and with it the tab views) slides down while it shows. */
+  tabPreviewOpen: boolean;
+  /** Opening also pulls the space's cached thumbnails and asks main to
+   *  re-capture the visible tab, so the shelf is fresh by the time it lands. */
+  setTabPreviewOpen: (open: boolean) => void;
   /** Left-pane fraction per space; device-local, persisted in localStorage. */
   splitRatios: Record<string, number>;
   /** Update a space's divider position and stream it to main; persisted on
@@ -685,6 +695,29 @@ export const useSumaStore = create<SumaState>()((set, get) => {
     }, CERT_ERROR_TTL_MS);
   }
 
+  /**
+   * Thumbnails outlive their tabs on purpose (a closed tab's capture is
+   * harmless and a reopened space wants its pictures back instantly), so the
+   * map is capped instead of pruned — beyond the cap the oldest captures go.
+   */
+  const MAX_TAB_THUMBNAILS = 80;
+  function mergeThumbnail(thumb: TabThumbnail): void {
+    set((s) => {
+      const next = { ...s.tabThumbnails, [thumb.tabId]: thumb };
+      const ids = Object.keys(next);
+      if (ids.length > MAX_TAB_THUMBNAILS) {
+        ids.sort(
+          (a, b) =>
+            (next[a]?.capturedAtMs ?? 0) - (next[b]?.capturedAtMs ?? 0),
+        );
+        for (const id of ids.slice(0, ids.length - MAX_TAB_THUMBNAILS)) {
+          delete next[id];
+        }
+      }
+      return { tabThumbnails: next };
+    });
+  }
+
   function activeSpaceId(): string | null {
     return get().spaces.find((s) => s.active)?.id ?? null;
   }
@@ -879,11 +912,14 @@ export const useSumaStore = create<SumaState>()((set, get) => {
         window.suma.on("tabs:updated", ({ spaceId, tabs }) => {
           if (spaceId === activeSpaceId()) set({ tabs });
         }),
+        window.suma.on("tabs:thumbnail", (thumb) => mergeThumbnail(thumb)),
         window.suma.on("spaces:updated", (spaces) => {
           const prevActive = activeSpaceId();
           set({ spaces });
           const nextActive = spaces.find((s) => s.active)?.id ?? null;
           if (nextActive !== prevActive) {
+            // The shelf previews ONE space's tabs; a space switch closes it.
+            set({ tabPreviewOpen: false });
             void refreshTabs(nextActive ?? undefined);
             void refreshEgressFor(nextActive);
           }
@@ -1311,6 +1347,9 @@ export const useSumaStore = create<SumaState>()((set, get) => {
             active: t.id === tabId,
             split: endsSplit ? false : t.split,
           })),
+          // Selecting is the shelf's exit: the chosen page should land in a
+          // full-height hole, not one still shortened by the previews.
+          tabPreviewOpen: false,
         };
       });
       await call("tabs:select", { tabId });
@@ -1563,7 +1602,27 @@ export const useSumaStore = create<SumaState>()((set, get) => {
     tabDragging: false,
     setTabDragging: (dragging) => {
       if (get().tabDragging === dragging) return;
-      set({ tabDragging: dragging });
+      // A drag and the preview shelf fight over the same strip real estate —
+      // picking a tab up dismisses the shelf.
+      if (dragging) set({ tabDragging: dragging, tabPreviewOpen: false });
+      else set({ tabDragging: dragging });
+    },
+
+    tabThumbnails: {},
+    tabPreviewOpen: false,
+    setTabPreviewOpen: (open) => {
+      if (get().tabPreviewOpen === open) return;
+      set({ tabPreviewOpen: open });
+      if (!open) return;
+      const spaceId = activeSpaceId();
+      if (spaceId === null) return;
+      // Pull the cache (captures pushed before this session's shelf ever
+      // opened) and kick a fresh capture of the visible tab — that frame
+      // arrives as a `tabs:thumbnail` push while the shelf slides in.
+      void callQuiet("tabs:thumbnails", { spaceId }).then((thumbs) => {
+        if (thumbs === undefined) return;
+        for (const thumb of thumbs) mergeThumbnail(thumb);
+      });
     },
 
     splitRatios: loadSplitRatios(),

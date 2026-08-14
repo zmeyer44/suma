@@ -381,6 +381,7 @@ async function startServices(ctx: {
     (reason) => emit("popups:denied", { reason }),
   );
   tabs.setGlanceOpener((spaceId, url) => glance.open(spaceId, url));
+  tabs.setThumbnailListener((thumb) => emit("tabs:thumbnail", thumb));
   glance.setTabOpener(({ spaceId, url, adoptView, faviconUrl }) => {
     try {
       tabs.create({
