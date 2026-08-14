@@ -75,6 +75,10 @@ const FOLDER = { h: TAB_H, flare: FLARE, radius: RADIUS, taper: TAPER };
 function FolderShell() {
   const [ref, width] = useMeasuredWidth();
   const gradientId = useId();
+  // With the preview shelf open the folder is part of the shelf's surface —
+  // its cast shadow would bleed below the base and draw a soft gray line
+  // along the very seam the merge is meant to erase (.folder-drop-off).
+  const previewOpen = useSumaStore((s) => s.tabPreviewOpen);
 
   return (
     <div
@@ -86,7 +90,10 @@ function FolderShell() {
         <svg
           width={width}
           height={TAB_H}
-          className="absolute inset-0 overflow-visible filter-(--drop-tab)"
+          className={cn(
+            "absolute inset-0 overflow-visible folder-drop",
+            previewOpen && "folder-drop-off",
+          )}
         >
           <defs>
             <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">

@@ -360,6 +360,21 @@
   transition-duration: 160ms;
 }
 
+/* The active tab's silhouette shadow (FolderShell), removable: while the
+   preview shelf is open the folder merges into the shelf's shared surface,
+   and even this soft cast bleeding below the base reads as a gray divider
+   drawn exactly along the seam that is supposed to be invisible. The off
+   state keeps a same-shape transparent shadow rather than `filter: none`,
+   so the swap interpolates instead of popping. */
+.folder-drop {
+  filter: var(--drop-tab);
+  transition: filter 200ms ease;
+}
+
+.folder-drop-off {
+  filter: drop-shadow(0 -1px 4px rgb(0 0 0 / 0));
+}
+
 /* The tab preview shelf (TabPreviewStrip) is the chat sidebar's mechanism
    turned on its side: height is the animated property because the shelf is a
    flex sibling ABOVE the content hole, so growing it pushes the hole (and the
