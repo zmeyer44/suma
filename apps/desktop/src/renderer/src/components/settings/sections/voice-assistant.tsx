@@ -84,8 +84,10 @@ function useVoiceSettings(): {
 const KEY_NOTES: Record<VoiceSettingsInfo["keyState"], string> = {
   env: "Using the Gemini key from the environment (GEMINI_API_KEY).",
   stored: "Using the Gemini key stored on this Mac.",
+  vended:
+    "Using voice included with your Suma account — each conversation gets its own short-lived key, and none is stored on this Mac. Add your own Gemini key below to use it instead.",
   unset:
-    "No Gemini key yet — conversations can't start without one. Paste a key below (aistudio.google.com) or set GEMINI_API_KEY.",
+    "No voice access yet — sign in to your Suma account, paste a Gemini key below (aistudio.google.com), or set GEMINI_API_KEY.",
 };
 
 const WAKE_NOTES: Record<VoiceStatus["wakeWord"], string> = {

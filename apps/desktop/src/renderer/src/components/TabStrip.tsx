@@ -12,15 +12,18 @@ import {
   Columns2,
   Download,
   LoaderCircle,
+  MoreHorizontal,
   Plus,
   RefreshCw,
   RotateCw,
   Settings,
+  ShieldOff,
   Sparkles,
   SquareTerminal,
   Star,
   X,
 } from "lucide-react";
+import { isLoopbackHost, isPrivateHost } from "@suma/egress-policy";
 import {
   favoriteForUrl,
   normalizeFavoriteUrl,
@@ -394,6 +397,11 @@ function TabCloseButton({ tab }: { tab: TabInfo }) {
   );
 }
 
+/** Whether this tab is on an address a favorite could reopen (not internal). */
+function canFavorite(tab: TabInfo) {
+  return normalizeFavoriteUrl(tab.url) !== null;
+}
+
 /**
  * Stars the tab's CURRENT address in the favorite sites (the tile row under
  * the URL bar, editable in settings). An address, not a page: navigating away
@@ -406,7 +414,7 @@ function FavoriteToggleButton({ tab }: { tab: TabInfo }) {
   );
   const toggleFavorite = useSumaStore((s) => s.toggleFavorite);
 
-  if (normalizeFavoriteUrl(tab.url) === null) return null;
+  if (!canFavorite(tab)) return null;
   return (
     <button
       type="button"
@@ -462,6 +470,120 @@ function SplitToggleButton({ tab }: { tab: TabInfo }) {
   );
 }
 
+/**
+ * Whether the identity-IP bypass is a meaningful action on this tab: its space
+ * is actually routed through the gateway, and it is on a real site (an
+ * internal page has no host to route).
+ */
+function useCanBypassEgress(tab: TabInfo): boolean {
+  const policy = useSumaStore((s) => s.egressBySpace[tab.spaceId]?.policy);
+  const host = tabHost(tab);
+  // Loopback and private addresses are decided before any bypass is even
+  // consulted (decideEgress) — they never reach the gateway. Offering to take
+  // them off it would be a control that changes nothing.
+  return (
+    policy === "suma-ip" &&
+    host !== "" &&
+    !isLoopbackHost(host) &&
+    !isPrivateHost(host)
+  );
+}
+
+/**
+ * Takes this tab's site off the identity gateway and back onto the real
+ * connection — the escape hatch for sites that challenge or block datacenter
+ * IPs, which the gateway's addresses look like (§8.4). The same toggle as the
+ * trust popover's "browse this site direct" checkbox, put where a blocked page
+ * is actually met.
+ *
+ * The scope is the SITE, not the tab, and the label says so. Chromium applies
+ * proxy rules per session and a space is one session, so "only this tab" is
+ * not a thing the network stack can express — every tab on this host in this
+ * space goes direct with it. Reloading is part of the action: the page in
+ * front of the user was fetched over the old route (usually as a block page),
+ * so leaving it up would make a working toggle look broken.
+ */
+function EgressBypassButton({ tab }: { tab: TabInfo }) {
+  const bypassed = useSumaStore(
+    (s) => s.egressBySpace[tab.spaceId]?.siteBypass.includes(tabHost(tab)) === true,
+  );
+  const setSiteBypass = useSumaStore((s) => s.setSiteBypass);
+  const pushToast = useSumaStore((s) => s.pushToast);
+  const reload = useSumaStore((s) => s.reload);
+  const canBypass = useCanBypassEgress(tab);
+  const host = tabHost(tab);
+
+  if (!canBypass) return null;
+  return (
+    <button
+      type="button"
+      title={
+        bypassed
+          ? `Route ${host} through your identity IP again`
+          : `Browse ${host} direct — bypass your identity IP`
+      }
+      aria-label={
+        bypassed
+          ? `Stop bypassing your identity IP for ${host}`
+          : `Browse ${host} direct, bypassing your identity IP`
+      }
+      aria-pressed={bypassed}
+      onClick={(e) => {
+        e.stopPropagation();
+        void setSiteBypass(tab.spaceId, host, !bypassed).then(() => {
+          pushToast(
+            bypassed
+              ? `${host} is back on your identity IP.`
+              : `${host} now browses direct — it sees this Mac's real IP.`,
+            bypassed ? "info" : "warning",
+          );
+          void reload(tab.id);
+        });
+      }}
+      className={cn(
+        "grid size-4 place-items-center rounded hover:bg-ink/12 hover:text-text",
+        bypassed ? "text-accent" : "text-faint",
+      )}
+    >
+      <ShieldOff className="size-2.5" aria-hidden="true" />
+    </button>
+  );
+}
+
+/**
+ * The tab's actions (favorite, split, …) folded behind one three-dot button,
+ * so a hovered tab shows a single control instead of a growing row of them —
+ * room to add actions without the strip getting crowded.
+ *
+ * Hovering the dots swaps them for the actions IN PLACE: the button collapses
+ * to zero width and the icons take over its slot, all inside one hover region
+ * so the pointer is never between two states on the way in. The button
+ * collapses rather than unmounting, so a click (which focuses it) can't strand
+ * focus on a removed node — and focus anywhere in the group keeps the actions
+ * out, which is what makes them reachable by keyboard and by tap at all.
+ */
+function TabActions({ actions }: { actions: React.ReactNode[] }) {
+  const items = actions.filter(Boolean);
+  if (items.length === 0) return null;
+
+  return (
+    <span className="group/actions flex shrink-0 items-center gap-0.5">
+      <button
+        type="button"
+        title="Tab actions"
+        aria-label="Tab actions"
+        onClick={(e) => e.stopPropagation()}
+        className="grid h-4 w-4 shrink-0 place-items-center overflow-hidden rounded text-faint transition-[width,opacity] duration-100 hover:bg-ink/12 hover:text-text group-hover/actions:pointer-events-none group-hover/actions:w-0 group-hover/actions:opacity-0"
+      >
+        <MoreHorizontal className="size-3 shrink-0" aria-hidden="true" />
+      </button>
+      <span className="hidden shrink-0 items-center gap-0.5 group-hover/actions:flex group-has-[:focus]/actions:flex">
+        {items}
+      </span>
+    </span>
+  );
+}
+
 function Tab({
   tab,
   iconOnly,
@@ -485,6 +607,7 @@ function Tab({
 }) {
   const closeTab = useSumaStore((s) => s.closeTab);
   const togglePin = useSumaStore((s) => s.togglePin);
+  const canBypassEgress = useCanBypassEgress(tab);
   const host = tabHost(tab);
 
   // Beside the active tab the raised fill is drawn by HoverShell (its near
@@ -551,8 +674,17 @@ function Tab({
               </span>
             )}
             <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
-              <FavoriteToggleButton tab={tab} />
-              <SplitToggleButton tab={tab} />
+              <TabActions
+                actions={[
+                  canFavorite(tab) ? (
+                    <FavoriteToggleButton key="favorite" tab={tab} />
+                  ) : null,
+                  <SplitToggleButton key="split" tab={tab} />,
+                  canBypassEgress ? (
+                    <EgressBypassButton key="egress" tab={tab} />
+                  ) : null,
+                ]}
+              />
               <TabCloseButton tab={tab} />
             </span>
             <span className="shrink-0 group-has-[:focus-visible]:hidden group-hover:hidden">
@@ -572,7 +704,7 @@ function Tab({
 function SplitPane({
   tab,
   focused,
-  hoverActions,
+  extraActions = [],
   onActivate,
   onEditAddress,
 }: {
@@ -583,12 +715,13 @@ function SplitPane({
    * (⌘L, ⌘R, ⌘[) will find.
    */
   focused: boolean;
-  /** Extra controls revealed beside this half's close button. */
-  hoverActions?: React.ReactNode;
+  /** Extra tab actions, folded behind this half's three-dot button. */
+  extraActions?: React.ReactNode[];
   onActivate: () => void;
   onEditAddress: () => void;
 }) {
   const closeTab = useSumaStore((s) => s.closeTab);
+  const canBypassEgress = useCanBypassEgress(tab);
   const host = tabHost(tab);
 
   return (
@@ -612,8 +745,17 @@ function SplitPane({
       <TabMark tab={tab} />
       <ActiveTabLabel tab={tab} onEdit={onEditAddress} />
       <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
-        <FavoriteToggleButton tab={tab} />
-        {hoverActions}
+        <TabActions
+          actions={[
+            canFavorite(tab) ? (
+              <FavoriteToggleButton key="favorite" tab={tab} />
+            ) : null,
+            ...extraActions,
+            canBypassEgress ? (
+              <EgressBypassButton key="egress" tab={tab} />
+            ) : null,
+          ]}
+        />
         <TabCloseButton tab={tab} />
       </span>
       <span className="shrink-0 group-has-[:focus-visible]:hidden group-hover:hidden">
@@ -692,7 +834,7 @@ function SplitTab({
       <SplitPane
         tab={right}
         focused={right.active}
-        hoverActions={<SplitToggleButton tab={right} />}
+        extraActions={[<SplitToggleButton key="split" tab={right} />]}
         onActivate={() => onActivate(right.id)}
         onEditAddress={() => onEditAddress(right.id)}
       />

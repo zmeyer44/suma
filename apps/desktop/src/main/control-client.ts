@@ -306,6 +306,25 @@ export class ControlClient {
     ).devices;
   }
 
+  /**
+   * A single-use Gemini Live token for one voice conversation, minted from
+   * the operator's key inside the control plane (services/control's
+   * /v1/ai/voice/token). This is the voice assistant's equivalent of the
+   * chat sidebar's vended gateway: no Gemini key is ever stored on, or sent
+   * to, this Mac. Short-lived and single-use, so it is fetched per session
+   * and never cached.
+   */
+  async mintVoiceToken(model: string): Promise<{
+    token: string;
+    expiresAt: string;
+  }> {
+    return this.request<{ token: string; expiresAt: string }>(
+      "POST",
+      "/v1/ai/voice/token",
+      { model },
+    );
+  }
+
   async renameDevice(deviceId: string, name: string): Promise<ControlDevice> {
     return (
       await this.request<{ device: ControlDevice }>(

@@ -1,5 +1,11 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { jsonSchema, tool, type ToolSet } from "ai";
+import type { BrowserToolDeps } from "../src/main/chat/chat-tools";
+import { VoiceService } from "../src/main/voice/voice-service";
+import { VOICE_SETTINGS_FILENAME } from "../src/shared/voice";
 import {
   DEFAULT_VOICE_MODEL,
   DEFAULT_VOICE_SETTINGS,
@@ -254,6 +260,106 @@ describe("voice settings", () => {
     );
     expect(info.keyState).toBe("stored");
     expect("apiKey" in info).toBe(false);
+  });
+
+  it("carries the vended provenance without inventing a key", () => {
+    const info = voiceSettingsInfo({ ...DEFAULT_VOICE_SETTINGS }, "vended");
+    expect(info.keyState).toBe("vended");
+    expect(JSON.stringify(info)).not.toContain("apiKey");
+  });
+});
+
+/* ------------------------- credential precedence -------------------------- */
+
+/**
+ * The REAL VoiceService (it has no runtime Electron dependency — the browser
+ * tools reach Electron only through injected deps and type-only imports).
+ *
+ * Precedence is the security-relevant part: a vended token silently
+ * overriding a key the user pasted would bill the wrong account, and a
+ * "vended" state offered while signed out would promise access that cannot
+ * be delivered.
+ */
+describe("VoiceService credential precedence", () => {
+  const browser = {
+    spaces: { activeSpaceId: "s1" },
+    tabs: { list: () => [] },
+  } as unknown as BrowserToolDeps;
+
+  function build(opts: {
+    env?: NodeJS.ProcessEnv;
+    stored?: string;
+    vendedAvailable?: boolean;
+  }): VoiceService {
+    const dir = mkdtempSync(path.join(tmpdir(), "suma-voice-test-"));
+    if (opts.stored !== undefined) {
+      writeFileSync(
+        path.join(dir, VOICE_SETTINGS_FILENAME),
+        JSON.stringify({ apiKey: opts.stored }),
+      );
+    }
+    return new VoiceService({
+      userDataDir: dir,
+      browser,
+      chatToolSettings: () => ({ model: "m", tools: {} }),
+      emit: {
+        status: () => undefined,
+        transcript: () => undefined,
+        audioOut: () => undefined,
+        interrupted: () => undefined,
+      },
+      ...(opts.vendedAvailable === true
+        ? {
+            vendedTokenAvailable: () => true,
+            vendedToken: () => Promise.resolve({ token: "auth_tokens/x" }),
+          }
+        : {}),
+      env: opts.env ?? {},
+    });
+  }
+
+  it("prefers an explicit env key over a stored key and a vended token", () => {
+    const service = build({
+      env: { GEMINI_API_KEY: "env-key" },
+      stored: "stored-key",
+      vendedAvailable: true,
+    });
+    expect(service.settings().keyState).toBe("env");
+    service.stop();
+  });
+
+  it("accepts GOOGLE_API_KEY as an alias", () => {
+    const service = build({ env: { GOOGLE_API_KEY: "env-key" } });
+    expect(service.settings().keyState).toBe("env");
+    service.stop();
+  });
+
+  it("prefers the user's own stored key over a vended token", () => {
+    const service = build({ stored: "stored-key", vendedAvailable: true });
+    expect(service.settings().keyState).toBe("stored");
+    service.stop();
+  });
+
+  it("falls back to vended when signed in with no key of its own", () => {
+    const service = build({ vendedAvailable: true });
+    expect(service.settings().keyState).toBe("vended");
+    service.stop();
+  });
+
+  it("is unset when signed out with no key, and never leaks the key", () => {
+    const service = build({});
+    expect(service.settings().keyState).toBe("unset");
+
+    const withKey = build({ stored: "super-secret-key" });
+    expect(JSON.stringify(withKey.settings())).not.toContain("super-secret-key");
+    service.stop();
+    withKey.stop();
+  });
+
+  it("treats a blank env value as absent rather than as a key", () => {
+    const service = build({ env: { GEMINI_API_KEY: "   " }, vendedAvailable: true });
+    expect(service.settings().keyState).toBe("vended");
+    service.stop();
   });
 });
 

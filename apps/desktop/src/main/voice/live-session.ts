@@ -25,7 +25,17 @@ import {
 const CONNECT_TIMEOUT_MS = 15_000;
 
 export interface VoiceLiveSessionOpts {
+  /** A Gemini API key, or an ephemeral `auth_tokens/…` token when
+   *  `ephemeral` is set. */
   apiKey: string;
+  /**
+   * Whether `apiKey` is an ephemeral Live token vended by the control plane.
+   * Google serves ephemeral tokens from v1alpha ONLY — connecting with one on
+   * the default version fails authentication — so the version is pinned per
+   * credential kind rather than globally, which would move the raw-key path
+   * onto an alpha surface for no reason.
+   */
+  ephemeral?: boolean;
   model: string;
   /** Prebuilt voice name (shared/voice.ts VOICE_VOICES). */
   voice: string;
@@ -72,7 +82,12 @@ export class VoiceLiveSession {
     // handler's rejection against a hard timeout. Pre-attach consumers so
     // no branch's rejection is ever "unhandled" in the gaps.
     ready.catch(() => undefined);
-    const ai = new GoogleGenAI({ apiKey: opts.apiKey });
+    const ai = new GoogleGenAI({
+      apiKey: opts.apiKey,
+      ...(opts.ephemeral === true
+        ? { httpOptions: { apiVersion: "v1alpha" } }
+        : {}),
+    });
     const sessionPromise = ai.live.connect({
       model: opts.model,
       config: {

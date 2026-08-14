@@ -613,13 +613,31 @@ async function startServices(ctx: {
   // renderer (the same view that hosts the floating audio player, always
   // alive and layered above the pages) owns the microphone, the speakers,
   // and the HUD. Browser-tool permissions are the chat sidebar's own
-  // Assistant-page toggles, read per session.
+  // Assistant-page toggles, read per session. Credential order mirrors the
+  // chat assistant's: environment key, then a key stored on this Mac, then —
+  // with neither — a single-use Live token vended by the signed-in control
+  // plane, keyless on this machine.
   const voice = new VoiceService({
     userDataDir: userData,
     browser: { spaces, tabs },
     chatToolSettings: () => {
       const info = chat.settings();
       return { model: info.model, tools: info.tools };
+    },
+    vendedTokenAvailable: () => auth.controlClient() !== null,
+    vendedToken: async () => {
+      const client = auth.controlClient();
+      if (client === null) return null;
+      try {
+        const { token } = await client.mintVoiceToken(voice.settings().model);
+        return { token };
+      } catch (err) {
+        // Offline, an expired device token, or an operator with no Gemini
+        // key configured — all mean "no vended session right now", which the
+        // service reports as a recoverable error rather than a crash.
+        console.error("suma voice: could not mint a vended token:", err);
+        return null;
+      }
     },
     emit: {
       status: (status) => {

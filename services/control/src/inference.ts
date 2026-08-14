@@ -25,6 +25,24 @@
  * is plain JSON carrying a usage block. Streamed (SSE) responses pass through
  * untouched and record null token counts — parsing usage out of the stream is
  * a follow-up; the request count is what the daily cap enforces today.
+ *
+ * VOICE (POST /voice/token) vends the same way but cannot use the same shape.
+ * The desktop's voice assistant speaks the Gemini Live API, which is a
+ * bidirectional audio WebSocket rather than a request/response call, so there
+ * is nothing for a passthrough proxy to forward. Google's answer for exactly
+ * this case is an EPHEMERAL AUTH TOKEN: this route swaps the caller's device
+ * token for a short-lived, single-use token minted from the operator's Gemini
+ * key, and the desktop opens its socket directly to Google with that. The
+ * operator's key still never reaches a client — the same property the proxy
+ * gives the chat assistant, reached a different way.
+ *
+ * The token's blast radius is deliberately small, and measured rather than
+ * assumed: `uses: 1` is enforced by Google (a second connection with the same
+ * token is refused), the socket must be opened within NEW_SESSION_WINDOW_MS,
+ * and the token dies at TOKEN_LIFETIME_MS regardless. Constraining the token
+ * to one MODEL is NOT relied on: v1alpha accepts the constraint and then lets
+ * a differently-modelled session connect anyway (verified 2026-08-13), so the
+ * model is recorded for cost visibility, never trusted as a limit.
  */
 
 import { Hono } from "hono";
@@ -43,20 +61,39 @@ export interface InferenceOptions {
   apiKey: string | null;
   /** Proxied requests allowed per user per UTC day. */
   dailyRequestCap: number;
+  /** Gemini Developer API base that mints Live ephemeral tokens. */
+  voiceUpstreamUrl: string;
+  /** The operator's Gemini key. Null closes /voice/token (404). */
+  voiceApiKey: string | null;
 }
 
 export const INFERENCE_UPSTREAM_ENV = "AI_GATEWAY_UPSTREAM_URL";
 export const INFERENCE_KEY_ENV = "AI_GATEWAY_API_KEY";
 export const INFERENCE_CAP_ENV = "AI_DAILY_REQUEST_CAP";
+export const VOICE_UPSTREAM_ENV = "GEMINI_UPSTREAM_URL";
+export const VOICE_KEY_ENV = "GEMINI_API_KEY";
 
 const DEFAULT_UPSTREAM = "https://ai-gateway.vercel.sh";
 const DEFAULT_DAILY_CAP = 500;
+const DEFAULT_VOICE_UPSTREAM = "https://generativelanguage.googleapis.com";
+
+/** Ephemeral tokens are a v1alpha feature; the path is version-pinned here
+ *  rather than in the caller so a bump is one edit. */
+const VOICE_TOKEN_PATH = "/v1alpha/auth_tokens";
+/** How long the client has to OPEN its socket after minting. */
+const NEW_SESSION_WINDOW_MS = 2 * 60_000;
+/** Hard ceiling on the token, and so on the conversation it opens. */
+const TOKEN_LIFETIME_MS = 30 * 60_000;
+/** Recorded for cost visibility; long ids are truncated, never rejected. */
+const MAX_MODEL_LENGTH = 200;
 
 /** For unit tests and embedded use; deployed entrypoints read the env. */
 export const INFERENCE_DISABLED: InferenceOptions = {
   upstreamUrl: DEFAULT_UPSTREAM,
   apiKey: null,
   dailyRequestCap: DEFAULT_DAILY_CAP,
+  voiceUpstreamUrl: DEFAULT_VOICE_UPSTREAM,
+  voiceApiKey: null,
 };
 
 export function inferenceOptionsFromEnv(
@@ -68,6 +105,8 @@ export function inferenceOptionsFromEnv(
     apiKey: env[INFERENCE_KEY_ENV]?.trim() || null,
     dailyRequestCap:
       Number.isFinite(cap) && cap > 0 ? Math.floor(cap) : DEFAULT_DAILY_CAP,
+    voiceUpstreamUrl: env[VOICE_UPSTREAM_ENV] ?? DEFAULT_VOICE_UPSTREAM,
+    voiceApiKey: env[VOICE_KEY_ENV]?.trim() || null,
   };
 }
 
@@ -164,13 +203,113 @@ export function inferenceRoutes(
     const userId = c.get("userId");
     const enabled = (await features(userId)).includes(INFERENCE_FEATURE);
     const vending = options.apiKey !== null;
+    const voiceVending = options.voiceApiKey !== null;
     return c.json({
       vending,
       enabled,
       available: vending && enabled,
+      // Voice vends independently: an operator may configure a Gemini key
+      // without a gateway key, or the reverse.
+      voiceVending,
+      voiceAvailable: voiceVending && enabled,
       dailyRequestCap: options.dailyRequestCap,
       requestsToday: await requestsToday(userId),
     });
+  });
+
+  /**
+   * Mint a single-use Gemini Live ephemeral token for the voice assistant.
+   * Same three admission gates as the proxy, then one metered mint. The
+   * operator's Gemini key never leaves this process — only the token does.
+   */
+  ai.post("/voice/token", async (c) => {
+    if (options.voiceApiKey === null) return c.json({ error: "not_found" }, 404);
+
+    const userId = c.get("userId");
+    if (!(await features(userId)).includes(INFERENCE_FEATURE)) {
+      return c.json(
+        { error: "feature_required", feature: INFERENCE_FEATURE },
+        403,
+      );
+    }
+
+    const used = await requestsToday(userId);
+    if (used >= options.dailyRequestCap) {
+      return c.json(
+        {
+          error: "rate_limited",
+          explanation: `Daily inference allowance (${options.dailyRequestCap} requests) reached — resets at midnight UTC.`,
+        },
+        429,
+      );
+    }
+
+    // The model is metered, not enforced (see the note at the top of this
+    // file): a body that omits it still gets a token.
+    let model: string | null = null;
+    try {
+      const parsed = (await c.req.json()) as { model?: unknown };
+      if (typeof parsed.model === "string" && parsed.model.trim() !== "") {
+        model = parsed.model.trim().slice(0, MAX_MODEL_LENGTH);
+      }
+    } catch {
+      // No/!JSON body — the desktop always sends one, but a token request
+      // without it is still a valid request.
+    }
+
+    const now = Date.now();
+    const expireTime = new Date(now + TOKEN_LIFETIME_MS).toISOString();
+    let upstream: Response;
+    let payload: { name?: unknown } = {};
+    try {
+      upstream = await fetch(
+        options.voiceUpstreamUrl.replace(/\/+$/, "") + VOICE_TOKEN_PATH,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-goog-api-key": options.voiceApiKey,
+          },
+          body: JSON.stringify({
+            uses: 1,
+            expireTime,
+            newSessionExpireTime: new Date(
+              now + NEW_SESSION_WINDOW_MS,
+            ).toISOString(),
+          }),
+        },
+      );
+      payload = (await upstream.json()) as { name?: unknown };
+    } catch {
+      await db.insert(inferenceUsage).values({
+        userId,
+        deviceId: c.get("deviceId"),
+        path: "/voice/token",
+        model,
+        status: 502,
+        inputTokens: null,
+        outputTokens: null,
+      });
+      return c.json({ error: "bad_gateway" }, 502);
+    }
+
+    await db.insert(inferenceUsage).values({
+      userId,
+      deviceId: c.get("deviceId"),
+      path: "/voice/token",
+      model,
+      status: upstream.status,
+      inputTokens: null,
+      outputTokens: null,
+    });
+
+    // Upstream errors are reported as a refusal to vend, never forwarded
+    // verbatim — an upstream body can carry key/quota detail the client has
+    // no business seeing.
+    if (!upstream.ok || typeof payload.name !== "string") {
+      return c.json({ error: "upstream_refused", status: upstream.status }, 502);
+    }
+    return c.json({ token: payload.name, expiresAt: expireTime });
   });
 
   ai.all("/gateway/*", async (c) => {

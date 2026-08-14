@@ -38,17 +38,27 @@ export interface VoiceModelOption {
  * speaks AND listens over a single connection with tool calling — no other
  * provider is wired here yet, so these are Gemini ids, not gateway ids.
  * Free-typing another id is allowed, same as the chat model picker.
+ *
+ * Every id here was verified against a real account (2026-08-13): connect,
+ * speech transcription, browser tool calls, and spoken reply. Ids move fast
+ * on this API — a model that has been retired fails at connect with a clear
+ * error, which is why the picker is not a cage.
  */
 export const VOICE_MODELS: readonly VoiceModelOption[] = [
   {
     id: "gemini-2.5-flash-native-audio-preview-09-2025",
     label: "Gemini native audio",
-    hint: "most natural, best interruption handling",
+    hint: "most natural, fastest to answer",
   },
   {
-    id: "gemini-live-2.5-flash-preview",
-    label: "Gemini Live Flash",
-    hint: "half-cascade, most robust tool calling",
+    id: "gemini-3.1-flash-live-preview",
+    label: "Gemini 3.1 Flash Live",
+    hint: "newest, most concise",
+  },
+  {
+    id: "gemini-2.5-flash-native-audio-latest",
+    label: "Gemini native audio (latest)",
+    hint: "rolling — tracks Google's current release",
   },
 ];
 
@@ -104,8 +114,14 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
 
 export const VOICE_SETTINGS_FILENAME = "voice.json";
 
-/** Where the Gemini credential came from — status line, never the key. */
-export type VoiceKeyState = "env" | "stored" | "unset";
+/**
+ * Where the Gemini credential came from — status line, never the key.
+ * Precedence: env, then a stored key, then "vended" — a short-lived, single-
+ * use Live token minted by the signed-in control plane's /v1/ai/voice/token
+ * route, so a shipped build talks to Gemini with no key on the machine at
+ * all. Mirrors ChatKeyState (shared/chat.ts).
+ */
+export type VoiceKeyState = "env" | "stored" | "vended" | "unset";
 
 /** The renderer-facing view of the settings — no key material. */
 export interface VoiceSettingsInfo {

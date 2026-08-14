@@ -18,6 +18,8 @@ import { StubSandboxProvider } from "../src/providers/sandbox.js";
  */
 
 const UPSTREAM_KEY = "upstream-secret-key";
+const VOICE_KEY = "gemini-secret-key";
+const MINTED_TOKEN = "auth_tokens/abc123ephemeral";
 const DAILY_CAP = 3;
 
 interface SeenRequest {
@@ -64,6 +66,18 @@ beforeAll(async () => {
         res.end();
         return;
       }
+      // Gemini's ephemeral-token endpoint (voice). `/v1alpha/auth_tokens_boom`
+      // is the failure twin, for the upstream-refused path.
+      if (req.url === "/v1alpha/auth_tokens") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ name: MINTED_TOKEN }));
+        return;
+      }
+      if (req.url === "/boom/v1alpha/auth_tokens") {
+        res.writeHead(429, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "quota exhausted for project 12345" } }));
+        return;
+      }
       if (req.url?.startsWith("/v1/boom")) {
         res.writeHead(400, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { message: "bad model" } }));
@@ -92,6 +106,8 @@ beforeAll(async () => {
     upstreamUrl,
     apiKey: UPSTREAM_KEY,
     dailyRequestCap: DAILY_CAP,
+    voiceUpstreamUrl: upstreamUrl,
+    voiceApiKey: VOICE_KEY,
   };
   app = createApp(
     db,
@@ -285,6 +301,8 @@ describe("vended inference proxy (/v1/ai/gateway)", () => {
       vending: true,
       enabled: true,
       available: true,
+      voiceVending: true,
+      voiceAvailable: true,
       dailyRequestCap: DAILY_CAP,
       requestsToday: 1,
     });
@@ -306,5 +324,152 @@ describe("vended inference proxy (/v1/ai/gateway)", () => {
     expect(res.status).toBe(201);
     const body = (await res.json()) as { user: { features: string[] } };
     expect(body.user.features).toContain(INFERENCE_FEATURE);
+  });
+});
+
+/**
+ * The voice assistant's credential path. Gemini Live is a WebSocket, so
+ * there is nothing to proxy — this route vends a short-lived, single-use
+ * ephemeral token instead, under the same admission gates as the proxy.
+ */
+describe("vended voice tokens (/v1/ai/voice/token)", () => {
+  const voiceRequest = (token: string, body?: unknown): RequestInit => ({
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      cookie: "secret-session=1",
+    },
+    body: JSON.stringify(body ?? { model: "gemini-2.5-flash-native-audio-preview-09-2025" }),
+  });
+
+  it("requires device auth like every /v1 route", async () => {
+    const res = await app.request("/v1/ai/voice/token", { method: "POST" });
+    expect(res.status).toBe(401);
+  });
+
+  it("is closed (404) when no Gemini key is configured", async () => {
+    const userId = await makeUser([INFERENCE_FEATURE]);
+    const res = await closedApp.request(
+      "/v1/ai/voice/token",
+      voiceRequest(`hbr_dev_${userId}`),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("refuses accounts without the inference feature", async () => {
+    const userId = await makeUser(["files"]);
+    const res = await app.request(
+      "/v1/ai/voice/token",
+      voiceRequest(`hbr_dev_${userId}`),
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("mints a single-use token and never reveals the operator key", async () => {
+    const userId = await makeUser([INFERENCE_FEATURE]);
+    const before = seen.length;
+    const res = await app.request(
+      "/v1/ai/voice/token",
+      voiceRequest(`hbr_dev_${userId}`),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { token: string; expiresAt: string };
+    expect(body.token).toBe(MINTED_TOKEN);
+    expect(Date.parse(body.expiresAt)).toBeGreaterThan(Date.now());
+    // The operator's key must not appear anywhere in the client's response.
+    expect(JSON.stringify(body)).not.toContain(VOICE_KEY);
+
+    const mint = seen[before];
+    expect(mint?.path).toBe("/v1alpha/auth_tokens");
+    // Upstream is authenticated by the operator key as a header — and the
+    // caller's own bearer/cookie must never be forwarded.
+    expect(mint?.authorization).toBeUndefined();
+    expect(mint?.cookie).toBeUndefined();
+    const sent = JSON.parse(mint?.body ?? "{}") as {
+      uses: number;
+      expireTime: string;
+      newSessionExpireTime: string;
+    };
+    expect(sent.uses).toBe(1);
+    // The socket window is tighter than the token's own lifetime.
+    expect(Date.parse(sent.newSessionExpireTime)).toBeLessThan(
+      Date.parse(sent.expireTime),
+    );
+  });
+
+  it("meters each mint against the same daily allowance as the proxy", async () => {
+    const userId = await makeUser([INFERENCE_FEATURE]);
+    const token = `hbr_dev_${userId}`;
+    await app.request("/v1/ai/voice/token", voiceRequest(token));
+
+    const rows = await db
+      .select()
+      .from(schema.inferenceUsage)
+      .where(
+        and(
+          eq(schema.inferenceUsage.userId, userId),
+          eq(schema.inferenceUsage.path, "/voice/token"),
+        ),
+      );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.model).toBe("gemini-2.5-flash-native-audio-preview-09-2025");
+    expect(rows[0]?.status).toBe(200);
+
+    // Exhaust the shared cap; the next mint is refused.
+    for (let i = rows.length; i < DAILY_CAP; i++) {
+      await app.request("/v1/ai/voice/token", voiceRequest(token));
+    }
+    const refused = await app.request("/v1/ai/voice/token", voiceRequest(token));
+    expect(refused.status).toBe(429);
+  });
+
+  it("mints without a model, recording it as unknown", async () => {
+    const userId = await makeUser([INFERENCE_FEATURE]);
+    const res = await app.request("/v1/ai/voice/token", {
+      method: "POST",
+      headers: { authorization: `Bearer hbr_dev_${userId}` },
+    });
+    expect(res.status).toBe(200);
+    const rows = await db
+      .select()
+      .from(schema.inferenceUsage)
+      .where(eq(schema.inferenceUsage.userId, userId));
+    expect(rows[0]?.model).toBeNull();
+  });
+
+  it("reports an upstream refusal without forwarding its body", async () => {
+    const userId = await makeUser([INFERENCE_FEATURE]);
+    const boomApp = createApp(
+      db,
+      new StubSandboxProvider(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        upstreamUrl,
+        apiKey: UPSTREAM_KEY,
+        dailyRequestCap: DAILY_CAP,
+        voiceUpstreamUrl: `${upstreamUrl}/boom`,
+        voiceApiKey: VOICE_KEY,
+      },
+    );
+    const res = await boomApp.request(
+      "/v1/ai/voice/token",
+      voiceRequest(`hbr_dev_${userId}`),
+    );
+    expect(res.status).toBe(502);
+    const text = await res.text();
+    // The upstream's quota/project detail is the operator's business.
+    expect(text).not.toContain("quota exhausted");
+    expect(text).not.toContain("12345");
+
+    // A refused mint is still metered — it consumed an upstream call.
+    const rows = await db
+      .select()
+      .from(schema.inferenceUsage)
+      .where(eq(schema.inferenceUsage.userId, userId));
+    expect(rows[0]?.status).toBe(429);
   });
 });

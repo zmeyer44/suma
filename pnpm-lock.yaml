@@ -29,6 +29,9 @@ importers:
       '@suma/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@suma/egress-policy':
+        specifier: workspace:*
+        version: link:../../packages/egress-policy
       '@suma/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol

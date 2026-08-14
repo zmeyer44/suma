@@ -82,6 +82,13 @@ export interface VoiceServiceDeps {
    *  revoked capability is gone from the very next conversation. */
   chatToolSettings: () => ChatSettings;
   emit: VoiceEmitter;
+  /** Vended voice: whether a control plane is configured (sync, for the
+   *  settings status line) and a freshly minted ephemeral Live token for one
+   *  conversation. Minted PER SESSION because the token is single-use and
+   *  expires in minutes — it can never be cached. Both absent in builds
+   *  without account support. Mirrors ChatService's vended gateway. */
+  vendedTokenAvailable?: () => boolean;
+  vendedToken?: () => Promise<{ token: string } | null>;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -158,16 +165,34 @@ export class VoiceService {
       const value = this.env[name];
       if (typeof value === "string" && value.trim() !== "") return "env";
     }
-    return this.settingsCache.apiKey.trim() !== "" ? "stored" : "unset";
+    if (this.settingsCache.apiKey.trim() !== "") return "stored";
+    // A signed-in account reaches Gemini through a vended ephemeral token;
+    // an explicit key always wins so users can bring their own.
+    return this.deps.vendedTokenAvailable?.() === true ? "vended" : "unset";
   }
 
-  private resolveApiKey(): string | null {
+  /**
+   * The credential for ONE conversation. An env or stored key is a long-lived
+   * API key; with neither, a single-use ephemeral token is minted from the
+   * control plane. Null means the vend was configured but failed (offline,
+   * expired device token) — distinct from "unset", which keyState reports.
+   */
+  private async resolveCredential(): Promise<{
+    value: string;
+    ephemeral: boolean;
+  } | null> {
     for (const name of GEMINI_ENV_KEYS) {
       const value = this.env[name];
-      if (typeof value === "string" && value.trim() !== "") return value.trim();
+      if (typeof value === "string" && value.trim() !== "") {
+        return { value: value.trim(), ephemeral: false };
+      }
     }
     const stored = this.settingsCache.apiKey.trim();
-    return stored === "" ? null : stored;
+    if (stored !== "") return { value: stored, ephemeral: false };
+
+    const vended = await this.deps.vendedToken?.();
+    const token = vended?.token.trim() ?? "";
+    return token === "" ? null : { value: token, ephemeral: true };
   }
 
   /* -------------------------------- status ------------------------------- */
@@ -284,12 +309,11 @@ export class VoiceService {
     }
     if (!this.settingsCache.enabled) return;
 
-    const apiKey = this.resolveApiKey();
-    if (apiKey === null) {
+    if (this.keyState() === "unset") {
       this.setStatus(
         "listening",
         this.wakeState,
-        "No Gemini API key — add one under Settings → Voice assistant, or set GEMINI_API_KEY.",
+        "No model access — sign in to your Suma account, add a key under Settings → Voice assistant, or set GEMINI_API_KEY.",
       );
       return;
     }
@@ -302,36 +326,50 @@ export class VoiceService {
     const tools = adaptToolsForVoice(
       enabledBrowserTools(this.deps.browser, this.deps.chatToolSettings()),
     );
-    void VoiceLiveSession.connect({
-      apiKey,
-      model: settings.model,
-      voice: settings.voice,
-      systemInstruction: voiceSystemInstruction(settings.wakeWord),
-      tools,
-      callbacks: {
-        onAudio: (data) => {
-          if (this.generation !== generation) return;
-          this.deps.emit.audioOut(data);
-          this.touch();
-        },
-        onTranscript: (role, text) => {
-          if (this.generation !== generation) return;
-          this.deps.emit.transcript({ role, text });
-          this.touch();
-        },
-        onInterrupted: () => {
-          if (this.generation !== generation) return;
-          this.deps.emit.interrupted();
-          this.touch();
-        },
-        onToolActivity: () => this.touch(),
-        onClosed: (error) => {
-          if (this.generation !== generation) return;
-          this.endSession(error);
-        },
-      },
-    }).then(
-      (session) => {
+    // Minting a vended token is a network round trip, so the credential is
+    // resolved inside the connecting phase — mic frames are already being
+    // buffered by then, and nothing the user says is lost to the wait.
+    void this.resolveCredential()
+      .then((credential) => {
+        if (this.generation !== generation) return null;
+        if (credential === null) {
+          throw new Error(
+            "Signed in, but the control plane is unreachable right now — try again, or add your own Gemini key in Settings.",
+          );
+        }
+        return VoiceLiveSession.connect({
+          apiKey: credential.value,
+          ephemeral: credential.ephemeral,
+          model: settings.model,
+          voice: settings.voice,
+          systemInstruction: voiceSystemInstruction(settings.wakeWord),
+          tools,
+          callbacks: {
+            onAudio: (data) => {
+              if (this.generation !== generation) return;
+              this.deps.emit.audioOut(data);
+              this.touch();
+            },
+            onTranscript: (role, text) => {
+              if (this.generation !== generation) return;
+              this.deps.emit.transcript({ role, text });
+              this.touch();
+            },
+            onInterrupted: () => {
+              if (this.generation !== generation) return;
+              this.deps.emit.interrupted();
+              this.touch();
+            },
+            onToolActivity: () => this.touch(),
+            onClosed: (error) => {
+              if (this.generation !== generation) return;
+              this.endSession(error);
+            },
+          },
+        });
+      })
+      .then((session) => {
+        if (session === null) return; // superseded before connecting
         if (this.generation !== generation) {
           session.close(); // superseded while connecting
           return;
@@ -345,14 +383,13 @@ export class VoiceService {
         this.pendingFrames = [];
         this.touch();
         this.startIdleTimer();
-      },
-      (err: unknown) => {
+      })
+      .catch((err: unknown) => {
         if (this.generation !== generation) return;
         this.endSession(
           err instanceof Error ? err.message : "could not start the voice session",
         );
-      },
-    );
+      });
   }
 
   /** End the conversation and return to armed listening. */

@@ -48,6 +48,11 @@ console.log(
     ? "inference: disabled (AI_GATEWAY_API_KEY unset — clients bring their own keys)"
     : `inference: vending via ${inference.upstreamUrl} (${inference.dailyRequestCap} requests/user/day)`,
 );
+console.log(
+  inference.voiceApiKey === null
+    ? "voice: disabled (GEMINI_API_KEY unset — clients bring their own keys)"
+    : `voice: vending Live ephemeral tokens via ${inference.voiceUpstreamUrl}`,
+);
 
 // §11: invitation-only beta. The gate defaults ON here — a deployed control
 // plane refuses uninvited signups unless SUMA_INVITES_REQUIRED=0 is set
