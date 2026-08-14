@@ -667,8 +667,12 @@ function TabTrailing({
   /** Folded behind the three-dot button, in the order they should appear. */
   actions: React.ReactNode[];
 }) {
+  // One flex item, not two: the tab's row is gap-2, so as siblings the two clip
+  // boxes kept a full gap between them — 8px of dead space trailing whichever
+  // one was collapsed to zero, which read as the close button floating away
+  // from the tab's edge.
   return (
-    <>
+    <span className="flex shrink-0 items-center">
       <span className="grid grid-cols-[0fr] opacity-0 transition-[grid-template-columns,opacity] duration-200 ease-out group-hover:grid-cols-[1fr] group-hover:opacity-100 group-has-[:focus-visible]:grid-cols-[1fr] group-has-[:focus-visible]:opacity-100">
         <span className="flex min-w-0 items-center gap-0.5 overflow-hidden">
           <TabActions actions={actions} />
@@ -680,7 +684,7 @@ function TabTrailing({
           <ContinuityDot host={tabHost(tab)} />
         </span>
       </span>
-    </>
+    </span>
   );
 }
 
@@ -754,9 +758,12 @@ function Tab({
           : "cursor-pointer touch-none",
         iconOnly
           ? "w-10 shrink-0 justify-center"
-          : tab.active
-            ? "min-w-[176px] max-w-[240px] flex-1 px-2.5"
-            : "min-w-[56px] max-w-[240px] flex-1 px-3",
+          : // Less padding on the trailing side than the leading one: that slot
+            // ends in a 16px button around a 12px glyph, so its own 2px inset
+            // already reads as part of the gap.
+            tab.active
+            ? "min-w-[176px] max-w-[240px] flex-1 pr-2 pl-2.5"
+            : "min-w-[56px] max-w-[240px] flex-1 pr-2 pl-3",
         shape,
       )}
     >
@@ -1058,7 +1065,7 @@ function ActiveTabUrl({ tab, onEdit }: { tab: TabInfo; onEdit: () => void }) {
         onEdit();
       }}
       onDoubleClick={(e) => e.stopPropagation()}
-      className="pointer-events-none absolute inset-x-0 inset-y-[3px] flex w-full min-w-0 cursor-text items-center rounded-[7px] px-1.5 text-left font-mono text-[11.5px] text-muted opacity-0 transition-opacity duration-150 hover:bg-ink/8 hover:text-text focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none group-hover:pointer-events-auto group-hover:opacity-100"
+      className="pointer-events-none absolute inset-x-0 inset-y-[3px] flex w-full min-w-0 cursor-pointer items-center rounded-[7px] px-1.5 text-left font-mono text-[11.5px] text-muted opacity-0 transition-opacity duration-150 hover:bg-ink/8 hover:text-text focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none group-hover:pointer-events-auto group-hover:opacity-100"
     >
       <span className="min-w-0 truncate">
         {shown.length > 0 ? (
