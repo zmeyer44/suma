@@ -356,7 +356,7 @@ export function CommandBar() {
         role="dialog"
         aria-label="Command bar"
         onClick={(e) => e.stopPropagation()}
-        className="animate-overlay-in mx-auto mt-[12vh] w-[580px] max-w-[calc(100vw-48px)] overflow-hidden rounded-2xl border border-ink/10 bg-raised shadow-pop"
+        className="animate-overlay-in mx-auto mt-[12vh] w-[580px] max-w-[calc(100vw-48px)] overflow-hidden rounded-2xl border border-float-edge bg-raised shadow-pop"
       >
         <div className="flex items-center gap-2.5 border-b border-hairline px-4">
           <Search className="size-3.5 shrink-0 text-faint" aria-hidden="true" />

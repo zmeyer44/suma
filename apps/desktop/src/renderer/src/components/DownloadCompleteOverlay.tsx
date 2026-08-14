@@ -15,7 +15,7 @@
  * sends `downloadOverlay:open` with the download's id, which main resolves to
  * the save path it recorded. No path ever crosses this boundary.
  *
- * Layout constraints inherited from the panel: each row carries
+ * Layout constraints inherited from the stack: each row carries
  * data-overlay-item on its CLIPPING wrapper and its own w-80 — OverlayStack
  * measures the visible rows to size the view (see SavePreviewOverlay for the
  * history behind both).
@@ -27,6 +27,7 @@ import type { DownloadItemInfo } from "../../../shared/ipc";
 import { cn } from "../lib/cn";
 import { formatBytes } from "../lib/format";
 import { Button } from "./ui/button";
+import { OVERLAY_CARD } from "./ui/overlay-card";
 
 /** Long enough to notice and act on; hover holds it open. */
 const DISMISS_MS = 8000;
@@ -199,13 +200,18 @@ function CompletedCell({
   const open = entered && !card.leaving;
   const size = formatBytes(card.item.receivedBytes);
   return (
-    <div className={cn("save-preview-cell", open && "save-preview-cell-open")}>
+    <div
+      data-overlay-row
+      data-open={open}
+      className={cn("save-preview-cell", open && "save-preview-cell-open")}
+    >
       <div className="flex min-h-0 flex-col items-end overflow-hidden">
         <div
           data-overlay-item
           onMouseEnter={onHoverStart}
           onMouseLeave={onHoverEnd}
           className={cn(
+            OVERLAY_CARD,
             "save-preview-card w-80 p-2.5 text-left",
             open ? "save-preview-card-in" : "save-preview-card-out",
           )}

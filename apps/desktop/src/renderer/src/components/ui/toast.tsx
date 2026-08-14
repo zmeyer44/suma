@@ -122,7 +122,7 @@ function Toast({
       data-testid="toast"
       swipeDirection={swipeDirection}
       className={cn(
-        "group/toast pointer-events-auto absolute inset-x-0 bottom-0 z-[calc(1000-var(--toast-index))] origin-bottom rounded-xl border border-hairline bg-raised text-text shadow-pop will-change-transform outline-none select-none focus-visible:border-accent/50 focus-visible:ring-2 focus-visible:ring-accent/40",
+        "group/toast pointer-events-auto absolute inset-x-0 bottom-0 z-[calc(1000-var(--toast-index))] origin-bottom rounded-xl border border-float-edge bg-raised text-text shadow-pop will-change-transform outline-none select-none focus-visible:border-accent/50 focus-visible:ring-2 focus-visible:ring-accent/40",
         // The tone bloom (TONE.bloom supplies the gradient; nothing paints
         // without it). Behind the content, above the fill, clipped to the
         // card's own radius so the corners stay clean.

@@ -102,7 +102,7 @@ function PreviewCard({ tab }: { tab: TabInfo }) {
           </span>
         )}
       </span>
-      <span className="flex h-7 shrink-0 items-center gap-1.5 border-t border-ink/8 bg-chrome px-2">
+      <span className="flex h-7 shrink-0 items-center gap-1.5 border-t border-ink/8 bg-shelf px-2">
         <TabMark tab={tab} />
         <span
           className={cn(
@@ -168,8 +168,12 @@ export function TabPreviewStrip() {
     <div
       data-closing={open ? undefined : ""}
       style={{ height: expanded ? SHELF_H : 0 }}
+      // bg-shelf IS the active tab's face color (styles.css): the strip keeps
+      // its own gradient, and the folder-shaped active tab — the one element
+      // painted in this color up there — appears to flow directly into this
+      // container, as if tab and shelf were one piece of paper.
       className={cn(
-        "relative shrink-0 overflow-hidden bg-chrome",
+        "relative shrink-0 overflow-hidden bg-shelf",
         animating && "tab-preview-slide",
       )}
       onPointerEnter={previewZoneEnter}

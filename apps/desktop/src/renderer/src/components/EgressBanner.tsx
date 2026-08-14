@@ -68,7 +68,7 @@ export function BypassSuggestions() {
         return (
           <div
             key={`${s.spaceId}|${s.host}`}
-            className="animate-toast-in pointer-events-auto w-full rounded-lg border border-hairline bg-raised p-3 shadow-pop"
+            className="animate-toast-in pointer-events-auto w-full rounded-lg border border-float-edge bg-raised p-3 shadow-pop"
           >
             <p className="text-[12px] leading-snug text-text">
               <span className="font-mono">{s.host}</span> may be challenging your identity IP.

@@ -40,6 +40,7 @@ import { speedLabel, TTS_SPEEDS } from "../../../shared/tts";
 import { cn } from "../lib/cn";
 import { formatTime } from "../lib/format";
 import { Button } from "./ui/button";
+import { OVERLAY_CARD } from "./ui/overlay-card";
 import { Slider } from "./ui/slider";
 
 function send(command: AudioOverlayCommand): void {
@@ -97,7 +98,12 @@ function statusNote(state: AudioOverlayState): string | null {
  */
 function PlayerCell({ open, children }: { open: boolean; children: React.ReactNode }) {
   return (
-    <div inert={!open} className={cn("player-cell", open && "player-cell-open")}>
+    <div
+      inert={!open}
+      data-overlay-row
+      data-open={open}
+      className={cn("player-cell", open && "player-cell-open")}
+    >
       {/* data-overlay-item lives HERE, on the clipping wrapper, because its
           rect is what actually collapses — the content inside keeps its
           full layout size under overflow-hidden (OverlayStack reads
@@ -186,10 +192,8 @@ export function FloatingAudioPlayer() {
       <PlayerCell open={cardOpen}>
         <div
           data-overlay-item
-          // A ROW of the shared glass panel (OverlayStack), not a card of
-          // its own: the panel's frost and border carry the surface, so
-          // this contributes only its content and the slide-in transform.
           className={cn(
+            OVERLAY_CARD,
             "save-preview-card w-80 p-2.5",
             cardOpen ? "save-preview-card-in" : "save-preview-card-out",
           )}
@@ -329,9 +333,9 @@ export function FloatingAudioPlayer() {
           aria-label={`Show audio player — ${track.title}`}
           title={track.title}
           className={cn(
-            // The glass panel shrinks to this row when it is the only
-            // content, so the pill needs no capsule of its own — the
-            // window-fitted panel IS the chip.
+            // Its own capsule, like every other row. It used to rely on the
+            // shared panel shrinking to fit it and standing in as the chip.
+            OVERLAY_CARD,
             "save-preview-card flex h-8 cursor-pointer items-center gap-1.5 px-3 outline-none focus-visible:ring-2 focus-visible:ring-accent/40 hover:bg-ink/8",
             pillOpen ? "save-preview-card-in" : "save-preview-card-out",
           )}

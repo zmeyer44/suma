@@ -1651,7 +1651,11 @@ export function TabStrip() {
         aria-hidden="true"
         className="pointer-events-none absolute inset-x-0 top-0 h-px bg-ink/6"
       />
-      {/* Panel top edge — the active tab covers its own span of this line */}
+      {/* Panel top edge — the active tab covers its own span of this line.
+          With the preview shelf open this line is the shelf's top edge, and
+          the active tab interrupting it is what makes the folder read as
+          flowing INTO the shelf: strip and shelf stay two distinct bands,
+          joined only through the tab's silhouette. */}
       <span
         aria-hidden="true"
         className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-chrome-edge"

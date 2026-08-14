@@ -1,16 +1,21 @@
 /**
  * The floating overlay stack — the page rendered inside the transparent
  * overlay WebContentsView (shell-window.ts), layered above the tab views
- * and NOT part of the chrome document. One tinted GLASS PANEL, anchored to
- * the content hole's top-right: the floating audio player (AudioPlayer.tsx)
- * on top, the save-preview cards (SavePreviewOverlay.tsx) stacking below
- * it, so neither can ever cover the other.
+ * and NOT part of the chrome document. A STACK OF SEPARATE CARDS, anchored
+ * to the content hole's top-right: the floating audio player
+ * (AudioPlayer.tsx) on top, the save-preview cards (SavePreviewOverlay.tsx)
+ * stacking below it, so neither can ever cover the other.
  *
- * The panel's surface is a translucent app-palette tint (.overlay-glass) —
- * a sibling view's pixels cannot be blurred from here, so there is no real
- * frost (see styles.css for the history). The panel renders EDGE-TO-EDGE
- * with no margins anywhere: the view swallows clicks over its whole rect,
- * so any padding would deaden a strip of the page around the content. All
+ * Each row carries its own opaque surface and edge (ui/overlay-card.ts).
+ * They are unrelated notices that merely share a corner, so one tall
+ * container around them would read as a single compound widget with its
+ * parts run together. The div below is therefore unpainted — it exists to
+ * lay the rows out and to be measured.
+ *
+ * The stack renders EDGE-TO-EDGE with no margins anywhere: the view swallows
+ * clicks over its whole rect, so any padding would deaden a strip of the
+ * page around the content. Even the inter-card gap is written to appear only
+ * BETWEEN open rows, never at the ends (styles.css, [data-overlay-row]). All
  * breathing room comes from the view's placement margin in main.
  *
  * This component owns the size contract with main: the view must be sized
@@ -45,8 +50,9 @@ export function OverlayStack() {
       // [data-overlay-item] carriers), never the content: overflow-hidden
       // clips a collapsed card visually, but the card element itself keeps
       // its full layout rect, so content would always measure "visible".
-      // An empty panel is only its own border — nothing to show, so the
-      // report is zero, not 2px.
+      // The explicit zero still matters even now that the panel paints
+      // nothing of its own: it is what takes the view off screen, rather
+      // than leaving a 0×0 one parked over the corner.
       const rows = [...el.querySelectorAll("[data-overlay-item]")].filter(
         (row) => row.getBoundingClientRect().height >= 1,
       );
@@ -89,10 +95,7 @@ export function OverlayStack() {
   // card's fixed 320px, the pill's fitted sliver), whatever the window is.
   return (
     <div ref={stackRef} className="flex flex-col items-end">
-      <div
-        data-overlay-panel
-        className="overlay-glass flex w-max flex-col items-end overflow-hidden rounded-xl border border-ink/15"
-      >
+      <div data-overlay-panel className="flex w-max flex-col items-end">
         {/* The voice assistant first: while a conversation is live it is the
             row the user is talking to — and this row also OWNS the mic and
             speakers for the feature (see VoiceHud.tsx), so it must live in

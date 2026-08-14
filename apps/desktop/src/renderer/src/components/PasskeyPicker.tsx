@@ -64,7 +64,7 @@ export function PasskeyPicker() {
         role="dialog"
         aria-modal="true"
         aria-label={`Choose a passkey for ${request.relyingPartyId}`}
-        className="animate-overlay-in relative w-[380px] rounded-2xl border border-hairline bg-raised p-4 shadow-pop outline-none"
+        className="animate-overlay-in relative w-[380px] rounded-2xl border border-float-edge bg-raised p-4 shadow-pop outline-none"
       >
         <div className="flex items-center gap-2">
           <KeyGlyph />

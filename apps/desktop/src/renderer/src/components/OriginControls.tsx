@@ -58,7 +58,7 @@ export function OriginControls() {
       <div
         role="dialog"
         aria-label={`Trust controls for ${anchor.host}`}
-        className="animate-overlay-in fixed left-2 z-40 w-[300px] rounded-xl border border-hairline bg-raised p-3 shadow-pop"
+        className="animate-overlay-in fixed left-2 z-40 w-[300px] rounded-xl border border-float-edge bg-raised p-3 shadow-pop"
         style={{ top }}
       >
         {info === undefined ? (

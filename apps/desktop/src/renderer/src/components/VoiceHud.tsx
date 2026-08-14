@@ -1,6 +1,6 @@
 /**
  * The voice assistant HUD — the "Suma is listening" surface, rendered as a
- * row of the floating overlay panel (OverlayStack), above every page.
+ * card in the floating overlay stack (OverlayStack), above every page.
  *
  * This component is more than a display: it OWNS the microphone and the
  * speakers for the whole feature (lib/voice-audio.ts). Main runs the wake
@@ -25,6 +25,7 @@ import type { VoiceSettingsInfo, VoiceStatus } from "../../../shared/voice";
 import { cn } from "../lib/cn";
 import { VoiceCapture, VoicePlayback } from "../lib/voice-audio";
 import { Button } from "./ui/button";
+import { OVERLAY_CARD } from "./ui/overlay-card";
 
 /** The capture phases — mic open, frames flowing inward. */
 function capturing(phase: VoiceStatus["phase"]): boolean {
@@ -132,68 +133,78 @@ export function VoiceHud() {
     captions.assistant !== "" ? captions.assistant : captions.user;
 
   return (
-    <div
-      data-overlay-item
-      className="flex min-h-0 min-w-0 flex-col items-end overflow-hidden"
-    >
-      {active ? (
-        <div className="save-preview-card w-80 p-2.5">
-          <div className="flex items-center gap-2.5">
-            <span
-              className={cn(
-                "grid size-8 shrink-0 place-items-center rounded-full",
-                speaking ? "bg-accent/20 text-accent" : "bg-ink/10 text-text",
-              )}
-            >
-              {speaking ? (
-                <AudioLines className="size-4" aria-hidden />
-              ) : (
-                <Mic className="size-4 animate-pulse" aria-hidden />
-              )}
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[13px] font-medium text-text">
-                {speaking ? "Suma is speaking" : "Suma is listening"}
+    // Always "open": this row has no collapse animation — it mounts when the
+    // assistant wakes and unmounts when it goes off — but it still declares
+    // itself so the rows below it get their gap (styles.css).
+    <div data-overlay-row data-open="true">
+      <div
+        data-overlay-item
+        className="flex min-h-0 min-w-0 flex-col items-end overflow-hidden"
+      >
+        {active ? (
+          <div className={cn("save-preview-card w-80 p-2.5", OVERLAY_CARD)}>
+            <div className="flex items-center gap-2.5">
+              <span
+                className={cn(
+                  "grid size-8 shrink-0 place-items-center rounded-full",
+                  speaking ? "bg-accent/20 text-accent" : "bg-ink/10 text-text",
+                )}
+              >
+                {speaking ? (
+                  <AudioLines className="size-4" aria-hidden />
+                ) : (
+                  <Mic className="size-4 animate-pulse" aria-hidden />
+                )}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[13px] font-medium text-text">
+                  {speaking ? "Suma is speaking" : "Suma is listening"}
+                </div>
+                <div className="truncate text-xs text-text/60">
+                  {caption === ""
+                    ? "Ask anything — I can work the browser."
+                    : caption}
+                </div>
               </div>
-              <div className="truncate text-xs text-text/60">
-                {caption === "" ? "Ask anything — I can work the browser." : caption}
-              </div>
+              <Button
+                variant="soft"
+                size="icon"
+                aria-label="End the voice conversation"
+                onClick={stop}
+              >
+                <X className="size-3.5" aria-hidden />
+              </Button>
             </div>
-            <Button
-              variant="soft"
-              size="icon"
-              aria-label="End the voice conversation"
-              onClick={stop}
-            >
-              <X className="size-3.5" aria-hidden />
-            </Button>
           </div>
-        </div>
-      ) : (
-        <button
-          type="button"
-          onClick={start}
-          disabled={busy}
-          aria-label="Talk to Suma"
-          className={cn(
-            "flex max-w-72 items-center gap-2 px-3 py-2 text-left",
-            "text-xs text-text/80 transition-colors hover:text-text",
-          )}
-        >
-          {busy ? (
-            <LoaderCircle className="size-3.5 shrink-0 animate-spin" aria-hidden />
-          ) : (
-            <Mic
-              className={cn(
-                "size-3.5 shrink-0",
-                micError || status.error !== null ? "text-danger" : "text-accent",
-              )}
-              aria-hidden
-            />
-          )}
-          <span className="truncate">{pillLabel}</span>
-        </button>
-      )}
+        ) : (
+          <button
+            type="button"
+            onClick={start}
+            disabled={busy}
+            aria-label="Talk to Suma"
+            className={cn(
+              // The pill is its own card now — it used to be a bare row that
+              // let the shared panel shrink around it and act as its capsule.
+              OVERLAY_CARD,
+              "flex max-w-72 items-center gap-2 px-3 py-2 text-left",
+              "text-xs text-text/80 transition-colors hover:text-text",
+            )}
+          >
+            {busy ? (
+              <LoaderCircle className="size-3.5 shrink-0 animate-spin" aria-hidden />
+            ) : (
+              <Mic
+                className={cn(
+                  "size-3.5 shrink-0",
+                  micError || status.error !== null ? "text-danger" : "text-accent",
+                )}
+                aria-hidden
+              />
+            )}
+            <span className="truncate">{pillLabel}</span>
+          </button>
+        )}
+      </div>
     </div>
   );
 }

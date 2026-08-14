@@ -120,7 +120,7 @@ function SelectContent({
         <SelectPrimitive.Popup
           data-slot="select-content"
           className={cn(
-            "animate-overlay-in min-w-[var(--anchor-width)] origin-[var(--transform-origin)] rounded-xl border border-hairline bg-raised p-1 text-text shadow-pop outline-none",
+            "animate-overlay-in min-w-[var(--anchor-width)] origin-[var(--transform-origin)] rounded-xl border border-float-edge bg-raised p-1 text-text shadow-pop outline-none",
             className,
           )}
           {...props}
