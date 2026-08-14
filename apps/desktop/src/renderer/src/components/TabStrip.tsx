@@ -584,11 +584,18 @@ function EgressBypassButton({ tab }: { tab: TabInfo }) {
  * room to add actions without the strip getting crowded.
  *
  * Hovering the dots swaps them for the actions IN PLACE: the button collapses
- * to zero width and the icons take over its slot, all inside one hover region
- * so the pointer is never between two states on the way in. The button
- * collapses rather than unmounting, so a click (which focuses it) can't strand
- * focus on a removed node — and focus anywhere in the group keeps the actions
- * out, which is what makes them reachable by keyboard and by tap at all.
+ * to zero width as the icons unfold into its slot, both tweening over the same
+ * 200ms so the swap reads as one control widening rather than two states
+ * trading places. It is the nav cluster's reveal (TabNavCluster) mirrored to
+ * the tab's other end — same clip-box trick, same timing, the dots playing the
+ * part the favicon plays there: the one thing on screen at rest, and the way
+ * in to everything behind it. The whole hover region is one group, so the
+ * pointer is never between two states on the way in.
+ *
+ * The button collapses rather than unmounting, so a click (which focuses it)
+ * can't strand focus on a removed node — and focus anywhere in the group keeps
+ * the actions out, which is what makes them reachable by keyboard and by tap
+ * at all.
  */
 function TabActions({ actions }: { actions: React.ReactNode[] }) {
   const items = actions.filter(Boolean);
@@ -601,14 +608,59 @@ function TabActions({ actions }: { actions: React.ReactNode[] }) {
         title="Tab actions"
         aria-label="Tab actions"
         onClick={(e) => e.stopPropagation()}
-        className="grid h-4 w-4 shrink-0 place-items-center overflow-hidden rounded text-faint transition-[width,opacity] duration-100 hover:bg-ink/12 hover:text-text group-hover/actions:pointer-events-none group-hover/actions:w-0 group-hover/actions:opacity-0"
+        className="grid h-4 w-4 shrink-0 place-items-center overflow-hidden rounded text-faint transition-[width,opacity] duration-200 ease-out hover:bg-ink/12 hover:text-text group-hover/actions:pointer-events-none group-hover/actions:w-0 group-hover/actions:opacity-0 group-focus-within/actions:pointer-events-none group-focus-within/actions:w-0 group-focus-within/actions:opacity-0"
       >
         <MoreHorizontal className="size-3 shrink-0" aria-hidden="true" />
       </button>
-      <span className="hidden shrink-0 items-center gap-0.5 group-hover/actions:flex group-has-[:focus]/actions:flex">
-        {items}
+      <span className="grid grid-cols-[0fr] opacity-0 transition-[grid-template-columns,opacity] duration-200 ease-out group-hover/actions:grid-cols-[1fr] group-hover/actions:opacity-100 group-focus-within/actions:grid-cols-[1fr] group-focus-within/actions:opacity-100">
+        {/* Spacing on the clipped content, not the clip box — padding does not
+            shrink, and a couple of px of residual width here would sit between
+            the dots and the close button as a permanent gap. */}
+        <span className="flex min-w-0 items-center gap-0.5 overflow-hidden">
+          {items}
+        </span>
       </span>
     </span>
+  );
+}
+
+/**
+ * The tab's trailing slot: its continuity dot at rest, its controls (the
+ * actions behind the dots, then close) once the tab is hovered or focused.
+ *
+ * The two are clip boxes that cross rather than a display swap — the dot's
+ * width tweens to zero over exactly the span the controls' width tweens open,
+ * so the title's truncation point travels instead of jumping, and the tab
+ * never flashes a frame with both or neither in it. Everything is mounted at
+ * every moment; only width and opacity move, which is also what lets the
+ * controls animate at all (`display` is not an animatable property).
+ *
+ * Hover OR :focus-visible on the tab, both sides in step: keyboard focus used
+ * to hide the dot without bringing the controls out, which left the tab's only
+ * keyboard route to close sitting inside `display: none`.
+ */
+function TabTrailing({
+  tab,
+  actions,
+}: {
+  tab: TabInfo;
+  /** Folded behind the three-dot button, in the order they should appear. */
+  actions: React.ReactNode[];
+}) {
+  return (
+    <>
+      <span className="grid grid-cols-[0fr] opacity-0 transition-[grid-template-columns,opacity] duration-200 ease-out group-hover:grid-cols-[1fr] group-hover:opacity-100 group-has-[:focus-visible]:grid-cols-[1fr] group-has-[:focus-visible]:opacity-100">
+        <span className="flex min-w-0 items-center gap-0.5 overflow-hidden">
+          <TabActions actions={actions} />
+          <TabCloseButton tab={tab} />
+        </span>
+      </span>
+      <span className="grid grid-cols-[1fr] transition-[grid-template-columns,opacity] duration-200 ease-out group-hover:grid-cols-[0fr] group-hover:opacity-0 group-has-[:focus-visible]:grid-cols-[0fr] group-has-[:focus-visible]:opacity-0">
+        <span className="flex min-w-0 items-center overflow-hidden">
+          <ContinuityDot host={tabHost(tab)} />
+        </span>
+      </span>
+    </>
   );
 }
 
@@ -638,7 +690,6 @@ function Tab({
   const setTabPreviewHoverId = useSumaStore((s) => s.setTabPreviewHoverId);
   const clearTabPreviewHoverId = useSumaStore((s) => s.clearTabPreviewHoverId);
   const canBypassEgress = useCanBypassEgress(tab);
-  const host = tabHost(tab);
 
   // Beside the active tab the raised fill is drawn by HoverShell (its near
   // edge follows the folder silhouette); elsewhere it is a plain rounded rect.
@@ -713,23 +764,18 @@ function Tab({
                 <TabTitle tab={tab} />
               </span>
             )}
-            <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
-              <TabActions
-                actions={[
-                  canFavorite(tab) ? (
-                    <FavoriteToggleButton key="favorite" tab={tab} />
-                  ) : null,
-                  <SplitToggleButton key="split" tab={tab} />,
-                  canBypassEgress ? (
-                    <EgressBypassButton key="egress" tab={tab} />
-                  ) : null,
-                ]}
-              />
-              <TabCloseButton tab={tab} />
-            </span>
-            <span className="shrink-0 group-has-[:focus-visible]:hidden group-hover:hidden">
-              <ContinuityDot host={host} />
-            </span>
+            <TabTrailing
+              tab={tab}
+              actions={[
+                canFavorite(tab) ? (
+                  <FavoriteToggleButton key="favorite" tab={tab} />
+                ) : null,
+                <SplitToggleButton key="split" tab={tab} />,
+                canBypassEgress ? (
+                  <EgressBypassButton key="egress" tab={tab} />
+                ) : null,
+              ]}
+            />
           </>
         )}
       </span>
@@ -764,7 +810,6 @@ function SplitPane({
   const setTabPreviewHoverId = useSumaStore((s) => s.setTabPreviewHoverId);
   const clearTabPreviewHoverId = useSumaStore((s) => s.clearTabPreviewHoverId);
   const canBypassEgress = useCanBypassEgress(tab);
-  const host = tabHost(tab);
 
   return (
     <span
@@ -789,23 +834,18 @@ function SplitPane({
     >
       <TabNavCluster tab={tab} />
       <ActiveTabLabel tab={tab} onEdit={onEditAddress} />
-      <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
-        <TabActions
-          actions={[
-            canFavorite(tab) ? (
-              <FavoriteToggleButton key="favorite" tab={tab} />
-            ) : null,
-            ...extraActions,
-            canBypassEgress ? (
-              <EgressBypassButton key="egress" tab={tab} />
-            ) : null,
-          ]}
-        />
-        <TabCloseButton tab={tab} />
-      </span>
-      <span className="shrink-0 group-has-[:focus-visible]:hidden group-hover:hidden">
-        <ContinuityDot host={host} />
-      </span>
+      <TabTrailing
+        tab={tab}
+        actions={[
+          canFavorite(tab) ? (
+            <FavoriteToggleButton key="favorite" tab={tab} />
+          ) : null,
+          ...extraActions,
+          canBypassEgress ? (
+            <EgressBypassButton key="egress" tab={tab} />
+          ) : null,
+        ]}
+      />
     </span>
   );
 }
