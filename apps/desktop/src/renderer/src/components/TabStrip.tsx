@@ -1732,7 +1732,7 @@ export function TabStrip() {
         className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-chrome-edge"
       />
       {/* pl clears the macOS traffic lights */}
-      <div className="flex min-w-0 flex-1 items-end gap-1.5 pr-2.5 pl-[84px]">
+      <div className="flex min-w-0 flex-1 items-end gap-1.5 pr-2.5 pl-[94px]">
         {/* Lingering over the tab row (not the utility cluster) slides the
             preview shelf open under the strip — lib/tab-preview owns the
             hover intent shared with the shelf itself. */}
