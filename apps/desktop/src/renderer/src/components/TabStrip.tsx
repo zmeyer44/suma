@@ -297,15 +297,26 @@ function TabNavButton({
 }
 
 /**
- * Progressive nav reveal: bare at rest, reload alone once the tab is hovered,
- * and back/forward unfolding to its left when the pointer reaches the cluster.
- * `group/nav` wraps the *whole* cluster rather than the reload button, so
- * sliding onto an arrow keeps the arrows open — and since the cluster
- * collapses to zero width at rest, it can only be entered via the revealed
- * reload button. Each slot tweens with the grid 0fr→1fr trick, so the widths
- * follow their content instead of a hardcoded pixel value and everything
- * downstream (favicon, title, omnibox) slides rather than jumps. Directions
- * with no history are omitted entirely — never shown as dead affordances.
+ * The tab's favicon with its nav controls (back, forward, reload) folded in
+ * behind it: at rest the tab shows the bare mark, and hovering THE MARK
+ * unfolds every available control to its left in one motion, leaving the row
+ * reading like a toolbar — ⟨ ⟩ ⟳ favicon title.
+ *
+ * One reveal, on one target, rather than the reload button appearing on tab
+ * hover and the arrows then unfolding from it: two nested reveals cost two
+ * deliberate pointer moves to reach a button, and the controls' slot was
+ * showing on every pass across the tab. Hanging them off the mark instead
+ * spends nothing at rest, and the mark is the one part of a tab that never
+ * moves or changes size, so it is always where the pointer left it.
+ *
+ * `group/nav` wraps the controls AND the mark: the controls collapse to zero
+ * width at rest, so the mark is the only way in, and once they are out the
+ * pointer is still inside the group they belong to — the row can slide right
+ * from under the pointer without the hover dropping. The whole row tweens as
+ * one clip box with the grid 0fr→1fr trick, so its width follows its content
+ * instead of a hardcoded pixel value and everything downstream (title,
+ * omnibox) slides rather than jumps. Directions with no history are omitted
+ * entirely — never shown as dead affordances.
  *
  * Drawn by every tab that is a VISIBLE page — the active tab, and both panes
  * of a split. It is addressed to its own tab rather than to the active one,
@@ -317,40 +328,33 @@ function TabNavCluster({ tab }: { tab: TabInfo }) {
   const goForward = useSumaStore((s) => s.goForward);
   const reload = useSumaStore((s) => s.reload);
 
+  // -m-1 p-1: the mark is a 16px target, so the group's hover box is grown 4px
+  // on every side while its layout box stays exactly the mark.
   return (
-    <span className="no-drag group/nav flex shrink-0 items-center">
-      {tab.canGoBack || tab.canGoForward ? (
-        <span className="grid grid-cols-[0fr] opacity-0 transition-[grid-template-columns,opacity] duration-250 ease-out group-hover/nav:grid-cols-[1fr] group-hover/nav:opacity-100 group-focus-within/nav:grid-cols-[1fr] group-focus-within/nav:opacity-100">
-          {/* Spacing lives on clipped *content*, never as padding on the
-              clip box: padding does not shrink, so it would leave the
-              cluster a couple of px wide at rest — enough to catch a
-              hover and unfold the arrows without the reload button ever
-              being visible. */}
-          <span className="flex min-w-0 items-center gap-0.5 overflow-hidden">
-            {tab.canGoBack ? (
-              <TabNavButton label="Back" onClick={() => void goBack(tab.id)}>
-                <ChevronLeft className="size-3" aria-hidden="true" />
-              </TabNavButton>
-            ) : null}
-            {tab.canGoForward ? (
-              <TabNavButton
-                label="Forward"
-                onClick={() => void goForward(tab.id)}
-              >
-                <ChevronRight className="size-3" aria-hidden="true" />
-              </TabNavButton>
-            ) : null}
-            <span aria-hidden="true" className="w-0.5 shrink-0" />
-          </span>
-        </span>
-      ) : null}
-      <span className="grid grid-cols-[0fr] opacity-0 transition-[grid-template-columns,opacity] duration-200 ease-out group-hover:grid-cols-[1fr] group-hover:opacity-100 group-has-[:focus-visible]:grid-cols-[1fr] group-has-[:focus-visible]:opacity-100">
-        <span className="flex min-w-0 items-center overflow-hidden">
+    <span className="no-drag group/nav -m-1 flex shrink-0 items-center p-1">
+      <span className="grid grid-cols-[0fr] opacity-0 transition-[grid-template-columns,opacity] duration-200 ease-out group-hover/nav:grid-cols-[1fr] group-hover/nav:opacity-100 group-focus-within/nav:grid-cols-[1fr] group-focus-within/nav:opacity-100">
+        {/* Spacing lives on clipped *content*, never as padding on the clip
+            box: padding does not shrink, so it would leave the controls a
+            couple of px wide at rest — enough to catch a hover on the way
+            past and unfold them without the mark ever being pointed at. */}
+        <span className="flex min-w-0 items-center gap-0.5 overflow-hidden">
+          {tab.canGoBack ? (
+            <TabNavButton label="Back" onClick={() => void goBack(tab.id)}>
+              <ChevronLeft className="size-3" aria-hidden="true" />
+            </TabNavButton>
+          ) : null}
+          {tab.canGoForward ? (
+            <TabNavButton label="Forward" onClick={() => void goForward(tab.id)}>
+              <ChevronRight className="size-3" aria-hidden="true" />
+            </TabNavButton>
+          ) : null}
           <TabNavButton label="Reload" onClick={() => void reload(tab.id)}>
             <RotateCw className="size-2.5" aria-hidden="true" />
           </TabNavButton>
+          <span aria-hidden="true" className="w-1 shrink-0" />
         </span>
       </span>
+      <TabMark tab={tab} />
     </span>
   );
 }
@@ -692,8 +696,14 @@ function Tab({
           !iconOnly && "flex-1 self-stretch",
         )}
       >
-        {tab.active ? <TabNavCluster tab={tab} /> : null}
-        <TabMark tab={tab} />
+        {/* A pinned tab is the mark and nothing else — 40px of slot has no
+            room to unfold controls into, and they would paint over the tabs
+            beside it. */}
+        {tab.active && iconOnly !== true ? (
+          <TabNavCluster tab={tab} />
+        ) : (
+          <TabMark tab={tab} />
+        )}
         {iconOnly ? null : (
           <>
             {tab.active ? (
@@ -778,7 +788,6 @@ function SplitPane({
       )}
     >
       <TabNavCluster tab={tab} />
-      <TabMark tab={tab} />
       <ActiveTabLabel tab={tab} onEdit={onEditAddress} />
       <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
         <TabActions
