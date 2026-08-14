@@ -411,6 +411,16 @@ interface SumaState {
   /** Opening also pulls the space's cached thumbnails and asks main to
    *  re-capture the visible tab, so the shelf is fresh by the time it lands. */
   setTabPreviewOpen: (open: boolean) => void;
+  /** The tab the pointer is on in the STRIP — its shelf card mirrors the
+   *  hover, so the row above and the picture below read as one control:
+   *  the lit card is the page a click right now would land on. Maintained
+   *  purely by the strip's enter/leave pairs (never cleared on shelf close:
+   *  the pointer may still be sitting on the tab when it reopens). */
+  tabPreviewHoverId: string | null;
+  setTabPreviewHoverId: (tabId: string) => void;
+  /** Clear only if `tabId` is still the hovered one — a leave firing after
+   *  the next tab's enter must not wipe the newer hover. */
+  clearTabPreviewHoverId: (tabId: string) => void;
   /** Left-pane fraction per space; device-local, persisted in localStorage. */
   splitRatios: Record<string, number>;
   /** Update a space's divider position and stream it to main; persisted on
@@ -1623,6 +1633,16 @@ export const useSumaStore = create<SumaState>()((set, get) => {
         if (thumbs === undefined) return;
         for (const thumb of thumbs) mergeThumbnail(thumb);
       });
+    },
+
+    tabPreviewHoverId: null,
+    setTabPreviewHoverId: (tabId) => {
+      if (get().tabPreviewHoverId === tabId) return;
+      set({ tabPreviewHoverId: tabId });
+    },
+    clearTabPreviewHoverId: (tabId) => {
+      if (get().tabPreviewHoverId !== tabId) return;
+      set({ tabPreviewHoverId: null });
     },
 
     splitRatios: loadSplitRatios(),

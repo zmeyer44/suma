@@ -43,10 +43,28 @@ const CLOSE_MS = 160;
 function PreviewCard({ tab }: { tab: TabInfo }) {
   const selectTab = useSumaStore((s) => s.selectTab);
   const thumb = useSumaStore((s) => s.tabThumbnails[tab.id]);
+  // The pointer is on this tab's slot in the STRIP: mirror the card's own
+  // hover treatment, so the row and the shelf visibly agree on which page a
+  // click right now would activate.
+  const stripHovered = useSumaStore((s) => s.tabPreviewHoverId === tab.id);
   const shownOnScreen = tab.active || tab.split;
+
+  const ref = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    // The shelf row scrolls; a mirrored hover on a card that is out of view
+    // indicates nothing. Nearest-edge, so cards already visible stay put.
+    if (stripHovered) {
+      ref.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+        inline: "nearest",
+      });
+    }
+  }, [stripHovered]);
 
   return (
     <button
+      ref={ref}
       type="button"
       title={`${tab.title || tab.url}\n${prettyUrl(tab.url)}`}
       aria-label={`Switch to ${tab.title || prettyUrl(tab.url) || "tab"}`}
@@ -58,9 +76,12 @@ function PreviewCard({ tab }: { tab: TabInfo }) {
       style={{ width: CARD_W }}
       className={cn(
         "group flex h-full shrink-0 cursor-pointer flex-col overflow-hidden rounded-[10px] border text-left transition-[border-color,transform] duration-150 hover:-translate-y-0.5",
+        stripHovered && "-translate-y-0.5",
         shownOnScreen
           ? "border-accent/60 shadow-[0_0_0_1px_var(--color-accent)]"
-          : "border-ink/12 hover:border-ink/30",
+          : stripHovered
+            ? "border-ink/30"
+            : "border-ink/12 hover:border-ink/30",
       )}
     >
       <span className="relative min-h-0 flex-1 overflow-hidden bg-panel">
@@ -83,7 +104,12 @@ function PreviewCard({ tab }: { tab: TabInfo }) {
       </span>
       <span className="flex h-7 shrink-0 items-center gap-1.5 border-t border-ink/8 bg-chrome px-2">
         <TabMark tab={tab} />
-        <span className="min-w-0 flex-1 truncate text-[11px] text-muted group-hover:text-text">
+        <span
+          className={cn(
+            "min-w-0 flex-1 truncate text-[11px] group-hover:text-text",
+            stripHovered ? "text-text" : "text-muted",
+          )}
+        >
           {tab.title || prettyUrl(tab.url) || "New tab"}
         </span>
       </span>

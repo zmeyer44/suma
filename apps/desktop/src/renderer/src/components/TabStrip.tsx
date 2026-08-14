@@ -609,6 +609,8 @@ function Tab({
 }) {
   const closeTab = useSumaStore((s) => s.closeTab);
   const togglePin = useSumaStore((s) => s.togglePin);
+  const setTabPreviewHoverId = useSumaStore((s) => s.setTabPreviewHoverId);
+  const clearTabPreviewHoverId = useSumaStore((s) => s.clearTabPreviewHoverId);
   const canBypassEgress = useCanBypassEgress(tab);
   const host = tabHost(tab);
 
@@ -633,6 +635,10 @@ function Tab({
         if (e.key === "Enter") onActivate();
       }}
       onPointerDown={onPointerDown}
+      // The preview shelf mirrors this hover onto the tab's card, so the
+      // pointer's target below matches the tab it is on above.
+      onPointerEnter={() => setTabPreviewHoverId(tab.id)}
+      onPointerLeave={() => clearTabPreviewHoverId(tab.id)}
       onAuxClick={(e) => {
         if (e.button === 1) void closeTab(tab.id);
       }}
@@ -723,6 +729,8 @@ function SplitPane({
   onEditAddress: () => void;
 }) {
   const closeTab = useSumaStore((s) => s.closeTab);
+  const setTabPreviewHoverId = useSumaStore((s) => s.setTabPreviewHoverId);
+  const clearTabPreviewHoverId = useSumaStore((s) => s.clearTabPreviewHoverId);
   const canBypassEgress = useCanBypassEgress(tab);
   const host = tabHost(tab);
 
@@ -734,6 +742,10 @@ function SplitPane({
       onKeyDown={(e) => {
         if (e.key === "Enter") onActivate();
       }}
+      // Per PANE, not per split tab: each half is its own page, and the shelf
+      // card lit up should be the half the pointer is actually on.
+      onPointerEnter={() => setTabPreviewHoverId(tab.id)}
+      onPointerLeave={() => clearTabPreviewHoverId(tab.id)}
       onAuxClick={(e) => {
         if (e.button === 1) void closeTab(tab.id);
       }}
