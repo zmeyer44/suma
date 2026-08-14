@@ -9,14 +9,14 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { setInterval } from "node:timers";
+import { clearTimeout, setInterval, setTimeout } from "node:timers";
 import { Menu, WebContentsView, type WebContents } from "electron";
 import { canonicalVideoUrl } from "../shared/videos";
 import {
   canonicalInternalUrl,
   internalPageTitle,
 } from "../shared/internal-pages";
-import type { TabInfo } from "../shared/ipc";
+import type { TabInfo, TabThumbnail } from "../shared/ipc";
 import type { SelectionActionPayload } from "../shared/selection";
 import type { PopupManager, PopupOpenerContext } from "./popups";
 import {
@@ -60,6 +60,15 @@ interface TabRecord {
   lastTitle: string;
   /** Last select/navigate wall time — idle-discard policy input. */
   lastActiveAtMs: number;
+  /**
+   * Last page snapshot as a JPEG data: URL (hover preview shelf). Like
+   * lastTitle it survives crash/discard — a stale picture of the page still
+   * answers "which tab was this?" better than a blank card.
+   */
+  thumbnailUrl: string | null;
+  thumbnailAtMs: number;
+  /** A capturePage is in flight — collapses bursts to one capture. */
+  thumbnailCapturing: boolean;
 }
 
 /** Hard ceiling on tabs per space — create() refuses beyond this. */
@@ -74,6 +83,16 @@ export const MAX_TABS_PER_SPACE = 500;
 export const AUTO_DISCARD_ENABLED: boolean = false;
 export const AUTO_DISCARD_IDLE_MS = 30 * 60_000;
 const AUTO_DISCARD_SWEEP_MS = 60_000;
+
+/**
+ * Preview thumbnails: 480px is 2× the shelf's ~176px card, so the JPEG stays
+ * crisp on retina at roughly 15–40 KB — cheap enough to hold one per tab and
+ * push whole over IPC. Capture waits for the page to sit still: a paint-storm
+ * of did-stop-loading ticks (SPAs fire them freely) becomes one capture.
+ */
+const THUMBNAIL_WIDTH = 480;
+const THUMBNAIL_JPEG_QUALITY = 65;
+const THUMBNAIL_SETTLE_MS = 400;
 /** Wide integer spacing makes ordinary inserts a one-register update. */
 const TAB_ORDER_STEP = 1n << 64n;
 
@@ -174,6 +193,10 @@ export class TabManager {
   /** The selection the toolbar is showing for, cached for the moment a
    *  toolbar action arrives (selectionToolbar:action in main/ipc.ts). */
   private selection: ({ tabId: string } & SelectionActionPayload) | null = null;
+  /** Wired at bootstrap — pushes a landed capture as `tabs:thumbnail`. */
+  private onThumbnail: ((thumb: TabThumbnail) => void) | null = null;
+  /** Per-tab settle timers for the post-load thumbnail capture. */
+  private readonly thumbnailTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly shell: ShellWindow,
@@ -197,6 +220,11 @@ export class TabManager {
   /** Wired at bootstrap; glance dispositions before it is set become tabs. */
   setGlanceOpener(handler: (spaceId: string, url: string) => void): void {
     this.glanceOpener = handler;
+  }
+
+  /** Wired at bootstrap; captures landing before it is set are only cached. */
+  setThumbnailListener(handler: (thumb: TabThumbnail) => void): void {
+    this.onThumbnail = handler;
   }
 
   markSessionHydrating(spaceId: string): void {
@@ -318,6 +346,11 @@ export class TabManager {
     const index = order.indexOf(tabId);
     if (index >= 0) order.splice(index, 1);
     this.tabs.delete(tabId);
+    const thumbTimer = this.thumbnailTimers.get(tabId);
+    if (thumbTimer !== undefined) {
+      clearTimeout(thumbTimer);
+      this.thumbnailTimers.delete(tabId);
+    }
     this.expectedNavigationByTab.delete(tabId);
     this.popupLimiter.forget(tabId);
     // An auth popup must never outlive the page waiting on its result.
@@ -589,6 +622,8 @@ export class TabManager {
       this.shell.detachTabView(tab.view);
       if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
     }
+    for (const timer of this.thumbnailTimers.values()) clearTimeout(timer);
+    this.thumbnailTimers.clear();
     this.tabs.clear();
     this.orderBySpace.clear();
     this.materialized.clear();
@@ -803,10 +838,111 @@ export class TabManager {
   }
 
   private setActive(spaceId: string, tabId: string): void {
+    // The page(s) about to be hidden are visible RIGHT NOW — the last moment
+    // capturePage can still see their pixels. Fire-and-forget: the switch
+    // must not wait on a frame copy, and a capture that loses the race comes
+    // back empty and is dropped (the settle-capture already covered the tab).
+    this.captureVisibleTabs();
     // The caller decides whether this is a local interaction (publish) or a
     // remote materialization (do not echo).
     this.store.setActiveTabFor(spaceId, tabId);
     if (spaceId === this.spaces.activeSpaceId) this.showActive(spaceId);
+  }
+
+  /** Cached page snapshots for a space's tabs, capture order preserved. */
+  thumbnails(spaceId: string): TabThumbnail[] {
+    const thumbs: TabThumbnail[] = [];
+    for (const id of this.orderFor(spaceId)) {
+      const tab = this.tabs.get(id);
+      if (tab === undefined || tab.thumbnailUrl === null) continue;
+      thumbs.push({
+        tabId: tab.id,
+        dataUrl: tab.thumbnailUrl,
+        capturedAtMs: tab.thumbnailAtMs,
+      });
+    }
+    return thumbs;
+  }
+
+  /**
+   * Snapshot whatever is on screen now — the active tab, and the split pane
+   * beside it. The other tabs' cached captures are already the best available
+   * picture of them: a hidden WebContentsView has no frames to copy (macOS
+   * returns an empty image), so "refresh everything" is not on the menu.
+   */
+  captureVisibleTabs(): void {
+    const spaceId = this.spaces.activeSpaceId;
+    if (spaceId === null) return;
+    for (const id of [this.activeTabId(spaceId), this.splitTabId(spaceId)]) {
+      const tab = id === null ? undefined : this.tabs.get(id);
+      if (tab !== undefined) void this.captureThumbnail(tab);
+    }
+  }
+
+  /** One settle-delayed capture per load burst; the timer is per tab. */
+  private scheduleThumbnail(tab: TabRecord): void {
+    const pending = this.thumbnailTimers.get(tab.id);
+    if (pending !== undefined) clearTimeout(pending);
+    const timer = setTimeout(() => {
+      this.thumbnailTimers.delete(tab.id);
+      void this.captureThumbnail(tab);
+    }, THUMBNAIL_SETTLE_MS);
+    timer.unref();
+    this.thumbnailTimers.set(tab.id, timer);
+  }
+
+  /**
+   * Capture the tab's current frame into its cached thumbnail. Silently a
+   * no-op unless the view is live and actually on screen: an internal page's
+   * view is blank (the chrome draws the real page), a hidden view has no
+   * frames, and a blank new-tab is not worth a card. Every failure mode —
+   * empty frame, capture error — keeps the previous thumbnail, which is the
+   * newest true picture of the page we have.
+   */
+  private async captureThumbnail(tab: TabRecord): Promise<void> {
+    const wc = tab.view.webContents;
+    if (
+      tab.thumbnailCapturing ||
+      tab.internalUrl !== null ||
+      tab.crashed ||
+      tab.discarded ||
+      wc.isDestroyed() ||
+      tab.pendingUrl === NEW_TAB_URL
+    ) {
+      return;
+    }
+    const spaceId = this.spaces.activeSpaceId;
+    if (spaceId === null || tab.spaceId !== spaceId) return;
+    if (
+      this.activeTabId(spaceId) !== tab.id &&
+      this.splitTabId(spaceId) !== tab.id
+    ) {
+      return;
+    }
+    tab.thumbnailCapturing = true;
+    try {
+      const image = await wc.capturePage();
+      if (image.isEmpty()) return;
+      const scaled =
+        image.getSize().width > THUMBNAIL_WIDTH
+          ? image.resize({ width: THUMBNAIL_WIDTH })
+          : image;
+      const jpeg = scaled.toJPEG(THUMBNAIL_JPEG_QUALITY);
+      if (jpeg.length === 0) return;
+      // The record may have been closed while the frame was copying.
+      if (this.tabs.get(tab.id) !== tab) return;
+      tab.thumbnailUrl = `data:image/jpeg;base64,${jpeg.toString("base64")}`;
+      tab.thumbnailAtMs = Date.now();
+      this.onThumbnail?.({
+        tabId: tab.id,
+        dataUrl: tab.thumbnailUrl,
+        capturedAtMs: tab.thumbnailAtMs,
+      });
+    } catch {
+      // A capture can reject mid-navigation or mid-teardown; keep the old one.
+    } finally {
+      tab.thumbnailCapturing = false;
+    }
   }
 
   /** The selection under the visible toolbar, for the action relay. */
@@ -1024,6 +1160,9 @@ export class TabManager {
       discarded: false,
       lastTitle: "",
       lastActiveAtMs: Date.now(),
+      thumbnailUrl: null,
+      thumbnailAtMs: 0,
+      thumbnailCapturing: false,
     };
     this.tabs.set(tab.id, tab);
     this.orderFor(spaceId).push(tab.id);
@@ -1121,6 +1260,12 @@ export class TabManager {
     });
     wc.on("did-start-loading", push);
     wc.on("did-stop-loading", push);
+    // Refresh the preview thumbnail once the page sits still. Visibility is
+    // checked at capture time, so a background load never captures a blank.
+    wc.on("did-stop-loading", () => this.scheduleThumbnail(tab));
+    wc.on("did-navigate-in-page", (_event, _url, isMainFrame) => {
+      if (isMainFrame) this.scheduleThumbnail(tab);
+    });
     // The page a selection lived on is going away; drop the toolbar with it.
     wc.on("did-start-loading", () => {
       if (this.selection?.tabId === tab.id) this.clearSelection();

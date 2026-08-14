@@ -51,7 +51,7 @@ function HoverCardContent({
           // caller's value is resolved against that state before it is joined.
           className={(state) =>
             cn(
-              "hover-card-pop w-64 rounded-xl border border-hairline bg-raised p-3 text-text shadow-pop outline-none",
+              "hover-card-pop w-64 rounded-xl border border-float-edge bg-raised p-3 text-text shadow-pop outline-none",
               typeof className === "function" ? className(state) : className,
             )
           }

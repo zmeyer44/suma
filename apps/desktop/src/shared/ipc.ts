@@ -158,6 +158,20 @@ export interface ContentBounds {
   height: number;
 }
 
+/**
+ * A tab's captured page snapshot, for the hover preview shelf (TabStrip →
+ * TabPreviewStrip). Deliberately NOT part of TabInfo: `tabs:updated` fires on
+ * every title/favicon/loading tick, and a base64 JPEG per tab riding each
+ * push would dwarf the state it accompanies. Thumbnails travel on their own
+ * channels instead, one tab at a time, only when a capture actually landed.
+ */
+export interface TabThumbnail {
+  tabId: string;
+  /** JPEG data: URL, ≤480px wide — small enough to cross IPC whole. */
+  dataUrl: string;
+  capturedAtMs: number;
+}
+
 /** Degraded-mode banner state per plane (§10 failure-mode matrix). */
 export interface PlaneHealth {
   sessionPlane: "ok" | "degraded" | "down";
@@ -546,6 +560,14 @@ export interface SumaInvokeMap {
   "tabs:reorder": { args: { tabId: string; index: number }; result: void };
   /** Split view (§6): show the tab in a second pane beside the active tab. */
   "tabs:setSplit": { args: { tabId: string; split: boolean }; result: void };
+  /**
+   * Every cached thumbnail for a space — the preview shelf's pull on open
+   * (captures made before it mounted never reached it). Calling this also
+   * kicks a fresh capture of the currently VISIBLE tab(s); those frames
+   * arrive moments later as `tabs:thumbnail` pushes, so the shelf shows the
+   * cache instantly and the live page catches up mid-slide.
+   */
+  "tabs:thumbnails": { args: { spaceId: string }; result: TabThumbnail[] };
 
   /** Browsing history (§8.3): local always; synced only when enabled. */
   "history:list": {
@@ -1030,6 +1052,8 @@ export interface SumaInvokeMap {
 
 export interface SumaEventMap {
   "tabs:updated": { spaceId: string; tabs: TabInfo[] };
+  /** A tab's page snapshot landed (page settled, or captured at switch-away). */
+  "tabs:thumbnail": TabThumbnail;
   /** One AI SDK UIMessageChunk from the assistant's agent loop in main. */
   "chat:chunk": ChatChunkEvent;
   /** The run's stream ended cleanly (after its final chunk). */
@@ -1186,6 +1210,7 @@ export const INVOKE_CHANNELS: ReadonlyArray<InvokeChannel> = [
   "tabs:setPinned",
   "tabs:reorder",
   "tabs:setSplit",
+  "tabs:thumbnails",
   "history:list",
   "history:clear",
   "sync:status",
@@ -1327,6 +1352,7 @@ export const INVOKE_CHANNELS: ReadonlyArray<InvokeChannel> = [
 
 export const EVENT_CHANNELS: ReadonlyArray<EventChannel> = [
   "tabs:updated",
+  "tabs:thumbnail",
   "chat:chunk",
   "chat:end",
   "chat:error",

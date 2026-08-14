@@ -36,6 +36,7 @@ import type { ContentBounds, SpaceInfo, TabInfo } from "../../../shared/ipc";
 import { cn } from "../lib/cn";
 import { folderOutline, n } from "../lib/folder";
 import { useMeasuredWidth } from "../lib/measure";
+import { previewZoneEnter, previewZoneLeave } from "../lib/tab-preview";
 import { hostOf, prettyUrl } from "../lib/url";
 import { useSumaStore } from "../store";
 import { ContinuityDot } from "./ContinuityDot";
@@ -74,6 +75,10 @@ const FOLDER = { h: TAB_H, flare: FLARE, radius: RADIUS, taper: TAPER };
 function FolderShell() {
   const [ref, width] = useMeasuredWidth();
   const gradientId = useId();
+  // With the preview shelf open the folder is part of the shelf's surface —
+  // its cast shadow would bleed below the base and draw a soft gray line
+  // along the very seam the merge is meant to erase (.folder-drop-off).
+  const previewOpen = useSumaStore((s) => s.tabPreviewOpen);
 
   return (
     <div
@@ -85,7 +90,10 @@ function FolderShell() {
         <svg
           width={width}
           height={TAB_H}
-          className="absolute inset-0 overflow-visible filter-(--drop-tab)"
+          className={cn(
+            "absolute inset-0 overflow-visible folder-drop",
+            previewOpen && "folder-drop-off",
+          )}
         >
           <defs>
             <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
@@ -231,8 +239,9 @@ function tabHost(tab: TabInfo): string {
  * A tab's 16px mark. Internal pages get one of Suma's own glyphs rather than
  * the initial-letter tile: they have no favicon to fail over from, and the
  * letter would change as the sidebar walked between settings sections.
+ * Exported for the preview shelf's cards (TabPreviewStrip).
  */
-function TabMark({ tab }: { tab: TabInfo }) {
+export function TabMark({ tab }: { tab: TabInfo }) {
   const route = parseInternalUrl(tab.url);
   if (route === null)
     return <Favicon src={tab.faviconUrl} seed={tabHost(tab) || tab.title} />;
@@ -607,6 +616,8 @@ function Tab({
 }) {
   const closeTab = useSumaStore((s) => s.closeTab);
   const togglePin = useSumaStore((s) => s.togglePin);
+  const setTabPreviewHoverId = useSumaStore((s) => s.setTabPreviewHoverId);
+  const clearTabPreviewHoverId = useSumaStore((s) => s.clearTabPreviewHoverId);
   const canBypassEgress = useCanBypassEgress(tab);
   const host = tabHost(tab);
 
@@ -631,6 +642,10 @@ function Tab({
         if (e.key === "Enter") onActivate();
       }}
       onPointerDown={onPointerDown}
+      // The preview shelf mirrors this hover onto the tab's card, so the
+      // pointer's target below matches the tab it is on above.
+      onPointerEnter={() => setTabPreviewHoverId(tab.id)}
+      onPointerLeave={() => clearTabPreviewHoverId(tab.id)}
       onAuxClick={(e) => {
         if (e.button === 1) void closeTab(tab.id);
       }}
@@ -721,6 +736,8 @@ function SplitPane({
   onEditAddress: () => void;
 }) {
   const closeTab = useSumaStore((s) => s.closeTab);
+  const setTabPreviewHoverId = useSumaStore((s) => s.setTabPreviewHoverId);
+  const clearTabPreviewHoverId = useSumaStore((s) => s.clearTabPreviewHoverId);
   const canBypassEgress = useCanBypassEgress(tab);
   const host = tabHost(tab);
 
@@ -732,6 +749,10 @@ function SplitPane({
       onKeyDown={(e) => {
         if (e.key === "Enter") onActivate();
       }}
+      // Per PANE, not per split tab: each half is its own page, and the shelf
+      // card lit up should be the half the pointer is actually on.
+      onPointerEnter={() => setTabPreviewHoverId(tab.id)}
+      onPointerLeave={() => clearTabPreviewHoverId(tab.id)}
       onAuxClick={(e) => {
         if (e.button === 1) void closeTab(tab.id);
       }}
@@ -1637,14 +1658,26 @@ export function TabStrip() {
         aria-hidden="true"
         className="pointer-events-none absolute inset-x-0 top-0 h-px bg-ink/6"
       />
-      {/* Panel top edge — the active tab covers its own span of this line */}
+      {/* Panel top edge — the active tab covers its own span of this line.
+          With the preview shelf open this line is the shelf's top edge, and
+          the active tab interrupting it is what makes the folder read as
+          flowing INTO the shelf: strip and shelf stay two distinct bands,
+          joined only through the tab's silhouette. */}
       <span
         aria-hidden="true"
         className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-chrome-edge"
       />
       {/* pl clears the macOS traffic lights */}
       <div className="flex min-w-0 flex-1 items-end gap-1.5 pr-2.5 pl-[84px]">
-        <div ref={tabsRef} className="flex min-w-0 flex-1 items-end">
+        {/* Lingering over the tab row (not the utility cluster) slides the
+            preview shelf open under the strip — lib/tab-preview owns the
+            hover intent shared with the shelf itself. */}
+        <div
+          ref={tabsRef}
+          className="flex min-w-0 flex-1 items-end"
+          onPointerEnter={previewZoneEnter}
+          onPointerLeave={previewZoneLeave}
+        >
           {view.map((item, i) => {
             const [first, second] = item.tabs;
             if (first === undefined) return null;

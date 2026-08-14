@@ -16,7 +16,7 @@
  * navigates, or the tab closes (main resolves those itself and pushes the
  * shrunken queue).
  *
- * Layout constraint inherited from the panel: each visible row carries
+ * Layout constraint inherited from the stack: each visible row carries
  * data-overlay-item on its CLIPPING wrapper and its own w-80 — OverlayStack
  * measures rows to size the view, and the view swallows clicks over its
  * whole rect (see SavePreviewOverlay for the history).
@@ -32,6 +32,7 @@ import {
 import { cn } from "../lib/cn";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
+import { OVERLAY_CARD } from "./ui/overlay-card";
 
 /** Must outlast the .save-preview-cell collapse in styles.css. */
 const LEAVE_MS = 260;
@@ -201,11 +202,16 @@ function NoticeCell({
 
   const open = entered && !leaving;
   return (
-    <div className={cn("save-preview-cell", open && "save-preview-cell-open")}>
+    <div
+      data-overlay-row
+      data-open={open}
+      className={cn("save-preview-cell", open && "save-preview-cell-open")}
+    >
       <div className="flex min-h-0 flex-col items-end overflow-hidden">
         <div
           data-overlay-item
           className={cn(
+            OVERLAY_CARD,
             "save-preview-card w-80 p-2.5 text-left",
             open ? "save-preview-card-in" : "save-preview-card-out",
           )}
@@ -284,11 +290,16 @@ function ApprovalCell({
   const { request } = card;
   const open = entered && !card.leaving;
   return (
-    <div className={cn("save-preview-cell", open && "save-preview-cell-open")}>
+    <div
+      data-overlay-row
+      data-open={open}
+      className={cn("save-preview-cell", open && "save-preview-cell-open")}
+    >
       <div className="flex min-h-0 flex-col items-end overflow-hidden">
         <div
           data-overlay-item
           className={cn(
+            OVERLAY_CARD,
             "save-preview-card w-80 p-2.5 text-left",
             open ? "save-preview-card-in" : "save-preview-card-out",
           )}

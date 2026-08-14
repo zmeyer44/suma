@@ -40,6 +40,7 @@ import popSoundUrl from "../assets/pop.mp3";
 import { cn } from "../lib/cn";
 import { hostOf } from "../lib/url";
 import { Favicon } from "./Favicon";
+import { OVERLAY_CARD } from "./ui/overlay-card";
 
 /** Settled cards leave on their own after this long; hover holds them. */
 const DISMISS_MS = 6000;
@@ -294,7 +295,11 @@ function PreviewCell({
 
   const open = entered && !card.leaving;
   return (
-    <div className={cn("save-preview-cell", open && "save-preview-cell-open")}>
+    <div
+      data-overlay-row
+      data-open={open}
+      className={cn("save-preview-cell", open && "save-preview-cell-open")}
+    >
       <div className="flex min-h-0 flex-col items-end overflow-hidden">
         <button
           type="button"
@@ -308,11 +313,11 @@ function PreviewCell({
               : `Open saved item ${card.item?.name ?? ""}`
           }
           className={cn(
-            // A ROW of the shared glass panel (OverlayStack), not a card of
-            // its own: the panel's frost and border carry the surface, and
-            // still deliberately NO drop shadow (over arbitrary pages any
-            // soft shadow reads as a gray smudge — learned twice). Every
-            // pixel outside the panel is the page's own, exactly.
+            // Its own card in the stack (ui/overlay-card.ts), and still
+            // deliberately NO drop shadow (over arbitrary pages any soft
+            // shadow reads as a gray smudge — learned twice). Every pixel
+            // outside the cards is the page's own, exactly.
+            OVERLAY_CARD,
             // w-80, not w-full: OverlayStack reads the window's width off the
             // visible rows, so the card must carry its own rather than
             // borrow whatever width the window last had.

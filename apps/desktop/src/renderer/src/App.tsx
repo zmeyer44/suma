@@ -15,6 +15,7 @@ import { OriginControls } from "./components/OriginControls";
 import { PasskeyPicker } from "./components/PasskeyPicker";
 import { SavesPanel } from "./components/SavesPanel";
 import { DegradedBanner } from "./components/StatusPills";
+import { TabPreviewStrip } from "./components/TabPreviewStrip";
 import { TabStrip } from "./components/TabStrip";
 import { UrlBar } from "./components/UrlBar";
 import { VideosPanel } from "./components/VideosPanel";
@@ -134,6 +135,10 @@ export function App() {
   return (
     <div className="flex h-full flex-col bg-transparent text-text">
       <TabStrip />
+      {/* The hover preview shelf: a layout sibling like the banners below, so
+          opening it shrinks the content hole and the page slides down under
+          it (ContentPanes re-reports the bounds; main tracks the views). */}
+      <TabPreviewStrip />
       {/* Playback controls are NOT here: they live in the floating overlay
           window (AudioPlayer.tsx via OverlayStack), which stays visible above
           any open page — a control in the chrome would be covered by the tab

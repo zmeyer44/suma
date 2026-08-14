@@ -48,6 +48,15 @@
   --color-tab-face: oklch(from var(--color-chrome) l c h / calc(alpha * var(--tab-face-scale)));
   --color-tab-wash: oklch(from var(--color-chrome-wash) l c h / calc(alpha * var(--tab-face-scale)));
 
+  /* The tab preview shelf (TabPreviewStrip): the ACTIVE TAB's face color —
+     chrome — at full alpha, so the folder tab reads as flowing straight into
+     the shelf while the strip around it keeps its own gradient. The `/ 1`
+     is load-bearing: relative-color syntax keeps the ORIGIN's alpha when the
+     channel is omitted, and chrome carries --alpha-chrome, so without it the
+     translucent themes paint the shelf thin over the window blur and it lands
+     visibly grayer than the tab face it must match. */
+  --color-shelf: oklch(from var(--color-chrome) l c h / 1);
+
   /* Modal folder chrome (ui/modal.tsx): same construction one step above
      the raised surfaces. */
   --color-modal: oklch(from var(--color-base) calc(l + 0.055) c h);
@@ -74,6 +83,15 @@
   --color-warn: #e8b45a;
   --color-danger: #e5636c;
   --color-hairline: rgb(255 255 255 / 0.07);
+
+  /* The edge every FLOATING surface wears — toasts, popovers, the overlay
+     stack, the command bar. Opaque and a full step off the surface it sits
+     on, so the silhouette is a crisp drawn line rather than the barely-there
+     --color-hairline wash: these things land over arbitrary page pixels, and
+     a 7%-white edge disappears against a bright page exactly when the card
+     most needs a boundary. Hairline stays what it is — the interior divider
+     between rows of one surface. */
+  --color-float-edge: oklch(from var(--color-base) calc(l + 0.13) c h);
 
   /* Recessed bands (modal caption/footer) and the modal backdrop veil.
      Both are far gentler in light themes — see the light block below. */
@@ -106,11 +124,14 @@
    values into the generated utility at build time — a `:root[data-theme]`
    override of the token would silently do nothing, freezing the dark shadow
    into light themes. Reading a plain custom property keeps it swappable at
-   runtime. (Theme *colors* are fine: their utilities do emit var() refs.) */
+   runtime. (Theme *colors* are fine: their utilities do emit var() refs.)
+
+   One soft ambient pool plus a tight contact shadow, and NO inset top
+   highlight: the gloss line was the last of the glass vocabulary, and with
+   --color-float-edge drawing a real border the card reads as a flat opaque
+   slab lifted off the page — which is the whole point. */
 :root {
-  --pop:
-    0 16px 48px rgb(0 0 0 / 0.55), 0 2px 8px rgb(0 0 0 / 0.35),
-    inset 0 1px 0 rgb(255 255 255 / 0.05);
+  --pop: 0 12px 32px rgb(0 0 0 / 0.4), 0 2px 6px rgb(0 0 0 / 0.24);
 
   /* Opaque chrome is the default; the translucent block below is the only
      thing that moves these. */
@@ -149,9 +170,12 @@
   --drop-modal: drop-shadow(0 14px 34px rgb(0 0 0 / 0.13))
     drop-shadow(0 2px 6px rgb(0 0 0 / 0.07));
   --drop-tab: drop-shadow(0 -1px 4px rgb(0 0 0 / 0.08));
-  --pop:
-    0 12px 32px rgb(0 0 0 / 0.12), 0 2px 6px rgb(0 0 0 / 0.07),
-    inset 0 1px 0 rgb(255 255 255 / 0.7);
+  --pop: 0 10px 28px rgb(0 0 0 / 0.1), 0 2px 5px rgb(0 0 0 / 0.06);
+
+  /* A light floating surface is near-white on near-white, so its edge steps
+     DOWN — soft enough to read as a drawn outline, well short of the
+     reference's heavier #e1e1df structural border. */
+  --color-float-edge: oklch(from var(--color-base) calc(l - 0.05) c h);
 
   /* The base IS the foreground surface: panel, raised, active tab, modal.
      The tab face restates the base through oklch() only to carry
@@ -336,17 +360,70 @@
   transition-duration: 160ms;
 }
 
-/* ── The floating overlay's glass panel (OverlayStack) ────────────────────
-   A translucent TINT, not real frost: the overlay is a WebContentsView
-   layered over the tab views (shell-window.ts), and a view cannot blur a
-   sibling view's pixels — backdrop-filter samples only its own (transparent)
-   page, and vibrancy is a window-level feature. The old vibrancy-window
-   variant had true blur but lagged shell drags and floated over other apps;
-   this trades the blur for atomic tracking. Mostly opaque on purpose:
-   without a blur underneath, anything more transparent leaves sharp page
-   text bleeding through the controls. */
-.overlay-glass {
-  background: color-mix(in oklab, var(--color-chrome) 88%, transparent);
+/* The active tab's silhouette shadow (FolderShell), removable: while the
+   preview shelf is open the folder merges into the shelf's shared surface,
+   and even this soft cast bleeding below the base reads as a gray divider
+   drawn exactly along the seam that is supposed to be invisible. The off
+   state keeps a same-shape transparent shadow rather than `filter: none`,
+   so the swap interpolates instead of popping. */
+.folder-drop {
+  filter: var(--drop-tab);
+  transition: filter 200ms ease;
+}
+
+.folder-drop-off {
+  filter: drop-shadow(0 -1px 4px rgb(0 0 0 / 0));
+}
+
+/* The tab preview shelf (TabPreviewStrip) is the chat sidebar's mechanism
+   turned on its side: height is the animated property because the shelf is a
+   flex sibling ABOVE the content hole, so growing it pushes the hole (and the
+   tab WebContentsViews main keeps glued to it) down every frame. Applied only
+   while animating, and mirrored by OPEN_MS / CLOSE_MS in TabPreviewStrip.tsx
+   — the close timer is what unmounts the shelf. */
+.tab-preview-slide {
+  transition: height 220ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.tab-preview-slide[data-closing] {
+  transition-duration: 160ms;
+}
+
+/* ── The floating overlay's stack (OverlayStack) ──────────────────────────
+   The rows are SEPARATE CARDS, each painting its own opaque fill and edge
+   (ui/overlay-card.ts), stacked with a gap. There is no shared container
+   surface: the panel div is a transparent flex column that exists only to
+   measure. The fills are fully opaque because there was never real frost to
+   be had here — the overlay is a WebContentsView layered over the tab views
+   (shell-window.ts), and a view cannot blur a sibling view's pixels
+   (backdrop-filter samples only its own transparent page, and vibrancy is a
+   window-level feature). All the old 88% tint bought was sharp page text
+   bleeding faintly through the controls.
+
+   The gap goes BETWEEN open rows and never at the stack's edges: the view is
+   sized to exactly this content and swallows clicks over its whole rect, so
+   a leading or trailing gap would deaden a strip of the page for nothing.
+   Since CSS cannot select a previous sibling, the rule is written the other
+   way round — every open row carries the gap below it, and the LAST open one
+   (no open row after it) gives it back.
+
+   It is applied to the row's child, not the row itself, because that child
+   is the clipping box inside the 0fr↔1fr cell — padding there collapses with
+   the row it belongs to, while padding on the cell would stay behind as a
+   dead band after the card had folded away. */
+[data-overlay-row] > * {
+  transition: padding-bottom 240ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+[data-overlay-row][data-open="true"] > * {
+  padding-bottom: 0.5rem;
+}
+
+[data-overlay-row][data-open="true"]:not(
+    :has(~ [data-overlay-row][data-open="true"])
+  )
+  > * {
+  padding-bottom: 0;
 }
 
 /* ── Save-preview cards (SavePreviewOverlay, its own WebContentsView) ─────
@@ -422,7 +499,8 @@
   .save-preview-cell,
   .player-cell,
   .save-preview-card,
-  .save-preview-grow {
+  .save-preview-grow,
+  [data-overlay-row] > * {
     transition: none;
   }
 }
@@ -568,8 +646,9 @@
 
 @media (prefers-reduced-motion: reduce) {
   /* The sidebar still mounts and unmounts on the same schedule — it just
-     lands at its width instead of travelling there. */
-  .chat-slide {
+     lands at its width instead of travelling there. Same for the shelf. */
+  .chat-slide,
+  .tab-preview-slide {
     transition: none;
   }
 
