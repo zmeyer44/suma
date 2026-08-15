@@ -56,10 +56,14 @@ export function App() {
   // tabDragging is the same story for a tab dragged out of the strip.
   // railExpanded too: the hovered tool rail slides over the content hole
   // instead of pushing it, so its overhang is invisible until chrome rises.
+  // tabPreviewMounted is the same story for the thumbnail shelf: it overlays
+  // the page, which never resizes under it; dismissal unmounts the shelf and
+  // lowers the chrome in the same frame.
   const modalOpen = useSumaStore(
     (s) =>
       s.overlay !== "none" ||
       s.railExpanded ||
+      s.tabPreviewMounted ||
       s.originPopover !== null ||
       s.statusPopoverOpen ||
       s.passkeyRequest !== null ||
@@ -143,9 +147,10 @@ export function App() {
   return (
     <div className="flex h-full flex-col bg-transparent text-text">
       <TabStrip />
-      {/* The hover preview shelf: a layout sibling like the banners below, so
-          opening it shrinks the content hole and the page slides down under
-          it (ContentPanes re-reports the bounds; main tracks the views). */}
+      {/* The hover preview shelf: an OVERLAY fixed under the strip, not a
+          layout sibling — the content hole (and the tab views main glues to
+          it) never moves. While any of it shows, tabPreviewMounted raises
+          the chrome above the tab views (modalOpen above). */}
       <TabPreviewStrip />
       {/* Playback controls are NOT here: they live in the floating overlay
           window (AudioPlayer.tsx via OverlayStack), which stays visible above

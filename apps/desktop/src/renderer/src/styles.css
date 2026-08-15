@@ -453,18 +453,14 @@
   filter: drop-shadow(0 -1px 4px rgb(0 0 0 / 0));
 }
 
-/* The tab preview shelf (TabPreviewStrip) is the chat sidebar's mechanism
-   turned on its side: height is the animated property because the shelf is a
-   flex sibling ABOVE the content hole, so growing it pushes the hole (and the
-   tab WebContentsViews main keeps glued to it) down every frame. Applied only
-   while animating, and mirrored by OPEN_MS / CLOSE_MS in TabPreviewStrip.tsx
-   — the close timer is what unmounts the shelf. */
+/* The tab preview shelf (TabPreviewStrip) clips open OVER the page: it is a
+   fixed overlay under the strip, so animating height unrolls the shelf while
+   the content hole (and the tab views main keeps glued to it) never moves.
+   Opening only — dismissal unmounts the shelf instantly, with no exit
+   animation. Applied only while animating; duration mirrored by OPEN_MS in
+   TabPreviewStrip.tsx. */
 .tab-preview-slide {
   transition: height 220ms cubic-bezier(0.2, 0.8, 0.3, 1);
-}
-
-.tab-preview-slide[data-closing] {
-  transition-duration: 160ms;
 }
 
 /* ── The floating overlay's stack (OverlayStack) ──────────────────────────

@@ -11,17 +11,18 @@ import { useSumaStore } from "../store";
 import { TabMark } from "./TabStrip";
 
 /**
- * The preview shelf: hovering the tab row slides the page down and shows a
- * thumbnail card per tab, so "which tab was that?" is answered by looking at
- * the pages instead of guessing from favicons and truncated titles.
+ * The preview shelf: hovering the tab row unrolls a thumbnail card per tab
+ * under the strip, so "which tab was that?" is answered by looking at the
+ * pages instead of guessing from favicons and truncated titles.
  *
- * The shelf is a layout SIBLING of the content hole, exactly like the chat
- * sidebar (App.tsx): its height shrinks the hole, ContentPanes re-reports the
- * bounds every frame of the slide, and main tracks the tab WebContentsViews
- * onto the smaller region — the live page slides down with the shelf, it is
- * never covered by it. That is also why no chrome-raise is needed: the shelf
- * only ever occupies chrome-owned rows, so it gets its pointer events for
- * free.
+ * The shelf is an OVERLAY on the content hole, the SideRail's mechanism: the
+ * page under it never moves or resizes — the shelf clips open over it. The
+ * tab WebContentsViews normally sit ABOVE this document, so while the shelf
+ * is mounted tabPreviewMounted rides App's modalOpen and main raises the
+ * chrome; dismissal unmounts (and lowers) in the same frame. The raise means
+ * page clicks go dead while the shelf shows, so a pointerdown anywhere
+ * outside the shelf and the strip dismisses it immediately rather than
+ * waiting out the hover grace period.
  *
  * The pictures come from main's per-tab capture cache (tabs.ts): the visible
  * tab is snapshotted when it settles after a load and again the moment it is
@@ -35,10 +36,11 @@ const SHELF_H = 156;
 /** Card width — with the shelf's padding/caption this leaves the thumbnail
  *  box near 16:10, the shape of the content hole it snapshots. */
 const CARD_W = 176;
-/** Slide durations, in ms. These MUST match `.tab-preview-slide` in
- *  styles.css: the close timer below is what unmounts the shelf. */
+/** Opening slide duration, in ms — MUST match `.tab-preview-slide` in
+ *  styles.css. Closing has no counterpart on purpose: dismissal is instant
+ *  (unmount in the same frame), so the page is back the moment the shelf is
+ *  no longer wanted. */
 const OPEN_MS = 220;
-const CLOSE_MS = 160;
 
 function PreviewCard({ tab }: { tab: TabInfo }) {
   const selectTab = useSumaStore((s) => s.selectTab);
@@ -121,13 +123,41 @@ export function TabPreviewStrip() {
   const open = useSumaStore((s) => s.tabPreviewOpen);
   const tabs = useSumaStore((s) => s.tabs);
 
-  // The shelf outlives `open` by one animation, the ChatSidebar pattern: it
-  // mounts collapsed and expands next frame; on close it collapses first and
-  // unmounts when the slide lands.
+  // Asymmetric lifecycle: opening mounts collapsed and expands next frame
+  // (the ChatSidebar two-frame trick); closing unmounts instantly — no exit
+  // animation, so the page is back the moment the shelf is dismissed.
   const [mounted, setMounted] = useState(open);
   const [expanded, setExpanded] = useState(open);
   const [animating, setAnimating] = useState(false);
   const firstRun = useRef(true);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  // The chrome-raise flag tracks mounted, so raise and unmount move as one
+  // commit in both directions.
+  const setTabPreviewMounted = useSumaStore((s) => s.setTabPreviewMounted);
+  useEffect(() => {
+    setTabPreviewMounted(mounted);
+    // A stuck flag would leave the chrome permanently raised, deadening
+    // every click on the page — clear it if the shelf ever unmounts early.
+    return () => setTabPreviewMounted(false);
+  }, [mounted, setTabPreviewMounted]);
+
+  // With the chrome raised, clicks aimed at the page land on this document
+  // instead — swallowed by nothing. Any press outside the shelf and the
+  // strip dismisses at once, so the page is never more than one click away.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: PointerEvent): void => {
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      if (rootRef.current?.contains(target)) return;
+      // The strip owns its own gestures (selecting a tab already dismisses).
+      if (target.closest(".drag-region") !== null) return;
+      previewDismiss();
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    return () => window.removeEventListener("pointerdown", onPointerDown, true);
+  }, [open]);
 
   useEffect(() => {
     if (firstRun.current) {
@@ -150,13 +180,13 @@ export function TabPreviewStrip() {
         window.clearTimeout(settle);
       };
     }
-    setAnimating(true);
+    // Closing is INSTANT: no slide-out, no timer. Unmounting here also drops
+    // tabPreviewMounted in the same commit, so the chrome lowers and the live
+    // page is back in one frame.
+    setMounted(false);
     setExpanded(false);
-    const settle = window.setTimeout(() => {
-      setMounted(false);
-      setAnimating(false);
-    }, CLOSE_MS);
-    return () => window.clearTimeout(settle);
+    setAnimating(false);
+    return undefined;
   }, [open]);
 
   if (!mounted) return null;
@@ -166,14 +196,19 @@ export function TabPreviewStrip() {
 
   return (
     <div
-      data-closing={open ? undefined : ""}
+      ref={rootRef}
       style={{ height: expanded ? SHELF_H : 0 }}
+      // Fixed under the strip (h-12), OVER the page: the content hole never
+      // reflows for the shelf. z-30 sits above the split drop zones (z-20)
+      // and below the notification stack (z-50); no modal coexists with it.
       // bg-shelf IS the active tab's face color (styles.css): the strip keeps
       // its own gradient, and the folder-shaped active tab — the one element
       // painted in this color up there — appears to flow directly into this
-      // container, as if tab and shelf were one piece of paper.
+      // container, as if tab and shelf were one piece of paper. The cast
+      // shadow is what reads as "floating over the page" now that the page
+      // continues underneath.
       className={cn(
-        "relative shrink-0 overflow-hidden bg-shelf",
+        "fixed inset-x-0 top-12 z-30 overflow-hidden bg-shelf shadow-pop",
         animating && "tab-preview-slide",
       )}
       onPointerEnter={previewZoneEnter}

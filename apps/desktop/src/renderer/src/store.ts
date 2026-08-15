@@ -430,6 +430,13 @@ interface SumaState {
   /** Opening also pulls the space's cached thumbnails and asks main to
    *  re-capture the visible tab, so the shelf is fresh by the time it lands. */
   setTabPreviewOpen: (open: boolean) => void;
+  /** The shelf is in the DOM. It is an OVERLAY on the content hole (the page
+   *  under it never resizes), so the chrome must be raised above the tab
+   *  views while it shows; App folds this into modalOpen, the railExpanded
+   *  pattern. Set by TabPreviewStrip: mounts on open (before the slide-in),
+   *  unmounts instantly on dismissal — there is no exit animation. */
+  tabPreviewMounted: boolean;
+  setTabPreviewMounted: (mounted: boolean) => void;
   /** The tab the pointer is on in the STRIP — its shelf card mirrors the
    *  hover, so the row above and the picture below read as one control:
    *  the lit card is the page a click right now would land on. Maintained
@@ -1670,6 +1677,12 @@ export const useSumaStore = create<SumaState>()((set, get) => {
         if (thumbs === undefined) return;
         for (const thumb of thumbs) mergeThumbnail(thumb);
       });
+    },
+
+    tabPreviewMounted: false,
+    setTabPreviewMounted: (mounted) => {
+      if (get().tabPreviewMounted === mounted) return;
+      set({ tabPreviewMounted: mounted });
     },
 
     tabPreviewHoverId: null,
