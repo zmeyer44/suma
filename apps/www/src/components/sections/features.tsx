@@ -139,7 +139,7 @@ export function Features() {
   }, [play]);
 
   return (
-    <section id="features" className="scroll-mt-24">
+    <section id="features" className="scroll-mt-24 pt-24 sm:pt-32">
       <Shell>
         <SectionHead
           index="01"
@@ -148,16 +148,16 @@ export function Features() {
         />
 
         <Reveal delay={80}>
-          <p className="max-w-[46ch] pb-10 text-[1.125rem] leading-[1.6] text-muted-foreground">
+          <p className="max-w-[46ch] pb-12 pt-6 text-[1.0625rem] leading-[1.6] text-muted-foreground">
             The parts you would otherwise bolt on one add-on at a time, built
             into the browser and shown here exactly as they ship.
           </p>
         </Reveal>
 
-        <div className="flex flex-col gap-6 pb-20 lg:flex-row lg:items-start lg:gap-10 lg:pb-28">
+        <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-14">
           {/* Under lg the list collapses to a scrolling strip of names, with
               the selected one's line moved beneath the clip. */}
-          <div className="lg:w-[30%] lg:shrink-0">
+          <div className="lg:w-[28%] lg:shrink-0">
             <div className="-mx-5 flex gap-2 overflow-x-auto px-5 pb-1 lg:hidden">
               {FEATURES.map((feature, index) => (
                 <button
@@ -165,7 +165,6 @@ export function Features() {
                   type="button"
                   onClick={() => setActive(index)}
                   aria-pressed={index === active}
-                  data-pixel="control"
                   className={cn(
                     "shrink-0 whitespace-nowrap rounded-full px-4 py-2.5 text-[0.875rem] font-medium transition-colors",
                     index === active
@@ -178,47 +177,59 @@ export function Features() {
               ))}
             </div>
 
-            <ul className="hidden lg:flex lg:flex-col lg:gap-1">
+            <ul className="hidden lg:block">
               {FEATURES.map((feature, index) => {
                 const selected = index === active;
                 return (
-                  <li key={feature.key}>
+                  <li key={feature.key} className="border-t first:border-t-0">
                     <button
                       type="button"
                       onClick={() => setActive(index)}
                       aria-pressed={selected}
-                      data-pixel="card"
-                      className={cn(
-                        "w-full rounded-xl px-5 py-4 text-left transition-colors duration-300",
-                        selected ? "bg-surface" : "hover:bg-surface/50",
-                      )}
+                      className="group w-full py-5 text-left"
                     >
-                      <span className="display block text-[1.375rem] leading-none">
-                        {feature.name}
-                      </span>
-                      <span
-                        className={cn(
-                          "mt-2.5 block text-[0.9375rem] leading-[1.5] transition-colors duration-300",
-                          selected
-                            ? "text-muted-foreground"
-                            : "text-muted-foreground/55",
-                        )}
-                      >
-                        {feature.body}
-                      </span>
-                      <span
-                        aria-hidden
-                        className={cn(
-                          "mt-4 block h-px w-full bg-ink/10 transition-opacity duration-300",
-                          selected ? "opacity-100" : "opacity-0",
-                        )}
-                      >
+                      <span className="flex items-baseline justify-between gap-4">
                         <span
-                          ref={(node) => {
-                            barsRef.current[index] = node;
-                          }}
-                          className="block h-px w-full origin-left scale-x-0 bg-royal"
-                        />
+                          className={cn(
+                            "display text-[1.5rem] leading-none transition-colors duration-300",
+                            selected
+                              ? "text-foreground"
+                              : "text-muted-foreground/60 group-hover:text-muted-foreground",
+                          )}
+                        >
+                          {feature.name}
+                        </span>
+                        <span
+                          className={cn(
+                            "label transition-opacity duration-300",
+                            selected ? "opacity-100" : "opacity-30",
+                          )}
+                        >
+                          {String(index + 1).padStart(2, "0")}
+                        </span>
+                      </span>
+                      <span
+                        className={cn(
+                          "block overflow-hidden transition-[max-height,opacity] duration-500 ease-[cubic-bezier(0.16,1,0.3,1)]",
+                          selected
+                            ? "max-h-24 opacity-100"
+                            : "max-h-0 opacity-0",
+                        )}
+                      >
+                        <span className="block pt-3 text-[0.9375rem] leading-[1.55] text-muted-foreground">
+                          {feature.body}
+                        </span>
+                        <span
+                          aria-hidden
+                          className="mt-4 block h-px w-full bg-ink/10"
+                        >
+                          <span
+                            ref={(node) => {
+                              barsRef.current[index] = node;
+                            }}
+                            className="block h-px w-full origin-left scale-x-0 bg-gradient-to-r from-royal to-ember"
+                          />
+                        </span>
                       </span>
                     </button>
                   </li>
@@ -230,10 +241,7 @@ export function Features() {
           {/* The clips share one plate and cross-fade in place, so the section
               never jumps height as the selection moves. */}
           <div ref={stageRef} className="min-w-0 flex-1">
-            <div
-              data-pixel="card"
-              className="relative aspect-[1280/824] overflow-hidden rounded-2xl bg-surface p-2 sm:rounded-3xl sm:p-3"
-            >
+            <div className="relative aspect-[1280/824] overflow-hidden rounded-2xl border bg-paper-raised p-2 shadow-[0_24px_80px_-32px_rgba(10,14,24,0.25)] sm:rounded-3xl sm:p-3">
               {FEATURES.map((feature, index) => (
                 <video
                   key={feature.key}

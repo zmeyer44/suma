@@ -261,7 +261,7 @@ export function AppFrame() {
                 className={cn(
                   "flex min-w-0 flex-1",
                   index === 0 ? "ml-[9px]" : "",
-                  index > 0 ? "hidden md:flex" : "",
+                  index > 0 ? "hidden lg:flex" : "",
                   index > 2 ? "xl:flex" : "",
                 )}
               >
@@ -273,7 +273,10 @@ export function AppFrame() {
             </span>
           </div>
 
-          <div className="mb-2 hidden h-8 shrink-0 items-center gap-1.5 sm:flex">
+          {/* The strip's right cluster never shrinks, so it steps aside in the
+              one band where the frame is too narrow to carry it: the split
+              hero's md column. */}
+          <div className="mb-2 hidden h-8 shrink-0 items-center gap-1.5 sm:flex md:hidden lg:flex">
             <span className="flex items-center gap-1.5 rounded-full bg-ink/[0.06] px-2.5 py-1 font-mono text-[0.5625rem] uppercase tracking-[0.1em] text-muted-foreground">
               <span className="size-1.5 rounded-full bg-royal" />
               3 devices

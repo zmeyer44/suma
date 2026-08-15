@@ -4,14 +4,13 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import { SumaMark } from "@/components/suma-mark";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 const REPO_URL = "https://github.com/zmeyer44/suma";
 
 const LINKS = [
-  { href: "/#workspace", label: "Workspace" },
   { href: "/#features", label: "Features" },
+  { href: "/#workspace", label: "Workspace" },
   { href: "/#values", label: "Open source" },
   { href: "/download", label: "Download" },
   { href: "/#access", label: "Access" },
@@ -76,26 +75,26 @@ export function SiteNav() {
   }, [menuOpen]);
 
   const pill =
-    "flex items-center gap-1 rounded-[16px] bg-paper-raised/70 p-1.5 backdrop-blur-xl backdrop-saturate-150";
+    "flex items-center gap-1 rounded-full border bg-paper-raised/70 p-1.5 backdrop-blur-xl backdrop-saturate-150";
 
   return (
     <>
       <a
         href="#top"
-        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[60] focus:bg-royal focus:px-4 focus:py-2 focus:text-sm focus:text-white"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-[60] focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:text-paper"
       >
         Skip to content
       </a>
 
       <header className="fixed inset-x-0 top-0 z-50 flex items-start justify-between px-3 pt-3 sm:px-5 sm:pt-5">
         <div ref={menuRef} className="relative">
-          <nav data-pixel="card" className={pill}>
+          <nav className={pill}>
             <Link
               href="/"
               aria-label="Suma home"
               className="flex items-center gap-2.5 px-2.5 py-1.5 transition-opacity hover:opacity-60"
             >
-              <SumaMark className="h-[26px] w-auto text-royal" />
+              <SumaMark className="h-[24px] w-auto text-ink" />
               <span className="text-[0.9375rem] font-semibold tracking-[-0.02em]">
                 Suma
               </span>
@@ -103,7 +102,7 @@ export function SiteNav() {
 
             <div
               className={cn(
-                "hidden overflow-hidden transition-[max-width,opacity] duration-[600ms] ease-[cubic-bezier(0.16,1,0.3,1)] md:block",
+                "hidden overflow-hidden transition-[max-width,opacity] duration-[600ms] ease-[cubic-bezier(0.16,1,0.3,1)] lg:block",
                 collapsed ? "max-w-0 opacity-0" : "max-w-[34rem] opacity-100",
               )}
             >
@@ -137,9 +136,8 @@ export function SiteNav() {
           </nav>
 
           <div
-            data-pixel="card"
             className={cn(
-              "absolute left-0 top-[calc(100%+8px)] w-[15rem] origin-top-left rounded-[16px] bg-paper-raised/85 p-2 backdrop-blur-xl backdrop-saturate-150 transition-[opacity,transform] duration-300",
+              "absolute left-0 top-[calc(100%+8px)] w-[15rem] origin-top-left rounded-3xl border bg-paper-raised/85 p-2 backdrop-blur-xl backdrop-saturate-150 transition-[opacity,transform] duration-300",
               menuOpen
                 ? "pointer-events-auto scale-100 opacity-100"
                 : "pointer-events-none scale-95 opacity-0",
@@ -161,18 +159,18 @@ export function SiteNav() {
                 </li>
               ))}
             </ul>
-            <p className="label mt-1 border-t border-border px-3 pb-1 pt-3">
+            <p className="label mt-1 border-t px-3 pb-1 pt-3">
               Private beta · Invite only
             </p>
           </div>
         </div>
 
-        <div data-pixel="card" className={pill}>
+        <div className={pill}>
           <a
             href={REPO_URL}
             target="_blank"
             rel="noopener noreferrer"
-            className="hidden items-center gap-2 rounded-[11px] py-1.5 pl-3 pr-3.5 text-muted-foreground transition-colors hover:text-foreground sm:flex"
+            className="hidden shrink-0 items-center gap-2 rounded-full py-1.5 pl-3 pr-3.5 text-muted-foreground transition-colors hover:text-foreground sm:flex"
           >
             <svg
               width="18"
@@ -197,12 +195,12 @@ export function SiteNav() {
               </span>
             </span>
           </a>
-          <Button
-            asChild
-            className="h-auto rounded-[11px] px-4 py-2.5 text-[0.875rem] hover:bg-royal"
+          <a
+            href="#access"
+            className="shrink-0 whitespace-nowrap rounded-full bg-ink px-5 py-2.5 text-[0.875rem] font-medium text-paper transition-colors hover:bg-ink/85"
           >
-            <a href="#access">Get early access</a>
-          </Button>
+            Get early access
+          </a>
         </div>
       </header>
     </>

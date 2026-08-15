@@ -42,11 +42,11 @@ export default function DownloadPage() {
         <Reveal className="grid gap-x-16 gap-y-12 lg:grid-cols-12 lg:items-end">
           <div className="min-w-0 lg:col-span-6">
             <p className="label">
-              <span className="text-royal">Download</span>
-              <span className="px-2 opacity-30">—</span>
+              <span className="text-foreground">Download</span>
+              <span className="px-2 opacity-40">/</span>
               macOS
             </p>
-            <h1 className="display mt-6 max-w-[12ch] text-[clamp(2.75rem,7vw,6rem)] uppercase">
+            <h1 className="display mt-6 max-w-[14ch] text-[clamp(2.75rem,6.4vw,5.5rem)] leading-[1.02]">
               Put your desk on this Mac.
             </h1>
             <p className="mt-8 max-w-[44ch] text-[1.0625rem] leading-[1.6] text-muted-foreground">
@@ -58,8 +58,7 @@ export default function DownloadPage() {
             <div className="mt-10 flex flex-wrap items-center gap-x-6 gap-y-4">
               <a
                 href={DOWNLOAD_HREF}
-                data-pixel="control"
-                className="group inline-flex items-center gap-3 rounded-full bg-ink px-7 py-4 text-[1rem] font-medium text-paper transition-colors hover:bg-royal"
+                className="group inline-flex items-center gap-3 rounded-full bg-ink px-7 py-4 text-[1rem] font-medium text-paper transition-colors hover:bg-ink/85"
               >
                 Download for macOS
                 <span
@@ -80,8 +79,8 @@ export default function DownloadPage() {
               royal arrow between them. Decorative — the real one is in the
               download. */}
           <div className="min-w-0 lg:col-span-6" aria-hidden>
-            <Card tone="royal" className="p-4 sm:p-6">
-              <div className="rounded-lg bg-paper text-ink">
+            <Card tone="surface" className="p-4 sm:p-6">
+              <div className="rounded-lg border bg-paper-raised text-ink">
                 <div className="flex items-center gap-2 px-5 pt-4">
                   <span className="size-2.5 rounded-full bg-ink/15" />
                   <span className="size-2.5 rounded-full bg-ink/15" />
@@ -89,7 +88,7 @@ export default function DownloadPage() {
                   <span className="label ml-3 !text-[0.5625rem]">Suma</span>
                 </div>
 
-                <p className="label pt-6 text-center !text-[0.625rem] text-royal">
+                <p className="label pt-6 text-center !text-[0.625rem]">
                   Drag to Applications
                 </p>
 
@@ -132,10 +131,8 @@ export default function DownloadPage() {
           {STEPS.map(([index, title, body], i) => (
             <Reveal key={index} delay={i * 90}>
               <Card tone="surface" className="h-full">
-                <p className="label">
-                  <span className="text-royal">{index}</span>
-                </p>
-                <h2 className="display mt-16 text-[1.375rem] uppercase leading-[1.05] sm:mt-20">
+                <p className="label">{index}</p>
+                <h2 className="display mt-16 text-[1.5rem] leading-[1.1] sm:mt-20">
                   {title}
                 </h2>
                 <p className="mt-3 text-[0.9375rem] leading-[1.55] text-muted-foreground">
@@ -153,10 +150,10 @@ export default function DownloadPage() {
             className="flex flex-col gap-x-16 gap-y-8 sm:flex-row sm:items-end sm:justify-between"
           >
             <div className="min-w-0">
-              <p className="font-mono text-[0.6875rem] uppercase tracking-[0.16em] text-paper/45">
+              <p className="text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-paper/45">
                 Not on a Mac?
               </p>
-              <p className="display mt-5 max-w-[24ch] text-[clamp(1.5rem,2.6vw,2.25rem)] uppercase">
+              <p className="display mt-5 max-w-[24ch] text-[clamp(1.5rem,2.6vw,2.25rem)]">
                 Windows and Linux are on the bench.
               </p>
               <p className="mt-4 max-w-[46ch] text-[0.9375rem] leading-[1.6] text-paper/60">
@@ -166,8 +163,7 @@ export default function DownloadPage() {
             </div>
             <Link
               href="/#access"
-              data-pixel="control"
-              className="group inline-flex shrink-0 items-center gap-2.5 self-start rounded-full bg-paper px-6 py-3.5 text-[0.9375rem] font-medium text-ink transition-colors hover:bg-royal hover:text-paper sm:self-auto"
+              className="group inline-flex shrink-0 items-center gap-2.5 self-start rounded-full bg-paper px-6 py-3.5 text-[0.9375rem] font-medium text-ink transition-colors hover:bg-paper/85 sm:self-auto"
             >
               Join the list
               <span

@@ -2,37 +2,28 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* The one pixel size on the site. Registered rather than declared bare so it
-   resolves to a length — `src/lib/pixel-lattice.ts` reads it back to size the
-   canvases, and an unregistered property would hand it the literal `clamp()`. */
-@property --pixel-pitch {
-  syntax: "<length>";
-  inherits: true;
-  initial-value: 14px;
-}
-
 /* ---------------------------------------------------------------------------
-   Suma. Bone paper, near-black ink, one royal blue.
+   Suma. Editorial neo-Swiss: pure white paper, near-black ink, hairline rules.
 
-   The grid and the pixel lattice still set the page, but the surfaces on top
-   of it are soft: content sits on rounded, filled panels rather than inside
-   hairline rules. Rules are now the exception — used to divide, never to box.
-   Depth comes from a change of surface, not from shadow.
+   The page is set like a magazine spread — oversized serif display type over a
+   quiet grotesk, enormous whitespace, and monochrome controls. Colour lives in
+   one place only: the atmospheric panels the product UI floats on, painted
+   between two poles — deep royal navy and burnt ember red. Royal blue survives
+   from the old identity as a minor accent, never as a surface; ember is its
+   warm counterweight and appears even more sparingly.
 --------------------------------------------------------------------------- */
 :root {
-  --radius: 1.25rem;
+  --radius: 1rem;
 
-  /* The pixel lattice. 14px at the 1440px reference width, held to a fraction
-     of the viewport from there so display scaling, panel density and browser
-     zoom cannot change how the page reads — see `src/lib/pixel-lattice.ts`. */
-  --pixel-pitch: clamp(11px, 0.9722vw, 20px);
-
-  --paper: oklch(0.964 0.008 95);
-  --paper-raised: oklch(0.985 0.005 95);
-  --ink: oklch(0.185 0.008 265);
+  --paper: oklch(1 0 0);
+  --paper-raised: oklch(1 0 0);
+  --ink: oklch(0.208 0.01 262);
   --royal: oklch(0.517 0.192 264.5);
   --royal-deep: oklch(0.43 0.185 264.5);
-  --royal-wash: oklch(0.948 0.032 264.5);
+  --royal-wash: oklch(0.952 0.025 264.5);
+  --ember: oklch(0.575 0.175 33);
+  --ember-deep: oklch(0.46 0.155 31);
+  --ember-wash: oklch(0.958 0.018 45);
 
   --background: var(--paper);
   --foreground: var(--ink);
@@ -41,17 +32,17 @@
   --popover: var(--paper-raised);
   --popover-foreground: var(--ink);
   --primary: var(--ink);
-  --primary-foreground: oklch(0.985 0.005 95);
-  --secondary: oklch(0.93 0.008 95);
+  --primary-foreground: oklch(0.985 0.003 91);
+  --secondary: oklch(0.945 0.005 91);
   --secondary-foreground: var(--ink);
-  --muted: oklch(0.935 0.007 95);
-  --muted-foreground: oklch(0.46 0.012 265);
+  --muted: oklch(0.945 0.005 91);
+  --muted-foreground: oklch(0.478 0.012 262);
   --accent: var(--royal-wash);
   --accent-foreground: var(--royal-deep);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.185 0.008 265 / 14%);
-  --input: oklch(0.185 0.008 265 / 20%);
-  --ring: var(--royal);
+  --border: oklch(0.208 0.01 262 / 12%);
+  --input: oklch(0.208 0.01 262 / 18%);
+  --ring: var(--ink);
 }
 
 @theme inline {
@@ -80,15 +71,16 @@
   --color-royal: var(--royal);
   --color-royal-deep: var(--royal-deep);
   --color-royal-wash: var(--royal-wash);
+  --color-ember: var(--ember);
+  --color-ember-deep: var(--ember-deep);
+  --color-ember-wash: var(--ember-wash);
 
   --font-display:
-    var(--font-industry), var(--font-host-grotesk), ui-sans-serif, system-ui,
+    var(--font-vanguardia), "Avenir Next", "Helvetica Neue", ui-sans-serif,
     sans-serif;
   --font-sans: var(--font-host-grotesk), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-plex-mono), ui-monospace, "SFMono-Regular", monospace;
 
-  /* Small controls sit at sm/md; cards at lg; the big section panels at
-     xl and 2xl. Nothing on the page is square any more except the pixels. */
   --radius-sm: 0.625rem;
   --radius-md: 0.875rem;
   --radius-lg: 1.25rem;
@@ -96,9 +88,9 @@
   --radius-2xl: 2.25rem;
   --radius-3xl: 2.75rem;
 
-  /* A surface one step off the page, for cards that carry their own ground. */
-  --color-surface: oklch(0.938 0.009 95);
-  --color-surface-deep: oklch(0.912 0.011 95);
+  /* A surface one step off the page — secondary controls, quiet fills. */
+  --color-surface: oklch(0.952 0.005 91);
+  --color-surface-deep: oklch(0.924 0.006 91);
 }
 
 @layer base {
@@ -118,12 +110,12 @@
   }
 
   ::selection {
-    background: var(--royal);
-    color: white;
+    background: var(--ink);
+    color: var(--paper);
   }
 
   :focus-visible {
-    outline: 2px solid var(--royal);
+    outline: 2px solid var(--ink);
     outline-offset: 3px;
   }
 
@@ -142,37 +134,93 @@
 }
 
 @layer components {
-  /* Display type: Industry, set at its lightest cut. Weight is still not what
-     makes a headline loud here, size is — but Industry ships nothing under 600,
-     and its square, tightly-fitted letters carry that weight without shouting.
-     They also need less negative tracking than the grotesk did. */
+  /* Display type: Vanguardia, a single regular cut. Size does the shouting;
+     the weight never changes. The face ships no italic or bold, so an <em>
+     inside a display run stays roman — a synthesised slant or fake bold
+     would be the one thing on the page that looks borrowed. */
   .display {
     @apply font-display;
+    font-weight: 400;
     letter-spacing: -0.015em;
-    line-height: 0.97;
-    font-weight: 600;
+    line-height: 1.04;
+    font-synthesis: none;
   }
 
-  /* The one label style on the site: mono, uppercase, widely tracked. */
+  .display em {
+    font-style: normal;
+  }
+
+  /* The one label style on the site: small caps-tracked grotesk. */
   .label {
-    @apply font-mono text-[0.6875rem] uppercase tracking-[0.16em] text-muted-foreground;
+    @apply text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-muted-foreground;
   }
 
-  /* Graph paper. Present everywhere, barely there — it is what makes the
-     page feel measured rather than floated. Two pixels to a square, so it stays
-     the same grid the cursor field is drawn on at any viewport. */
-  .graph {
+  /* Atmospheric ground for the panels the product floats on: the site's two
+     poles out of focus — royal navy pooling in one low corner, ember burning
+     through the opposite one, a band of warm haze between them. Painted, not
+     photographed. The repeating streak layer leans the light diagonally, the
+     way wind leans grass; the grain below keeps it from reading as a plain
+     CSS gradient. */
+  .atmosphere {
+    background-color: oklch(0.7 0.05 255);
     background-image:
-      linear-gradient(
-        to right,
-        color-mix(in oklab, var(--ink) 3.5%, transparent) 1px,
-        transparent 1px
+      repeating-linear-gradient(
+        112deg,
+        oklch(1 0 0 / 0%) 0px,
+        oklch(1 0 0 / 5%) 2px,
+        oklch(1 0 0 / 0%) 5px,
+        oklch(1 0 0 / 0%) 28px
       ),
-      linear-gradient(
-        to bottom,
-        color-mix(in oklab, var(--ink) 3.5%, transparent) 1px,
-        transparent 1px
+      radial-gradient(
+        110% 80% at 14% 2%,
+        oklch(0.93 0.02 75 / 92%) 0%,
+        transparent 55%
+      ),
+      radial-gradient(
+        130% 90% at 90% 0%,
+        oklch(0.7 0.105 45) 0%,
+        transparent 58%
+      ),
+      radial-gradient(
+        120% 110% at 82% 102%,
+        oklch(0.49 0.15 32) 0%,
+        transparent 62%
+      ),
+      radial-gradient(
+        130% 120% at 6% 105%,
+        oklch(0.31 0.085 260) 0%,
+        transparent 62%
+      ),
+      linear-gradient(155deg, oklch(0.87 0.03 250) 0%, oklch(0.53 0.12 35) 100%);
+  }
+
+  /* The same field after dark, for the one panel set on ink: the navy and the
+     ember sunk to corner glows a dark surface can carry without waking up. */
+  .atmosphere-night {
+    background-color: var(--ink);
+    background-image:
+      radial-gradient(
+        85% 75% at 92% 110%,
+        oklch(0.42 0.13 33 / 45%) 0%,
+        transparent 62%
+      ),
+      radial-gradient(
+        95% 85% at 2% -12%,
+        oklch(0.44 0.13 262 / 42%) 0%,
+        transparent 60%
       );
-    background-size: calc(var(--pixel-pitch) * 2) calc(var(--pixel-pitch) * 2);
+  }
+
+  /* Film grain over an atmosphere panel. The host needs `relative` and
+     `overflow-hidden`; content inside sits above it on its own z-index. */
+  .grain::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+    background-size: 140px 140px;
+    mix-blend-mode: overlay;
+    opacity: 0.55;
   }
 }

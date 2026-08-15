@@ -33,7 +33,7 @@ const VALUES = [
 
 export function Values() {
   return (
-    <section id="values" className="scroll-mt-24">
+    <section id="values" className="scroll-mt-24 pt-24 sm:pt-32">
       <Shell>
         <SectionHead
           index="03"
@@ -43,7 +43,7 @@ export function Values() {
         />
 
         <Reveal delay={80}>
-          <p className="max-w-[52ch] pb-10 text-[1.125rem] leading-[1.6] text-muted-foreground">
+          <p className="max-w-[52ch] pt-6 text-[1.0625rem] leading-[1.6] text-muted-foreground">
             A browser that carries your sign-ins has to earn trust the hard way.
             Suma is developed in the open and speaks protocols nobody owns — so
             your identity isn&rsquo;t locked to us either.
@@ -51,38 +51,26 @@ export function Values() {
         </Reveal>
 
         <Reveal delay={120}>
-          <ul className="flex flex-wrap gap-2 pb-20 sm:gap-3 lg:pb-28">
-            {VALUES.map(({ icon: Icon, label, href }) => {
-              const content = (
-                <>
-                  <Icon aria-hidden className="size-4 shrink-0 text-royal" />
-                  {label}
-                </>
-              );
-
-              return (
-                <li key={label}>
-                  {href ? (
-                    <a
-                      href={href}
-                      target="_blank"
-                      rel="noreferrer"
-                      data-pixel="control"
-                      className="flex items-center gap-2.5 rounded-full bg-surface px-5 py-3 text-[0.9375rem] font-medium transition-colors hover:bg-ink hover:text-paper"
-                    >
-                      {content}
-                    </a>
-                  ) : (
-                    <span
-                      data-pixel="control"
-                      className="flex items-center gap-2.5 rounded-full bg-surface px-5 py-3 text-[0.9375rem] font-medium"
-                    >
-                      {content}
-                    </span>
-                  )}
-                </li>
-              );
-            })}
+          <ul className="grid gap-x-10 gap-y-8 pt-14 sm:grid-cols-2 sm:pt-20 lg:grid-cols-5">
+            {VALUES.map(({ icon: Icon, label, href }) => (
+              <li key={label} className="border-l-2 border-ink/15 pl-5">
+                <Icon aria-hidden className="size-4 text-muted-foreground" />
+                {href ? (
+                  <a
+                    href={href}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-4 block max-w-[16ch] text-[0.9375rem] font-medium leading-[1.45] underline-offset-4 transition-colors hover:underline"
+                  >
+                    {label}
+                  </a>
+                ) : (
+                  <p className="mt-4 max-w-[16ch] text-[0.9375rem] font-medium leading-[1.45]">
+                    {label}
+                  </p>
+                )}
+              </li>
+            ))}
           </ul>
         </Reveal>
       </Shell>

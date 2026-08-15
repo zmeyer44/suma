@@ -3,7 +3,6 @@ import type { Metadata, Viewport } from "next";
 import { Host_Grotesk, IBM_Plex_Mono } from "next/font/google";
 import localFont from "next/font/local";
 
-import { PixelField } from "@/components/pixel-field";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteNav } from "@/components/site-nav";
 import { cn } from "@/lib/utils";
@@ -17,28 +16,17 @@ const hostGrotesk = Host_Grotesk({
 });
 
 /**
- * Industry, the display face — headlines only; body copy stays on Host Grotesk.
- * There is no variable cut, so each weight is its own file, self-hosted from
- * `src/fonts` rather than fetched. It ships nothing under 600, which is why
- * `.display` in `globals.css` sets its own weight.
+ * Vanguardia (Latinotype), the display face — headlines only; body copy
+ * stays on Host Grotesk. One static regular cut, roman only: there is no
+ * italic and no other weight, which is why nothing on the site italicises
+ * or bolds display type. Web-licensed, so the file does not belong in a
+ * public repo.
  */
-const industry = localFont({
-  src: [
-    {
-      path: "../fonts/Industry-SemiBold.woff2",
-      weight: "600",
-      style: "normal",
-    },
-    { path: "../fonts/Industry-Bold.woff2", weight: "700", style: "normal" },
-    {
-      path: "../fonts/Industry-ExtraBold.woff2",
-      weight: "800",
-      style: "normal",
-    },
-    { path: "../fonts/Industry-Black.woff2", weight: "900", style: "normal" },
-  ],
+const vanguardia = localFont({
+  src: "../fonts/vanguardia-regular.woff2",
   display: "swap",
-  variable: "--font-industry",
+  weight: "400",
+  variable: "--font-vanguardia",
 });
 
 const plexMono = IBM_Plex_Mono({
@@ -89,7 +77,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#f3f2ec",
+  themeColor: "#ffffff",
   colorScheme: "light",
 };
 
@@ -99,13 +87,15 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={cn(hostGrotesk.variable, plexMono.variable, industry.variable)}
+      className={cn(
+        hostGrotesk.variable,
+        plexMono.variable,
+        vanguardia.variable,
+      )}
     >
-      <body className="graph relative min-h-dvh overflow-x-hidden font-sans">
-        <PixelField />
+      <body className="relative min-h-dvh overflow-x-hidden font-sans">
         <SiteNav />
-        {/* The pixel field is fixed at z-0; content must sit above it. */}
-        <main id="top" className="relative z-10">
+        <main id="top" className="relative">
           {children}
         </main>
         <SiteFooter />

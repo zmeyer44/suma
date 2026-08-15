@@ -5,17 +5,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Shell } from "@/components/section";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import {
+  WAITLIST_JOINED_EVENT,
+  WAITLIST_REF_KEY as REF_KEY,
+  WAITLIST_STORAGE_KEY as STORAGE_KEY,
+  type WaitlistJoined,
+} from "@/lib/waitlist-client";
 import type { WaitlistStatus } from "@/lib/waitlist-store";
 
 const FALLBACK_ADDRESS = "invites@sumabrowser.com";
 
 /** Mirrors REFERRAL_BOOST server-side; the copy below promises this number. */
 const PLACES_PER_FRIEND = 5;
-
-/** Your spot, remembered locally so a return visit reopens the ticket. */
-const STORAGE_KEY = "suma.waitlist";
-/** A referral code seen on arrival, held for the length of the visit. */
-const REF_KEY = "suma.waitlist.ref";
 
 /** Cells in the queue strip — two rows of the site's pixel motif. */
 const STRIP_CELLS = 28;
@@ -98,6 +99,18 @@ export function Waitlist() {
     };
   }, []);
 
+  // A join in the hero form opens the same ticket here, so the reader who
+  // scrolls down finds their spot rather than an empty form.
+  useEffect(() => {
+    const onJoined = (event: Event) => {
+      const detail = (event as CustomEvent<WaitlistJoined>).detail;
+      setSpot(detail);
+      setReturning(detail.alreadyJoined);
+    };
+    window.addEventListener(WAITLIST_JOINED_EVENT, onJoined);
+    return () => window.removeEventListener(WAITLIST_JOINED_EVENT, onJoined);
+  }, []);
+
   useEffect(() => {
     return () => {
       if (copiedTimer.current) clearTimeout(copiedTimer.current);
@@ -166,14 +179,12 @@ export function Waitlist() {
   }
 
   return (
-    <section id="access" className="relative z-10 scroll-mt-24 pb-6">
+    <section id="access" className="relative z-10 scroll-mt-24 pb-6 pt-24 sm:pt-32">
       <Shell>
         {/* The closing panel, inset and rounded rather than a full-bleed band —
-            the page ends on a surface, not on an edge. */}
-        <div
-          data-pixel="card"
-          className="grid gap-x-16 gap-y-14 rounded-2xl bg-ink px-5 py-16 text-paper sm:rounded-3xl sm:px-12 sm:py-20 lg:grid-cols-12 lg:px-16"
-        >
+            the page ends on a surface, not on an edge. Its ground is the hero's
+            field after dark: the same navy and ember, sunk to glows. */}
+        <div className="atmosphere-night grid gap-x-16 gap-y-14 rounded-3xl px-5 py-16 text-paper sm:rounded-[2.5rem] sm:px-12 sm:py-20 lg:grid-cols-12 lg:px-20 lg:py-24">
           <div aria-live="polite" className="min-w-0 lg:col-span-6">
             {spot?.invited ? (
               <InvitedTicket
@@ -194,13 +205,11 @@ export function Waitlist() {
               />
             ) : (
               <>
-                <p className="font-mono text-[0.6875rem] uppercase tracking-[0.16em] text-paper/45">
+                <p className="text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-paper/45">
                   Early access · invite only
                 </p>
-                <h2 className="display mt-7 text-[clamp(2.1rem,4.6vw,3.75rem)] uppercase">
-                  Stop rebuilding
-                  <br />
-                  your desk.
+                <h2 className="display mt-7 text-[clamp(2.5rem,5vw,4.25rem)] leading-[1.02]">
+                  Stop rebuilding your desk.
                 </h2>
                 <p className="mt-8 max-w-[42ch] text-[1.0625rem] leading-[1.6] text-paper/60">
                   Suma is in private beta with people who work from more than
@@ -211,7 +220,7 @@ export function Waitlist() {
                 </p>
 
                 {refCode ? (
-                  <p className="mt-6 inline-flex items-center gap-3 rounded-full bg-white/[0.07] px-5 py-2.5 font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-paper/70">
+                  <p className="mt-6 inline-flex items-center gap-3 rounded-full bg-white/[0.07] px-5 py-2.5 text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-paper/70">
                     <span aria-hidden className="size-2 shrink-0 bg-royal" />
                     Invite link detected — joining moves your friend up
                   </p>
@@ -235,7 +244,7 @@ export function Waitlist() {
                     <Button
                       type="submit"
                       disabled={sending}
-                      className="h-auto shrink-0 rounded-full bg-paper px-6 py-3.5 text-[0.9375rem] text-ink hover:bg-royal hover:text-paper"
+                      className="h-auto shrink-0 rounded-full bg-paper px-6 py-3.5 text-[0.9375rem] text-ink transition-colors hover:bg-paper/85"
                     >
                       {sending ? "Joining…" : "Join the waitlist"}
                     </Button>
@@ -251,7 +260,7 @@ export function Waitlist() {
                     .
                   </p>
                 ) : (
-                  <p className="mt-4 font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-paper/35">
+                  <p className="mt-4 text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-paper/35">
                     No newsletter · one message when there&rsquo;s a seat
                   </p>
                 )}
@@ -260,7 +269,7 @@ export function Waitlist() {
           </div>
 
           <dl className="min-w-0 lg:col-span-5 lg:col-start-8">
-            <p className="pb-4 font-mono text-[0.6875rem] uppercase tracking-[0.16em] text-paper/45">
+            <p className="pb-4 text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-paper/45">
               What a seat includes
             </p>
             <div className="flex flex-col gap-2">
@@ -269,7 +278,7 @@ export function Waitlist() {
                   key={label}
                   className="flex flex-col gap-1.5 rounded-lg bg-white/[0.06] px-5 py-4 sm:flex-row sm:gap-6"
                 >
-                  <dt className="shrink-0 font-mono text-[0.6875rem] uppercase leading-[1.9] tracking-[0.16em] text-paper/45 sm:w-[6.5rem]">
+                  <dt className="shrink-0 text-[0.6875rem] font-medium uppercase leading-[1.9] tracking-[0.14em] text-paper/45 sm:w-[6.5rem]">
                     {label}
                   </dt>
                   <dd className="min-w-0 text-[0.9375rem] leading-[1.5] text-paper/85">
@@ -278,7 +287,7 @@ export function Waitlist() {
                 </div>
               ))}
             </div>
-            <p className="mt-6 font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-paper/35">
+            <p className="mt-6 text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-paper/35">
               Desktop app · macOS 14+ · Apple Silicon
             </p>
           </dl>
@@ -305,10 +314,10 @@ function InvitedTicket({
 }) {
   return (
     <div>
-      <p className="font-mono text-[0.6875rem] uppercase tracking-[0.16em] text-paper/45">
+      <p className="text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-paper/45">
         Early access · your seat is ready
       </p>
-      <h2 className="display mt-7 text-[clamp(2.5rem,5.5vw,4.5rem)] uppercase">
+      <h2 className="display mt-7 text-[clamp(2.5rem,5.5vw,4.5rem)]">
         You&rsquo;re in.
       </h2>
       <p className="mt-8 max-w-[42ch] text-[1.0625rem] leading-[1.6] text-paper/60">
@@ -325,7 +334,7 @@ function InvitedTicket({
           <Button
             type="button"
             onClick={() => void onCopy(spot.inviteCode ?? "")}
-            className="h-auto shrink-0 rounded-full bg-paper px-6 py-3.5 text-[0.9375rem] text-ink hover:bg-royal hover:text-paper"
+            className="h-auto shrink-0 rounded-full bg-paper px-6 py-3.5 text-[0.9375rem] text-ink transition-colors hover:bg-paper/85"
           >
             {copied ? "Copied" : "Copy code"}
           </Button>
@@ -335,8 +344,7 @@ function InvitedTicket({
       <div className="mt-8 flex flex-wrap items-center gap-x-7 gap-y-4">
         <a
           href="/download"
-          data-pixel="control"
-          className="group inline-flex items-center gap-2.5 rounded-full bg-royal px-7 py-3.5 text-[0.9375rem] font-medium text-paper transition-colors hover:bg-paper hover:text-ink"
+          className="group inline-flex items-center gap-2.5 rounded-full bg-paper px-7 py-3.5 text-[0.9375rem] font-medium text-ink transition-colors hover:bg-paper/85"
         >
           Download for macOS
           <span
@@ -349,7 +357,7 @@ function InvitedTicket({
         <button
           type="button"
           onClick={onReset}
-          className="font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-paper/35 underline-offset-4 transition-colors hover:text-paper hover:underline"
+          className="text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-paper/35 underline-offset-4 transition-colors hover:text-paper hover:underline"
         >
           Not you? Use another email
         </button>
@@ -393,13 +401,13 @@ function SpotTicket({
 
   return (
     <div>
-      <p className="font-mono text-[0.6875rem] uppercase tracking-[0.16em] text-paper/45">
+      <p className="text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-paper/45">
         {returning
           ? "Early access · welcome back"
           : "Early access · you’re in line"}
       </p>
 
-      <p className="display mt-6 text-[clamp(4rem,10vw,7.5rem)] uppercase leading-none">
+      <p className="display mt-6 text-[clamp(4rem,10vw,7.5rem)] leading-none">
         <span aria-hidden className="text-royal">
           #
         </span>
@@ -410,8 +418,8 @@ function SpotTicket({
         of {spot.total.toLocaleString("en-US")} in line · joined as {spot.email}
       </p>
 
-      {/* The queue, drawn on the site's grid: everyone ahead of you, you in
-          royal, everyone behind. */}
+      {/* The queue, drawn on the site's grid: everyone ahead of you in ember,
+          you in royal, everyone behind unlit. */}
       <div className="mt-8 max-w-[34rem]">
         <div className="flex gap-[3px]">
           {Array.from({ length: STRIP_CELLS }, (_, i) => (
@@ -419,14 +427,14 @@ function SpotTicket({
               key={i}
               className={cn(
                 "h-2 flex-1",
-                i < yourCell && "bg-paper/25",
+                i < yourCell && "bg-ember/55",
                 i === yourCell && "bg-royal",
                 i > yourCell && "bg-white/[0.08]",
               )}
             />
           ))}
         </div>
-        <div className="mt-2.5 flex justify-between font-mono text-[0.625rem] uppercase tracking-[0.14em] text-paper/40">
+        <div className="mt-2.5 flex justify-between text-[0.625rem] font-medium uppercase tracking-[0.14em] text-paper/40">
           <span>Front of the line</span>
           <span>
             {ahead.toLocaleString("en-US")} ahead ·{" "}
@@ -436,7 +444,7 @@ function SpotTicket({
       </div>
 
       <div className="mt-10 max-w-[34rem] border-t border-white/15 pt-7">
-        <p className="font-mono text-[0.6875rem] uppercase tracking-[0.16em] text-paper/45">
+        <p className="text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-paper/45">
           Move up the line
         </p>
         <p className="mt-3 text-[0.9375rem] leading-[1.6] text-paper/60">
@@ -469,13 +477,13 @@ function SpotTicket({
           <Button
             type="button"
             onClick={onCopy}
-            className="h-auto shrink-0 rounded-full bg-paper px-6 py-3.5 text-[0.9375rem] text-ink hover:bg-royal hover:text-paper"
+            className="h-auto shrink-0 rounded-full bg-paper px-6 py-3.5 text-[0.9375rem] text-ink transition-colors hover:bg-paper/85"
           >
             {copied ? "Copied" : "Copy link"}
           </Button>
         </div>
 
-        <div className="mt-5 flex flex-wrap items-center gap-x-7 gap-y-2 font-mono text-[0.6875rem] uppercase tracking-[0.14em]">
+        <div className="mt-5 flex flex-wrap items-center gap-x-7 gap-y-2 text-[0.6875rem] font-medium uppercase tracking-[0.14em]">
           <a
             className="text-paper/55 underline-offset-4 transition-colors hover:text-paper hover:underline"
             href={`https://x.com/intent/post?text=${encodeURIComponent(shareText)}&url=${encodeURIComponent(referralUrl)}`}

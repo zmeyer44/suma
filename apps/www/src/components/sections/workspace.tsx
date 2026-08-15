@@ -1,14 +1,16 @@
-import { AppFrame } from "@/components/app-frame";
 import { Reveal } from "@/components/reveal";
-import { Card, SectionHead, Shell } from "@/components/section";
-import { cn } from "@/lib/utils";
+import { SectionHead, Shell } from "@/components/section";
 
+/**
+ * The four grounds a workspace stands on, set as a Swiss column grid: a top
+ * rule each, the role as a label, the name in the display face. No cards —
+ * the rules and the whitespace do the separating.
+ */
 const PLACES = [
   {
     name: "Your device",
     role: "What you see",
     detail: "Spaces, tabs, split view. Every page paints at full speed.",
-    accent: true,
   },
   {
     name: "Your account",
@@ -29,7 +31,7 @@ const PLACES = [
 
 export function Workspace() {
   return (
-    <section id="workspace" className="scroll-mt-24">
+    <section id="workspace" className="scroll-mt-24 pt-24 sm:pt-32">
       <Shell>
         <SectionHead
           index="02"
@@ -39,54 +41,25 @@ export function Workspace() {
         />
 
         <Reveal delay={80}>
-          <p className="max-w-[46ch] pb-12 text-[1.125rem] leading-[1.6] text-muted-foreground">
+          <p className="max-w-[46ch] pt-6 text-[1.0625rem] leading-[1.6] text-muted-foreground">
             Spaces, a command bar, split view, pinned tabs, and your password
             manager exactly where you expect it. Import from Chrome or Arc in
             one pass.
           </p>
         </Reveal>
 
-        {/* The app, sitting on its own rounded ground rather than in a ruled
-            plate — the frame is the picture here, not a specimen. */}
-        <Reveal>
-          <figure>
-            <div
-              data-pixel="card"
-              className="rounded-2xl bg-surface p-3 sm:rounded-3xl sm:p-5"
-            >
-              <AppFrame />
-            </div>
-            <figcaption className="label mt-5 flex flex-wrap justify-between gap-4 px-1">
-              <span>
-                Workspace &ldquo;Work&rdquo;, restored on a second device
-              </span>
-              <span>Shown at 1×</span>
-            </figcaption>
-          </figure>
-        </Reveal>
-
-        <div className="grid gap-3 pb-20 pt-14 sm:gap-4 lg:grid-cols-4 lg:pb-28">
+        <div className="grid gap-x-10 gap-y-12 pt-14 sm:grid-cols-2 sm:pt-20 lg:grid-cols-4">
           {PLACES.map((place, index) => (
-            <Reveal key={place.name} delay={index * 70}>
-              <Card
-                tone={place.accent ? "royal" : "surface"}
-                className="flex h-full flex-col gap-3"
-              >
-                <p className={cn("label", place.accent && "!text-paper/70")}>
-                  {place.role}
-                </p>
-                <p className="display text-[1.5rem] leading-none">
+            <Reveal key={place.name} delay={index * 80}>
+              <div className="border-t pt-5">
+                <p className="label">{place.role}</p>
+                <p className="display mt-10 text-[1.75rem] leading-none sm:mt-14">
                   {place.name}
                 </p>
-                <p
-                  className={cn(
-                    "mt-auto text-[0.9375rem] leading-[1.5]",
-                    place.accent ? "text-paper/80" : "text-muted-foreground",
-                  )}
-                >
+                <p className="mt-4 max-w-[28ch] text-[0.9375rem] leading-[1.55] text-muted-foreground">
                   {place.detail}
                 </p>
-              </Card>
+              </div>
             </Reveal>
           ))}
         </div>
