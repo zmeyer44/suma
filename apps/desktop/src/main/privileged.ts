@@ -40,7 +40,24 @@ export function registerSumaScheme(): void {
     // get a handler, so site content has nothing to reach.
     {
       scheme: "suma-video",
-      privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true },
+      privileges: {
+        standard: true,
+        secure: true,
+        stream: true,
+        supportFetchAPI: true,
+      },
+    },
+    // IDE audio playback (workspace-media.ts): the same posture, over the
+    // workspace instead of the media cache — every request re-resolves against
+    // the root and must sniff as audio before a byte is served.
+    {
+      scheme: "suma-workspace",
+      privileges: {
+        standard: true,
+        secure: true,
+        stream: true,
+        supportFetchAPI: true,
+      },
     },
   ]);
 }
@@ -60,8 +77,9 @@ const DEV_CSP = [
   // Mirrors index.html's meta CSP: header and meta INTERSECT, so a media
   // source the meta allows (the inlined save-pop data: URI) must be allowed
   // here too or dev silently loses the sound. suma-video: is the saved-video
-  // stream (PIP playback + library thumbnails).
-  "media-src 'self' blob: data: suma-video:",
+  // stream (PIP playback + library thumbnails); suma-workspace: is the IDE's
+  // audio-file player.
+  "media-src 'self' blob: data: suma-video: suma-workspace:",
   "connect-src 'self' ws: http://localhost:*",
 ].join("; ");
 

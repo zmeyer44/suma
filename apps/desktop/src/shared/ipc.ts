@@ -388,6 +388,19 @@ export type WorkspaceFile =
     }
   | {
       path: string;
+      kind: "audio";
+      /**
+       * suma-workspace:// stream URL for an <audio src>. Unlike an image, the
+       * bytes never cross IPC — the protocol serves Range requests so the
+       * player can seek (main/workspace-media.ts).
+       */
+      url: string;
+      /** Sniffed from the file's magic bytes, not its extension. */
+      mime: string;
+      bytes: number;
+    }
+  | {
+      path: string;
       kind: "unreadable";
       reason: "binary" | "too-large" | "unsupported";
     };

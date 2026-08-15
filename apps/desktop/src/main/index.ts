@@ -86,6 +86,7 @@ import { UpdateService } from "./updates/update-service";
 import { VoiceService } from "./voice/voice-service";
 import { WebAuthnService } from "./webauthn";
 import { resolveWorkspaceRoot, WorkspaceFsService } from "./workspace-fs";
+import { installWorkspaceMediaProtocol } from "./workspace-media";
 import { resetWorkspaceHlc, WorkspaceStore } from "./workspace-store";
 
 /**
@@ -94,10 +95,7 @@ import { resetWorkspaceHlc, WorkspaceStore } from "./workspace-store";
  * services through this binding rather than closing over one graph.
  */
 interface AppInstance {
-  emit: <C extends EventChannel>(
-    channel: C,
-    payload: SumaEventMap[C],
-  ) => void;
+  emit: <C extends EventChannel>(channel: C, payload: SumaEventMap[C]) => void;
   teardown: (opts: { leavingAccount: boolean }) => void;
   noteClientCertificate: (url: string) => void;
   newTab: () => void;
@@ -223,6 +221,15 @@ async function bootstrap(): Promise<void> {
     session.defaultSession,
     path.join(userData, VIDEOS_DIRNAME),
   );
+  // The IDE half of suma://terminal (§8.5): explorer + editor over the same
+  // filesystem the (sim) shells run in. It lives out here, not in
+  // startServices, because the workspace root has nothing to do with the
+  // signed-in account — and because its audio protocol can only be handled
+  // once per session, while startServices runs again after a sign-out wipe.
+  const workspaceFs = new WorkspaceFsService(
+    resolveWorkspaceRoot(app.isPackaged),
+  );
+  installWorkspaceMediaProtocol(session.defaultSession, workspaceFs);
   const win = new ShellWindow();
   shell = win;
 
@@ -281,7 +288,7 @@ async function bootstrap(): Promise<void> {
   // Packaged builds start the check cadence; dev builds stay `unsupported`.
   updates.start();
 
-  live = await startServices({ userData, win, filesSession });
+  live = await startServices({ userData, win, filesSession, workspaceFs });
 }
 
 /**
@@ -293,8 +300,9 @@ async function startServices(ctx: {
   userData: string;
   win: ShellWindow;
   filesSession: Session;
+  workspaceFs: WorkspaceFsService;
 }): Promise<AppInstance> {
-  const { userData, win, filesSession } = ctx;
+  const { userData, win, filesSession, workspaceFs } = ctx;
   const device = await DeviceStore.load(userData);
   let computerName: string | null = null;
   if (process.platform === "darwin") {
@@ -759,7 +767,8 @@ async function startServices(ctx: {
   const buzz = new BuzzService({
     relayUrl: () => nostr.buzzRelayUrl(),
     signAuth: (relayUrl, challenge) => nostr.signRelayAuth(relayUrl, challenge),
-    signMediaAuth: (sha256, serverHost) => nostr.signMediaAuth(sha256, serverHost),
+    signMediaAuth: (sha256, serverHost) =>
+      nostr.signMediaAuth(sha256, serverHost),
     emitChanged: (state) => emit("nostr:buzzAgentsChanged", state),
   });
 
@@ -779,7 +788,8 @@ async function startServices(ctx: {
       spaceId === null
         ? undefined
         : tabs.list(spaceId).find((entry) => entry.active);
-    if (tab === undefined) return failure("Nothing to save — open a page first.");
+    if (tab === undefined)
+      return failure("Nothing to save — open a page first.");
     if (tab.url === NEW_TAB_URL || !isAllowedTabUrl(tab.url)) {
       return failure("This page can't be saved — only web pages can.");
     }
@@ -899,11 +909,6 @@ async function startServices(ctx: {
     link,
     emit: (list) => emit("ports:updated", list),
   });
-  // The IDE half of suma://terminal (§8.5): explorer + editor over the same
-  // filesystem the (sim) shells run in.
-  const workspaceFs = new WorkspaceFsService(
-    resolveWorkspaceRoot(app.isPackaged),
-  );
   const egress = new EgressService({
     spaces,
     store,
@@ -1122,9 +1127,7 @@ async function startServices(ctx: {
           key: input.key,
           isAutoRepeat: input.isAutoRepeat === true,
           chorded:
-            input.control === true ||
-            input.meta === true ||
-            input.alt === true,
+            input.control === true || input.meta === true || input.alt === true,
         },
         Date.now(),
       );

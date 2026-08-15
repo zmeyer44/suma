@@ -83,6 +83,20 @@ const PNG = Buffer.from(
   "base64",
 );
 
+/** ID3v2 header + a frame's worth of filler — what a tagged MP3 opens with. */
+const MP3 = Buffer.concat([
+  Buffer.from("ID3\x03\x00\x00\x00\x00\x00\x00", "latin1"),
+  Buffer.alloc(64, 0xaa),
+]);
+
+/** RIFF/WAVE header; the payload past it is irrelevant to sniffing. */
+const WAV = Buffer.concat([
+  Buffer.from("RIFF", "latin1"),
+  Buffer.from([0x24, 0, 0, 0]),
+  Buffer.from("WAVEfmt ", "latin1"),
+  Buffer.alloc(32),
+]);
+
 describe("read/write", () => {
   it("round-trips text through write and read", async () => {
     await writeFile(path.join(root, "a.txt"), "before");
@@ -144,6 +158,54 @@ describe("read/write", () => {
       kind: "unreadable",
       reason: "too-large",
     });
+  });
+
+  it("returns audio as a stream URL, never as bytes", async () => {
+    await writeFile(path.join(root, "song.mp3"), MP3);
+    const file = await service.read("song.mp3");
+    expect(file).toEqual({
+      path: "song.mp3",
+      kind: "audio",
+      mime: "audio/mpeg",
+      bytes: MP3.byteLength,
+      url: "suma-workspace://file/song.mp3",
+    });
+  });
+
+  it("percent-encodes the stream URL so paths with spaces survive", async () => {
+    await mkdir(path.join(root, "my music"), { recursive: true });
+    await writeFile(path.join(root, "my music/take one.wav"), WAV);
+    const file = await service.read("my music/take one.wav");
+    expect(file).toMatchObject({
+      kind: "audio",
+      mime: "audio/wav",
+      url: "suma-workspace://file/my%20music%2Ftake%20one.wav",
+    });
+  });
+
+  it("does not read a huge audio file into memory to identify it", async () => {
+    // 12 MiB — past every byte cap in the service. Streaming means the size
+    // gates never apply to audio at all.
+    const big = Buffer.concat([MP3, Buffer.alloc(12 * 1024 * 1024, 0x11)]);
+    await writeFile(path.join(root, "podcast.mp3"), big);
+    const file = await service.read("podcast.mp3");
+    expect(file).toMatchObject({ kind: "audio", bytes: big.byteLength });
+  });
+
+  it("needs the name's agreement for an untagged MP3 frame", async () => {
+    // A bare 0xFF sync word is too weak to hand a random binary to a decoder.
+    const frame = Buffer.concat([
+      Buffer.from([0xff, 0xfb, 0x90, 0x00]),
+      Buffer.alloc(64, 0x55),
+    ]);
+    await writeFile(path.join(root, "clip.mp3"), frame);
+    await writeFile(path.join(root, "clip.dat"), frame);
+
+    expect(await service.read("clip.mp3")).toMatchObject({
+      kind: "audio",
+      mime: "audio/mpeg",
+    });
+    expect((await service.read("clip.dat")).kind).toBe("unreadable");
   });
 
   it("refuses a directory rather than throwing", async () => {

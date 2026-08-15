@@ -16,7 +16,9 @@ import {
 } from "react";
 import type { WorkspaceFile } from "../../../shared/ipc";
 import { cn } from "../lib/cn";
+import { formatBytes } from "../lib/format";
 import { ideBuffers } from "../lib/ide";
+import { IdeAudioPlayer } from "./IdeAudioPlayer";
 import { useSumaStore } from "../store";
 
 /**
@@ -28,8 +30,9 @@ import { useSumaStore } from "../store";
  * it), and the buffers must survive this page unmounting on tab switches.
  * The store carries only the file LIST, the active path, and dirty booleans.
  *
- * Images are the one non-text thing the pane renders: main sniffs them and
- * sends a data URL, which shows read-only (no buffer, no dirty state, no save).
+ * Images and audio are the non-text things the pane renders: main sniffs both
+ * and sends an image as a data URL, audio as a suma-workspace:// stream URL.
+ * Neither takes a buffer, so neither can be dirty or saved.
  *
  * Theming: syntax colors come from the library's own Shiki theme pair
  * (pierre-dark/pierre-light) following the chrome's data-theme, while the
@@ -71,13 +74,6 @@ function useAppThemeType(): "dark" | "light" {
 
 function basename(path: string): string {
   return path.split("/").at(-1) ?? path;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const kib = bytes / 1024;
-  if (kib < 1024) return `${Math.round(kib)} KB`;
-  return `${(kib / 1024).toFixed(1)} MB`;
 }
 
 /** "image/png" → "PNG"; the caption wants the format, not the media type. */
@@ -282,6 +278,8 @@ export function IdeEditor() {
           </p>
         ) : loaded === null ? null : loaded.kind === "image" ? (
           <ImageView key={loaded.path} file={loaded} />
+        ) : loaded.kind === "audio" ? (
+          <IdeAudioPlayer key={loaded.path} file={loaded} />
         ) : loaded.kind === "unreadable" ? (
           <p className="p-4 text-[12px] text-faint">
             {unreadableNotice(loaded)}
