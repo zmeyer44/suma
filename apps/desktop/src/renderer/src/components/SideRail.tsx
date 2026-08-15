@@ -38,6 +38,7 @@ import {
   Settings2,
   Sparkles,
 } from "lucide-react";
+import { RailVoice } from "./RailVoice";
 import { selectActiveSpace, useSumaStore } from "../store";
 
 /** The permanent layout column — also each row's icon cell, so a collapsed
@@ -165,6 +166,10 @@ export function SideRail() {
         }}
       >
         <nav className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto py-2">
+          {/* The voice assistant lives at the very top — this row owns the
+              microphone for the whole feature, not just its indicator
+              (RailVoice.tsx). Renders nothing while the assistant is off. */}
+          <RailVoice expanded={expanded} railWidth={RAIL_W} slide={SLIDE} />
           <RailButton
             icon={<Sparkles size={16} strokeWidth={1.8} />}
             label="AI chat"

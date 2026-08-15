@@ -641,15 +641,15 @@ async function startServices(ctx: {
       }
     },
     emit: {
-      status: (status) => {
-        // Both surfaces: the overlay renders the HUD, the chrome's settings
-        // page shows a live status line.
-        emit("voice:statusChanged", status);
-        emitPreview("voice:statusChanged", status);
-      },
-      transcript: (event) => emitPreview("voice:transcript", event),
-      audioOut: (data) => emitPreview("voice:audioOut", { data }),
-      interrupted: () => emitPreview("voice:interrupted", undefined),
+      // All voice traffic lands in the CHROME now: the HUD is the tool
+      // rail's voice row (SideRail/RailVoice), which also owns the mic and
+      // the speakers — the rail column is outside the content hole, so it is
+      // always visible without raising anything. The settings page (also a
+      // chrome surface) reads the same status stream.
+      status: (status) => emit("voice:statusChanged", status),
+      transcript: (event) => emit("voice:transcript", event),
+      audioOut: (data) => emit("voice:audioOut", { data }),
+      interrupted: () => emit("voice:interrupted", undefined),
     },
   });
 

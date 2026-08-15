@@ -1,10 +1,12 @@
 /**
  * Voice assistant audio I/O — the renderer half of the voice pipeline.
  *
- * This runs in the OVERLAY surface (the floating view that hosts the audio
- * player), which is always alive and layered above the pages: main cannot
- * touch a microphone or a speaker, so the HUD does, and ships raw PCM over
- * IPC in both directions (shared/voice.ts spells the formats).
+ * This runs in the CHROME page — the tool rail's voice row (RailVoice.tsx)
+ * owns it. The chrome document is always alive, and the rail column sits
+ * outside the content hole, so the listening indicator is always visible
+ * without raising anything: main cannot touch a microphone or a speaker, so
+ * the rail does, and ships raw PCM over IPC in both directions
+ * (shared/voice.ts spells the formats).
  *
  * Capture: getUserMedia → a 16 kHz AudioContext (Chromium resamples the mic
  * for us) → a ScriptProcessorNode delivering ~128 ms Float32 blocks →
@@ -30,6 +32,9 @@ export class VoiceCapture {
   private context: AudioContext | null = null;
   private processor: ScriptProcessorNode | null = null;
   private starting = false;
+  /** A tap on the mic for the rail's visualizer — null unless running. Read
+   *  with getByteFrequencyData at rAF rate; the IPC frames are untouched. */
+  analyser: AnalyserNode | null = null;
 
   get running(): boolean {
     return this.context !== null || this.starting;
@@ -55,6 +60,10 @@ export class VoiceCapture {
       }
       const context = new AudioContext({ sampleRate: VOICE_INPUT_SAMPLE_RATE });
       const source = context.createMediaStreamSource(stream);
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.55;
+      source.connect(analyser);
       const processor = context.createScriptProcessor(CAPTURE_BLOCK_SIZE, 1, 1);
       processor.onaudioprocess = (event) => {
         const samples = event.inputBuffer.getChannelData(0);
@@ -77,6 +86,7 @@ export class VoiceCapture {
       this.stream = stream;
       this.context = context;
       this.processor = processor;
+      this.analyser = analyser;
     } finally {
       this.starting = false;
     }
@@ -86,6 +96,7 @@ export class VoiceCapture {
     this.starting = false;
     if (this.processor !== null) this.processor.onaudioprocess = null;
     this.processor = null;
+    this.analyser = null;
     if (this.stream !== null) {
       for (const track of this.stream.getTracks()) track.stop();
     }
@@ -101,6 +112,9 @@ export class VoicePlayback {
   private readonly scheduled = new Set<AudioBufferSourceNode>();
   /** Fires on every busy/idle flip — the HUD's "speaking" indicator. */
   onSpeakingChange: ((speaking: boolean) => void) | null = null;
+  /** The reply audio's tap for the rail's visualizer — every scheduled
+   *  source routes through it, so it sees exactly what the speakers get. */
+  analyser: AnalyserNode | null = null;
 
   get speaking(): boolean {
     return this.scheduled.size > 0;
@@ -112,6 +126,11 @@ export class VoicePlayback {
     if (this.context === null) {
       this.context = new AudioContext({ sampleRate: VOICE_OUTPUT_SAMPLE_RATE });
       this.nextStartTime = 0;
+      const analyser = this.context.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.55;
+      analyser.connect(this.context.destination);
+      this.analyser = analyser;
     }
     const context = this.context;
     const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
@@ -123,7 +142,7 @@ export class VoicePlayback {
     buffer.copyToChannel(samples, 0);
     const source = context.createBufferSource();
     source.buffer = buffer;
-    source.connect(context.destination);
+    source.connect(this.analyser ?? context.destination);
 
     const wasSpeaking = this.speaking;
     this.scheduled.add(source);
@@ -156,5 +175,6 @@ export class VoicePlayback {
     this.flush();
     if (this.context !== null) void this.context.close().catch(() => undefined);
     this.context = null;
+    this.analyser = null;
   }
 }

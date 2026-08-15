@@ -395,6 +395,49 @@
   transition-duration: 180ms, 150ms;
 }
 
+/* ── The rail's voice visualizer (RailVoice) ──────────────────────────────
+   Four bars, one look per assistant phase. The two CSS modes below cover
+   the phases with no audio worth showing: "idle" (armed — slow breathing,
+   nothing leaves the Mac) and "connecting" (a quicker staggered wave).
+   Phase "active" sets neither animation: an rAF loop in RailVoice.tsx
+   writes scaleY per frame from the live analyser, and an animation here
+   would fight those inline transforms. Each bar carries its index in
+   --bar, so the stagger is one calc instead of eight nth-child rules. */
+.voice-bar {
+  transform: scaleY(0.22);
+  will-change: transform;
+}
+
+.voice-bars[data-mode="idle"] .voice-bar {
+  animation: voice-breathe 2.8s ease-in-out infinite;
+  animation-delay: calc(var(--bar) * 350ms);
+}
+
+.voice-bars[data-mode="connecting"] .voice-bar {
+  animation: voice-wave 900ms ease-in-out infinite;
+  animation-delay: calc(var(--bar) * 120ms);
+}
+
+@keyframes voice-breathe {
+  0%,
+  100% {
+    transform: scaleY(0.22);
+  }
+  50% {
+    transform: scaleY(0.38);
+  }
+}
+
+@keyframes voice-wave {
+  0%,
+  100% {
+    transform: scaleY(0.25);
+  }
+  50% {
+    transform: scaleY(0.85);
+  }
+}
+
 /* The active tab's silhouette shadow (FolderShell), removable: while the
    preview shelf is open the folder merges into the shelf's shared surface,
    and even this soft cast bleeding below the base reads as a gray divider
@@ -692,6 +735,14 @@
   /* The pill jumps with the panel it tracks, but keeps its hover fade. */
   .rail-slide .rail-pill {
     transition: background-color 150ms ease;
+  }
+
+  /* The decorative voice loops rest; the ACTIVE phase's bars still move —
+     they are a live meter of a hot microphone, state a reduced-motion user
+     still needs to see. */
+  .voice-bars[data-mode="idle"] .voice-bar,
+  .voice-bars[data-mode="connecting"] .voice-bar {
+    animation: none;
   }
 
   .animate-terminal-cursor {
