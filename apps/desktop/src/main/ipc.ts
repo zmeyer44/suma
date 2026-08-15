@@ -36,7 +36,10 @@ import {
   type ChatSettingsPatch,
   type ChatToolGroupId,
 } from "../shared/chat";
-import type { VoiceSettingsPatch } from "../shared/voice";
+import {
+  isVoiceTtsProviderId,
+  type VoiceSettingsPatch,
+} from "../shared/voice";
 import type { AuditService } from "./audit-service";
 import type { SpeakRequest, TtsService } from "./audio/tts-service";
 import type { ChatRunEmitter, ChatService } from "./chat/chat-service";
@@ -92,7 +95,7 @@ export interface IpcDeps {
   tts: TtsService;
   /** The assistant's agent loop — model calls and browser tools in main. */
   chat: ChatService;
-  /** The voice assistant — wake word + Gemini Live session in main. */
+  /** The voice assistant — wake word + the AI SDK agent session in main. */
   voice: VoiceService;
   /** App self-updates — app-level singleton, outlives sign-out (§8.2). */
   updates: UpdateService;
@@ -748,10 +751,13 @@ export function registerIpc(deps: IpcDeps): void {
     }
     if (typeof a["wakeWord"] === "string") patch.wakeWord = a["wakeWord"];
     if (typeof a["model"] === "string") patch.model = a["model"];
+    if (typeof a["sttModel"] === "string") patch.sttModel = a["sttModel"];
+    if (isVoiceTtsProviderId(a["ttsProvider"])) {
+      patch.ttsProvider = a["ttsProvider"];
+    }
     if (typeof a["voice"] === "string") patch.voice = a["voice"];
-    // The key crosses IPC exactly once, inward; voice:settings reports only
-    // whether one exists (the tts:updateSettings contract).
-    if (typeof a["apiKey"] === "string") patch.apiKey = a["apiKey"];
+    // No credentials cross here anymore: the model rides the chat sidebar's
+    // key chain, and the TTS key is tts:updateSettings' business.
     return deps.voice.updateSettings(patch);
   });
 

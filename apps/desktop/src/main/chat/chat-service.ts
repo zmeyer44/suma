@@ -50,8 +50,9 @@ import {
 } from "../../shared/chat";
 import { enabledBrowserTools, type BrowserToolDeps } from "./chat-tools";
 
-/** The gateway env var names the AI SDK and Vercel's docs use. */
-const GATEWAY_ENV_KEYS = ["AI_GATEWAY_API_KEY", "VERCEL_AI_GATEWAY_API_KEY"];
+/** The gateway env var names the AI SDK and Vercel's docs use. Exported so
+ *  the voice assistant resolves the SAME chain (voice-service.ts). */
+export const GATEWAY_ENV_KEYS = ["AI_GATEWAY_API_KEY", "VERCEL_AI_GATEWAY_API_KEY"];
 
 /** A run may take a while (multi-step tool use), but not forever. */
 const MAX_STEPS = 16;

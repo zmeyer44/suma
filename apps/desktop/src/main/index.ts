@@ -618,14 +618,14 @@ async function startServices(ctx: {
 
   /* --------------------------- Voice assistant ---------------------------- */
 
-  // "Suma, …" — wake word + Gemini Live session in main; the overlay
-  // renderer (the same view that hosts the floating audio player, always
-  // alive and layered above the pages) owns the microphone, the speakers,
-  // and the HUD. Browser-tool permissions are the chat sidebar's own
-  // Assistant-page toggles, read per session. Credential order mirrors the
-  // chat assistant's: environment key, then a key stored on this Mac, then —
-  // with neither — a single-use Live token vended by the signed-in control
-  // plane, keyless on this machine.
+  // "Suma, …" — wake word + the chat sidebar's AI SDK agent loop with
+  // speech at both ends, all in main; the chrome renderer owns the
+  // microphone, the speakers, and the HUD. Browser-tool permissions are the
+  // chat sidebar's own Assistant-page toggles, read per session, and MODEL
+  // access is the chat sidebar's exact credential chain (env gateway key →
+  // stored Vercel key → the signed-in control plane's gateway proxy,
+  // keyless on this machine). The realtime TTS voice (Bland) uses the key
+  // Settings → Voice & audio stores, through TtsService.
   const voice = new VoiceService({
     userDataDir: userData,
     browser: { spaces, tabs },
@@ -633,21 +633,16 @@ async function startServices(ctx: {
       const info = chat.settings();
       return { model: info.model, tools: info.tools };
     },
-    vendedTokenAvailable: () => auth.controlClient() !== null,
-    vendedToken: async () => {
+    storedApiKey: () => tts.apiKeyFor("vercel"),
+    vendedGatewayAvailable: () => auth.controlClient() !== null,
+    vendedGatewayCredentials: async () => {
       const client = auth.controlClient();
       if (client === null) return null;
-      try {
-        const { token } = await client.mintVoiceToken(voice.settings().model);
-        return { token };
-      } catch (err) {
-        // Offline, an expired device token, or an operator with no Gemini
-        // key configured — all mean "no vended session right now", which the
-        // service reports as a recoverable error rather than a crash.
-        console.error("suma voice: could not mint a vended token:", err);
-        return null;
-      }
+      const token = await client.getToken();
+      return token === null ? null : { baseUrl: client.url, token };
     },
+    ttsApiKey: (provider) => tts.apiKeyFor(provider),
+    ttsKeyState: (provider) => tts.settings().keys[provider],
     emit: {
       // All voice traffic lands in the CHROME now: the HUD is the tool
       // rail's voice row (SideRail/RailVoice), which also owns the mic and

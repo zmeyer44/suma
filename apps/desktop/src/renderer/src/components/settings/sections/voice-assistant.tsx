@@ -2,18 +2,20 @@
  * `suma://settings/voice-assistant` — the hands-free assistant ("Suma, …").
  *
  * Everything here is main's state (voice.json, via `voice:settings` /
- * `voice:updateSettings`): the wake-word engine and the Gemini Live session
- * run there, so main enforces every knob. The Gemini key follows the TTS
- * pattern — sent once, never read back, the page shows only where the
- * credential came from. Browser-tool permissions are deliberately NOT
- * duplicated here: the voice uses the chat sidebar's tools, so the
- * Assistant page's toggles govern both, and this page links there.
+ * `voice:updateSettings`): the wake-word engine and the agent session run
+ * there, so main enforces every knob. No credentials live on this page:
+ * the model rides the chat sidebar's gateway key chain (Settings →
+ * Assistant / Voice & audio), and the speech voice uses the Bland key from
+ * Settings → Voice & audio — the page shows where each credential comes
+ * from and links to where it is managed. Browser-tool permissions are
+ * deliberately NOT duplicated here either: the voice uses the chat
+ * sidebar's tools, so the Assistant page's toggles govern both.
  */
 
 import { useCallback, useEffect, useState } from "react";
+import type { TtsVoice } from "../../../../../shared/tts";
 import {
   VOICE_MODELS,
-  VOICE_VOICES,
   type VoiceSettingsInfo,
   type VoiceSettingsPatch,
   type VoiceStatus,
@@ -82,12 +84,20 @@ function useVoiceSettings(): {
 }
 
 const KEY_NOTES: Record<VoiceSettingsInfo["keyState"], string> = {
-  env: "Using the Gemini key from the environment (GEMINI_API_KEY).",
-  stored: "Using the Gemini key stored on this Mac.",
+  env: "Using the AI Gateway key from the environment (AI_GATEWAY_API_KEY) — the same model access as the chat sidebar.",
+  stored:
+    "Using the Vercel AI Gateway key stored under Settings → Voice & audio — the same model access as the chat sidebar.",
   vended:
-    "Using voice included with your Suma account — each conversation gets its own short-lived key, and none is stored on this Mac. Add your own Gemini key below to use it instead.",
+    "Using models included with your Suma account — the same access as the chat sidebar, with no key stored on this Mac.",
   unset:
-    "No voice access yet — sign in to your Suma account, paste a Gemini key below (aistudio.google.com), or set GEMINI_API_KEY.",
+    "No model access yet — sign in to your Suma account, add a Vercel AI Gateway key under Settings → Voice & audio, or set AI_GATEWAY_API_KEY.",
+};
+
+const TTS_KEY_NOTES: Record<VoiceSettingsInfo["ttsKeyState"], string> = {
+  env: "Speech is ready — using the Bland key from the environment.",
+  stored: "Speech is ready — using the Bland key from Settings → Voice & audio.",
+  unset:
+    "Speech needs a Bland API key — add one under Settings → Voice & audio before starting a conversation.",
 };
 
 const WAKE_NOTES: Record<VoiceStatus["wakeWord"], string> = {
@@ -103,13 +113,36 @@ export function VoiceAssistantPage() {
   const { settings, status, update } = useVoiceSettings();
   const openSettings = useSumaStore((s) => s.openSettings);
   const [wakeDraft, setWakeDraft] = useState<string | null>(null);
-  const [keyDraft, setKeyDraft] = useState("");
+  const [voices, setVoices] = useState<TtsVoice[]>([]);
+
+  // The account's real Bland voices (built-ins stand in until a key works —
+  // main falls back to them on any failure, so this never empties the picker).
+  useEffect(() => {
+    let live = true;
+    void window.suma
+      .invoke("tts:voices", { provider: "bland" })
+      .then((list) => {
+        if (live) setVoices(list);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, []);
 
   const model = settings?.model ?? "";
   const isCurated = VOICE_MODELS.some((entry) => entry.id === model);
   const modelItems = [
     ...VOICE_MODELS.map((entry) => ({ value: entry.id, label: entry.label })),
     ...(isCurated || model === "" ? [] : [{ value: model, label: model }]),
+  ];
+
+  const voice = settings?.voice ?? "";
+  const voiceItems = [
+    ...voices.map((v) => ({ value: v.id, label: v.label })),
+    ...(voice === "" || voices.some((v) => v.id === voice)
+      ? []
+      : [{ value: voice, label: voice }]),
   ];
 
   const saveWakeWord = (): void => {
@@ -119,11 +152,6 @@ export function VoiceAssistantPage() {
     setWakeDraft(null);
   };
 
-  const saveKey = (value: string): void => {
-    update({ apiKey: value });
-    setKeyDraft("");
-  };
-
   return (
     <Page
       title="Voice assistant"
@@ -131,7 +159,7 @@ export function VoiceAssistantPage() {
     >
       <Group
         title="Listening"
-        note="While armed, listening happens entirely on this Mac. Audio is only sent to Google's Gemini Live API during a conversation — after the wake word or ⌥Space — and conversations end themselves after a quiet pause."
+        note="While armed, listening happens entirely on this Mac. During a conversation — after the wake word or ⌥Space — what you say is transcribed, answered by the assistant model, and spoken back; conversations end themselves after a quiet pause."
       >
         <Row
           label="Enable the voice assistant"
@@ -189,10 +217,10 @@ export function VoiceAssistantPage() {
         </Block>
       </Group>
 
-      <Group title="Model & voice" note={KEY_NOTES[settings?.keyState ?? "unset"]}>
+      <Group title="Model" note={KEY_NOTES[settings?.keyState ?? "unset"]}>
         <Row
           label="Model"
-          note="A Gemini Live model — the one connection that listens, speaks, and calls browser tools."
+          note="The assistant that hears you and works the browser — the chat sidebar's models, picked for speed."
         >
           <Select
             value={model}
@@ -215,63 +243,38 @@ export function VoiceAssistantPage() {
             </SelectContent>
           </Select>
         </Row>
-        <Row label="Voice" note="How the assistant sounds.">
+      </Group>
+
+      <Group title="Speech" note={TTS_KEY_NOTES[settings?.ttsKeyState ?? "unset"]}>
+        <Row
+          label="Voice"
+          note="How the assistant sounds — a Bland voice, spoken in realtime. With a Bland key added, your account's cloned and library voices appear here too."
+        >
           <Select
-            value={settings?.voice ?? ""}
-            items={VOICE_VOICES.map((v) => ({ value: v.id, label: v.label }))}
+            value={voice}
+            items={voiceItems}
             disabled={settings === null}
             onValueChange={(next: string) => update({ voice: next })}
           >
-            <SelectTrigger aria-label="Assistant voice" className="w-[160px]">
+            <SelectTrigger aria-label="Assistant voice" className="w-[210px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {VOICE_VOICES.map((v) => (
-                <SelectItem key={v.id} value={v.id}>
-                  {v.hint === undefined ? v.label : `${v.label} — ${v.hint}`}
-                </SelectItem>
-              ))}
+              {voiceItems.map((entry) => {
+                const hint = voices.find((v) => v.id === entry.value)?.hint;
+                return (
+                  <SelectItem key={entry.value} value={entry.value}>
+                    {hint === undefined ? entry.label : `${entry.label} — ${hint}`}
+                  </SelectItem>
+                );
+              })}
             </SelectContent>
           </Select>
         </Row>
-        <Block
-          label="Gemini API key"
-          note="Used for voice conversations only. Stored on this Mac (never synced), sent once, and never shown again — replace or remove it below."
-        >
-          <div className="flex items-center gap-2">
-            <Input
-              type="password"
-              spellCheck={false}
-              autoComplete="off"
-              aria-label="Gemini API key"
-              placeholder={
-                settings?.keyState === "stored"
-                  ? "Replace the stored key"
-                  : "Paste a key"
-              }
-              value={keyDraft}
-              onChange={(e) => setKeyDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key !== "Enter") return;
-                e.preventDefault();
-                if (keyDraft.trim() === "") return;
-                saveKey(keyDraft.trim());
-              }}
-              className="flex-1 font-mono placeholder:font-sans"
-            />
-            <Button
-              variant="secondary"
-              disabled={keyDraft.trim() === ""}
-              onClick={() => saveKey(keyDraft.trim())}
-            >
-              Save
-            </Button>
-            {settings?.keyState === "stored" ? (
-              <Button variant="danger" onClick={() => saveKey("")}>
-                Remove
-              </Button>
-            ) : null}
-          </div>
+        <Block>
+          <Button variant="secondary" onClick={() => void openSettings("voice")}>
+            Manage speech keys…
+          </Button>
         </Block>
       </Group>
 

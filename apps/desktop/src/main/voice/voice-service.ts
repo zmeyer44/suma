@@ -5,27 +5,29 @@
  *                       ▲                                          │
  *                       └––––––––––– session ends –––––––––––––––––┘
  *
- * While LISTENING, mic frames from the overlay renderer feed only the
+ * While LISTENING, mic frames from the chrome renderer feed only the
  * on-device wake-word engine — nothing leaves this Mac. A detection (or the
- * push-to-talk shortcut) opens a Gemini Live session; from then until the
- * session closes, frames stream to the model and its spoken replies stream
- * back to the renderer. Frames spoken while the session is still
- * connecting are buffered and flushed on ready, so "Suma, what's the
- * weather tomorrow" works as one breath — the words after the wake word
- * arrive at the model even though the socket opened mid-sentence.
+ * push-to-talk shortcut) starts a VoiceAgentSession: the chat sidebar's AI
+ * SDK agent loop with speech at both ends (agent-session.ts). "Connecting"
+ * covers credential resolution (the vended path is a network round trip);
+ * frames spoken during it are buffered and flushed on ready, so "Suma,
+ * what's the weather tomorrow" works as one breath.
  *
- * The browser tools are the chat sidebar's own (enabledBrowserTools), so the
- * Assistant settings page's per-capability toggles govern the voice exactly
- * as they govern the chat — one permission surface, enforced in one place.
+ * Model access rides the chat sidebar's exact credential chain — env
+ * gateway key, the stored Vercel key, then the signed-in control plane's
+ * gateway proxy — and the browser tools ARE the chat sidebar's own
+ * (enabledBrowserTools), so the Assistant settings page's per-capability
+ * toggles govern the voice exactly as they govern the chat. The realtime
+ * TTS provider's key is the one Settings → Voice & audio stores (Bland
+ * today), resolved through TtsService.
  *
- * Settings persist in voice.json (chmod 600 — it may hold the Gemini key),
- * device-local like tts.json. Sessions auto-close after a quiet period; an
- * open Live socket bills by the minute and "Jarvis" must not become a
- * standing meter.
+ * Settings persist in voice.json, device-local like tts.json — no
+ * credentials in it, ever. Sessions auto-close after a quiet period; every
+ * turn costs transcription + inference + synthesis, and "Jarvis" must not
+ * become a standing meter.
  */
 
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -33,6 +35,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { createGateway } from "ai";
 import type { ChatSettings } from "../../shared/chat";
 import {
   mergeVoiceSettings,
@@ -44,32 +47,34 @@ import {
   type VoiceSettingsInfo,
   type VoiceSettingsPatch,
   type VoiceStatus,
+  type VoiceTtsKeyState,
+  type VoiceTtsProviderId,
   type WakeWordState,
 } from "../../shared/voice";
 import {
   enabledBrowserTools,
   type BrowserToolDeps,
 } from "../chat/chat-tools";
-import { VoiceLiveSession } from "./live-session";
-import { adaptToolsForVoice, voiceSystemInstruction } from "./voice-core";
+import { GATEWAY_ENV_KEYS } from "../chat/chat-service";
+import { VoiceAgentSession, type Gateway } from "./agent-session";
+import { BlandRealtimeTts } from "./tts-realtime";
+import type { RealtimeTtsProvider } from "./tts-realtime-core";
+import { voiceSystemInstruction } from "./voice-core";
 import { WakeWordEngine } from "./wake-word";
 
-/** The env vars a Gemini key is looked for in, in order. */
-const GEMINI_ENV_KEYS = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
-
-/** A session this quiet is over. Generous: a "read the page" reply takes a
- *  while, and tool activity counts as life. */
+/** A session this quiet is over. Generous: a "read the page" turn takes a
+ *  while, and every conversation event counts as life. */
 const IDLE_TIMEOUT_MS = 45_000;
 const IDLE_POLL_MS = 5_000;
 
-/** connecting-phase mic buffer cap (~10 s at the renderer's ~100 ms frames)
- *  — a socket that takes longer than this has failed anyway. */
+/** connecting-phase mic buffer cap (~10 s at the renderer's ~128 ms frames)
+ *  — a credential that takes longer than this has failed anyway. */
 const MAX_PENDING_FRAMES = 100;
 
 export interface VoiceEmitter {
   status: (status: VoiceStatus) => void;
   transcript: (event: { role: "user" | "assistant"; text: string }) => void;
-  /** 24 kHz PCM16 reply audio → the overlay renderer's player. */
+  /** 24 kHz PCM16 reply audio → the chrome renderer's player. */
   audioOut: (data: Uint8Array) => void;
   /** Barge-in: the renderer must drop scheduled playback immediately. */
   interrupted: () => void;
@@ -82,13 +87,22 @@ export interface VoiceServiceDeps {
    *  revoked capability is gone from the very next conversation. */
   chatToolSettings: () => ChatSettings;
   emit: VoiceEmitter;
-  /** Vended voice: whether a control plane is configured (sync, for the
-   *  settings status line) and a freshly minted ephemeral Live token for one
-   *  conversation. Minted PER SESSION because the token is single-use and
-   *  expires in minutes — it can never be cached. Both absent in builds
-   *  without account support. Mirrors ChatService's vended gateway. */
-  vendedTokenAvailable?: () => boolean;
-  vendedToken?: () => Promise<{ token: string } | null>;
+  /** The stored gateway key (TTS's Vercel key), read per session — the
+   *  chat sidebar's exact sharing. */
+  storedApiKey: () => string | null;
+  /** Vended inference: whether a control plane is configured (sync, for the
+   *  settings status line) and the current device credentials for its
+   *  gateway proxy (per session — device tokens are short-lived). Both
+   *  absent in builds without account support. Mirrors ChatService. */
+  vendedGatewayAvailable?: () => boolean;
+  vendedGatewayCredentials?: () => Promise<{
+    baseUrl: string;
+    token: string;
+  } | null>;
+  /** The realtime TTS provider's key (tts.json's, via TtsService) and its
+   *  provenance for the settings page. */
+  ttsApiKey: (provider: VoiceTtsProviderId) => string | null;
+  ttsKeyState: (provider: VoiceTtsProviderId) => VoiceTtsKeyState;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -102,7 +116,7 @@ export class VoiceService {
   private lastError: string | null = null;
 
   private engine: WakeWordEngine | null = null;
-  private session: VoiceLiveSession | null = null;
+  private session: VoiceAgentSession | null = null;
   private pendingFrames: Uint8Array[] = [];
   /** Stale-callback guard: every (re)configuration bumps it. */
   private generation = 0;
@@ -131,15 +145,16 @@ export class VoiceService {
 
   private persist(): void {
     const tmp = `${this.filePath}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.settingsCache, null, 2), {
-      mode: 0o600,
-    });
+    writeFileSync(tmp, JSON.stringify(this.settingsCache, null, 2));
     renameSync(tmp, this.filePath);
-    chmodSync(this.filePath, 0o600);
   }
 
   settings(): VoiceSettingsInfo {
-    return voiceSettingsInfo(this.settingsCache, this.keyState());
+    return voiceSettingsInfo(
+      this.settingsCache,
+      this.keyState(),
+      this.deps.ttsKeyState(this.settingsCache.ttsProvider),
+    );
   }
 
   updateSettings(patch: VoiceSettingsPatch): VoiceSettingsInfo {
@@ -161,38 +176,56 @@ export class VoiceService {
   }
 
   private keyState(): VoiceKeyState {
-    for (const name of GEMINI_ENV_KEYS) {
+    for (const name of GATEWAY_ENV_KEYS) {
       const value = this.env[name];
       if (typeof value === "string" && value.trim() !== "") return "env";
     }
-    if (this.settingsCache.apiKey.trim() !== "") return "stored";
-    // A signed-in account reaches Gemini through a vended ephemeral token;
+    const stored = this.deps.storedApiKey();
+    if (stored !== null && stored.trim() !== "") return "stored";
+    // A signed-in account reaches models through the control plane's proxy;
     // an explicit key always wins so users can bring their own.
-    return this.deps.vendedTokenAvailable?.() === true ? "vended" : "unset";
+    return this.deps.vendedGatewayAvailable?.() === true ? "vended" : "unset";
   }
 
   /**
-   * The credential for ONE conversation. An env or stored key is a long-lived
-   * API key; with neither, a single-use ephemeral token is minted from the
-   * control plane. Null means the vend was configured but failed (offline,
-   * expired device token) — distinct from "unset", which keyState reports.
+   * The gateway provider for ONE conversation, bound to whichever credential
+   * the chain resolves. Null means the vend was configured but failed
+   * (offline, expired device token) — distinct from "unset", which keyState
+   * reports before anything starts.
    */
-  private async resolveCredential(): Promise<{
-    value: string;
-    ephemeral: boolean;
-  } | null> {
-    for (const name of GEMINI_ENV_KEYS) {
+  private async resolveGateway(): Promise<Gateway | null> {
+    for (const name of GATEWAY_ENV_KEYS) {
       const value = this.env[name];
       if (typeof value === "string" && value.trim() !== "") {
-        return { value: value.trim(), ephemeral: false };
+        console.log(`suma voice: using the ${name} gateway key`);
+        return createGateway({ apiKey: value.trim() });
       }
     }
-    const stored = this.settingsCache.apiKey.trim();
-    if (stored !== "") return { value: stored, ephemeral: false };
+    const stored = this.deps.storedApiKey();
+    if (stored !== null && stored.trim() !== "") {
+      console.log("suma voice: using the stored gateway key");
+      return createGateway({ apiKey: stored.trim() });
+    }
+    const credentials = await this.deps.vendedGatewayCredentials?.();
+    if (!credentials) return null;
+    // The control plane's proxy speaks the gateway protocol at this path —
+    // the same base ChatService points the SDK at.
+    console.log(`suma voice: using the vended gateway via ${credentials.baseUrl}`);
+    return createGateway({
+      baseURL: `${credentials.baseUrl.replace(/\/+$/, "")}/v1/ai/gateway/v4/ai`,
+      apiKey: credentials.token,
+    });
+  }
 
-    const vended = await this.deps.vendedToken?.();
-    const token = vended?.token.trim() ?? "";
-    return token === "" ? null : { value: token, ephemeral: true };
+  /** The session's realtime speech engine, or a thrown user-readable no. */
+  private ttsProvider(settings: VoiceSettings): RealtimeTtsProvider {
+    const apiKey = this.deps.ttsApiKey(settings.ttsProvider);
+    if (apiKey === null) {
+      throw new Error(
+        "The voice needs a Bland API key for speech — add one under Settings → Voice & audio.",
+      );
+    }
+    return new BlandRealtimeTts({ apiKey, voice: settings.voice });
   }
 
   /* -------------------------------- status ------------------------------- */
@@ -263,7 +296,7 @@ export class VoiceService {
 
   /* ------------------------------ audio inflow ---------------------------- */
 
-  /** One mic frame from the overlay renderer (16 kHz PCM16). */
+  /** One mic frame from the chrome renderer (16 kHz PCM16). */
   acceptAudio(frame: Uint8Array): void {
     if (this.stopped || frame.byteLength === 0) return;
     switch (this.phase) {
@@ -283,8 +316,10 @@ export class VoiceService {
         }
         return;
       case "active":
-        this.session?.sendAudio(frame);
-        this.touch();
+        // The session's endpointer decides what is speech; conversation
+        // events (not raw frames) feed the idle timer, so a silent room
+        // still times out.
+        this.session?.acceptAudio(frame);
         return;
       case "off":
         return;
@@ -313,7 +348,7 @@ export class VoiceService {
       this.setStatus(
         "listening",
         this.wakeState,
-        "No model access — sign in to your Suma account, add a key under Settings → Voice assistant, or set GEMINI_API_KEY.",
+        "No model access — sign in to your Suma account, add a key under Settings → Assistant, or set AI_GATEWAY_API_KEY.",
       );
       return;
     }
@@ -323,27 +358,30 @@ export class VoiceService {
     this.setStatus("connecting", this.wakeState, null);
 
     const settings = this.settingsCache;
-    const tools = adaptToolsForVoice(
-      enabledBrowserTools(this.deps.browser, this.deps.chatToolSettings()),
+    // Resolved per session, exactly like the chat run: a key added (or a
+    // capability revoked) in settings applies to the next conversation.
+    const tools = enabledBrowserTools(
+      this.deps.browser,
+      this.deps.chatToolSettings(),
     );
-    // Minting a vended token is a network round trip, so the credential is
-    // resolved inside the connecting phase — mic frames are already being
-    // buffered by then, and nothing the user says is lost to the wait.
-    void this.resolveCredential()
-      .then((credential) => {
-        if (this.generation !== generation) return null;
-        if (credential === null) {
+    void this.resolveGateway()
+      .then((gateway) => {
+        if (this.generation !== generation) return;
+        if (gateway === null) {
           throw new Error(
-            "Signed in, but the control plane is unreachable right now — try again, or add your own Gemini key in Settings.",
+            "Signed in, but the control plane is unreachable right now — try again, or add your own AI Gateway key in Settings.",
           );
         }
-        return VoiceLiveSession.connect({
-          apiKey: credential.value,
-          ephemeral: credential.ephemeral,
+        console.log(
+          `suma voice: session starting — model ${settings.model}, stt ${settings.sttModel}, tts ${settings.ttsProvider}/${settings.voice}, tools [${Object.keys(tools).join(", ")}]`,
+        );
+        const session = new VoiceAgentSession({
+          gateway,
           model: settings.model,
-          voice: settings.voice,
-          systemInstruction: voiceSystemInstruction(settings.wakeWord),
+          sttModel: settings.sttModel,
           tools,
+          systemInstruction: voiceSystemInstruction(settings.wakeWord),
+          tts: this.ttsProvider(settings),
           callbacks: {
             onAudio: (data) => {
               if (this.generation !== generation) return;
@@ -360,26 +398,17 @@ export class VoiceService {
               this.deps.emit.interrupted();
               this.touch();
             },
-            onToolActivity: () => this.touch(),
+            onActivity: () => this.touch(),
             onClosed: (error) => {
               if (this.generation !== generation) return;
               this.endSession(error);
             },
           },
         });
-      })
-      .then((session) => {
-        if (session === null) return; // superseded before connecting
-        if (this.generation !== generation) {
-          session.close(); // superseded while connecting
-          return;
-        }
-        // connect() resolves only after the server's setupComplete, so the
-        // session takes audio from its first moment here.
         this.session = session;
         this.setStatus("active", this.wakeState, null);
-        // The words spoken while the socket was opening.
-        for (const frame of this.pendingFrames) session.sendAudio(frame);
+        // The words spoken while credentials resolved.
+        for (const frame of this.pendingFrames) session.acceptAudio(frame);
         this.pendingFrames = [];
         this.touch();
         this.startIdleTimer();
@@ -401,6 +430,10 @@ export class VoiceService {
   }
 
   private endSession(error: string | null): void {
+    if (error !== null) {
+      // The HUD truncates; the terminal keeps the whole line.
+      console.error("suma voice: session ended with error:", error);
+    }
     this.session?.close();
     this.session = null;
     this.pendingFrames = [];

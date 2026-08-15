@@ -674,7 +674,8 @@ export interface SumaInvokeMap {
 
   /**
    * The voice assistant (shared/voice.ts). The wake-word engine and the
-   * Gemini Live session run in MAIN (main/voice/voice-service.ts) — the key
+   * agent session (the chat sidebar's AI SDK loop with transcription in and
+   * realtime TTS out) run in MAIN (main/voice/voice-service.ts) — the keys
    * and the browser tools live there. The overlay renderer owns the
    * microphone and the speakers: `voice:audio` carries 16 kHz PCM16 mic
    * frames inward while the assistant is armed or in a session; reply audio
