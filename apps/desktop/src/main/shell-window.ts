@@ -19,7 +19,11 @@ import {
   type WebContents,
 } from "electron";
 import type { ContentBounds } from "../shared/ipc";
-import { DEFAULT_SPLIT_RATIO, paneBoundsFor, type PaneRegion } from "../shared/pane-layout";
+import {
+  DEFAULT_SPLIT_RATIO,
+  paneBoundsFor,
+  type PaneRegion,
+} from "../shared/pane-layout";
 import type { SelectionRect } from "../shared/selection";
 import { selectionToolbarBounds } from "./selection-core";
 import {
@@ -101,7 +105,10 @@ export function savePreviewBounds(
     x: Math.max(hole.x, hole.x + hole.width - width - SAVE_PREVIEW_MARGIN),
     y: hole.y + SAVE_PREVIEW_MARGIN,
     width,
-    height: Math.min(stackHeight, Math.max(hole.height - SAVE_PREVIEW_MARGIN * 2, 0)),
+    height: Math.min(
+      stackHeight,
+      Math.max(hole.height - SAVE_PREVIEW_MARGIN * 2, 0),
+    ),
   };
 }
 
@@ -176,7 +183,7 @@ export class ShellWindow {
       titleBarStyle: "hiddenInset",
       // Center the traffic lights in the 40px tab strip (TabStrip.tsx) — the
       // same offset Chrome uses, since the strip is now the same height.
-      trafficLightPosition: { x: 18, y: 14 },
+      trafficLightPosition: { x: 14, y: 14 },
       // The window exists before the renderer has read its theme, so it opens
       // on whatever this Mac asks for — the same thing lib/theme.ts will pick.
       backgroundColor: backgroundFor(this.darkBackground),
@@ -696,12 +703,17 @@ export class ShellWindow {
   }
 
   private applyTabBounds(): void {
-    for (const [view, region] of this.tabViews) this.applyBoundsTo(view, region);
+    for (const [view, region] of this.tabViews)
+      this.applyBoundsTo(view, region);
   }
 
   private applyBoundsTo(view: WebContentsView, region: PaneRegion): void {
     if (this.lastContentBounds === null || !this.wantsVisible.has(view)) return;
-    const bounds = paneBoundsFor(this.lastContentBounds, region, this.splitRatio);
+    const bounds = paneBoundsFor(
+      this.lastContentBounds,
+      region,
+      this.splitRatio,
+    );
     // A collapsed pane (window too narrow to split) hides rather than crushes —
     // and re-shows when widening resolves its pane again.
     if (bounds === null) {
@@ -718,7 +730,9 @@ export class ShellWindow {
       await this.chromeView.webContents.loadURL(devUrl);
       return;
     }
-    await this.chromeView.webContents.loadFile(path.join(dirname, "../renderer/index.html"));
+    await this.chromeView.webContents.loadFile(
+      path.join(dirname, "../renderer/index.html"),
+    );
   }
 
   private async loadSavePreview(): Promise<void> {
