@@ -55,9 +55,64 @@ const MAX_TREE_DEPTH = 12;
  *  16 MiB preview budget. */
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
+/**
+ * Images ride to the renderer as a base64 data URL (~4/3 the bytes over IPC),
+ * so they get their own, larger cap: screenshots and photos routinely clear
+ * the editor's 2 MiB without being unreasonable to display.
+ */
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
 /** NUL in the head of a file is the classic "this is not text" heuristic. */
 function looksBinary(head: Buffer): boolean {
   return head.subarray(0, 8_000).includes(0);
+}
+
+/** The DIB header sizes BMP writers actually emit (BITMAPCOREHEADER → V5). */
+const DIB_HEADER_SIZES: ReadonlySet<number> = new Set([
+  12, 40, 52, 56, 64, 108, 124,
+]);
+
+function startsWith(buffer: Buffer, bytes: readonly number[]): boolean {
+  if (buffer.length < bytes.length) return false;
+  return bytes.every((byte, i) => buffer[i] === byte);
+}
+
+/**
+ * The image type, from magic bytes rather than the extension: a ".png" that is
+ * really a zip must not reach an <img>, and a screenshot saved without an
+ * extension should still render. Only formats Chromium decodes are listed.
+ *
+ * SVG is deliberately absent — it is text, and an IDE is more useful showing
+ * its source than a picture of it.
+ */
+function sniffImageMime(buffer: Buffer): string | null {
+  if (startsWith(buffer, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    return "image/png";
+  if (startsWith(buffer, [0xff, 0xd8, 0xff])) return "image/jpeg";
+  const gifHead = buffer.subarray(0, 6).toString("latin1");
+  if (gifHead === "GIF87a" || gifHead === "GIF89a") return "image/gif";
+  // "BM" alone is two bytes a text file could open with; require a real DIB
+  // header size behind it.
+  if (
+    startsWith(buffer, [0x42, 0x4d]) &&
+    buffer.length >= 18 &&
+    DIB_HEADER_SIZES.has(buffer.readUInt32LE(14))
+  )
+    return "image/bmp";
+  if (startsWith(buffer, [0x00, 0x00, 0x01, 0x00])) return "image/x-icon";
+  // RIFF and ISO-BMFF both carry their format tag past the leading size field.
+  if (
+    buffer.subarray(0, 4).toString("latin1") === "RIFF" &&
+    buffer.subarray(8, 12).toString("latin1") === "WEBP"
+  )
+    return "image/webp";
+  // HEIC shares this container but Chromium has no decoder for it, so it stays
+  // a binary notice rather than a broken image.
+  if (buffer.subarray(4, 8).toString("latin1") === "ftyp") {
+    const brand = buffer.subarray(8, 12).toString("latin1");
+    if (brand === "avif" || brand === "avis") return "image/avif";
+  }
+  return null;
 }
 
 export class WorkspaceFsService {
@@ -130,12 +185,33 @@ export class WorkspaceFsService {
   async read(rel: string): Promise<WorkspaceFile> {
     const abs = this.resolve(rel);
     const stat = await fs.stat(abs);
-    if (!stat.isFile() || stat.size > MAX_FILE_BYTES) {
-      return { path: rel, contents: "", unreadable: true };
+    if (!stat.isFile()) {
+      return { path: rel, kind: "unreadable", reason: "unsupported" };
     }
+    // The image cap is the larger of the two, so it gates the read itself;
+    // text is held to MAX_FILE_BYTES once we know it is not an image.
+    if (stat.size > MAX_IMAGE_BYTES) {
+      return { path: rel, kind: "unreadable", reason: "too-large" };
+    }
+
     const buffer = await fs.readFile(abs);
-    if (looksBinary(buffer)) return { path: rel, contents: "", unreadable: true };
-    return { path: rel, contents: buffer.toString("utf8"), unreadable: false };
+    const mime = sniffImageMime(buffer);
+    if (mime !== null) {
+      return {
+        path: rel,
+        kind: "image",
+        dataUrl: `data:${mime};base64,${buffer.toString("base64")}`,
+        mime,
+        bytes: stat.size,
+      };
+    }
+    if (stat.size > MAX_FILE_BYTES) {
+      return { path: rel, kind: "unreadable", reason: "too-large" };
+    }
+    if (looksBinary(buffer)) {
+      return { path: rel, kind: "unreadable", reason: "binary" };
+    }
+    return { path: rel, kind: "text", contents: buffer.toString("utf8") };
   }
 
   async write(rel: string, contents: string): Promise<{ ok: true }> {

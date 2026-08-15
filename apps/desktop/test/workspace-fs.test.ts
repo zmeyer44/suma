@@ -77,18 +77,82 @@ describe("tree", () => {
   });
 });
 
+/** A 1×1 PNG — real magic bytes, so the sniffer sees what it would on disk. */
+const PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
+
 describe("read/write", () => {
   it("round-trips text through write and read", async () => {
     await writeFile(path.join(root, "a.txt"), "before");
     await service.write("a.txt", "after");
     const file = await service.read("a.txt");
-    expect(file).toEqual({ path: "a.txt", contents: "after", unreadable: false });
+    expect(file).toEqual({ path: "a.txt", kind: "text", contents: "after" });
   });
 
   it("flags binary files unreadable instead of returning bytes", async () => {
     await writeFile(path.join(root, "blob.bin"), Buffer.from([0x89, 0, 0x50]));
     const file = await service.read("blob.bin");
-    expect(file.unreadable).toBe(true);
-    expect(file.contents).toBe("");
+    expect(file).toEqual({
+      path: "blob.bin",
+      kind: "unreadable",
+      reason: "binary",
+    });
+  });
+
+  it("returns images as a data URL the renderer can show", async () => {
+    await writeFile(path.join(root, "shot.png"), PNG);
+    const file = await service.read("shot.png");
+    expect(file).toEqual({
+      path: "shot.png",
+      kind: "image",
+      mime: "image/png",
+      bytes: PNG.byteLength,
+      dataUrl: `data:image/png;base64,${PNG.toString("base64")}`,
+    });
+  });
+
+  it("sniffs the image type from bytes, not the extension", async () => {
+    // A PNG saved as .txt still renders; a .png that is not one does not.
+    await writeFile(path.join(root, "mislabeled.txt"), PNG);
+    await writeFile(
+      path.join(root, "liar.png"),
+      Buffer.from([0x50, 0x4b, 0x03, 0x04, 0]),
+    );
+
+    expect((await service.read("mislabeled.txt")).kind).toBe("image");
+    const liar = await service.read("liar.png");
+    expect(liar).toEqual({
+      path: "liar.png",
+      kind: "unreadable",
+      reason: "binary",
+    });
+  });
+
+  it("does not mistake text starting with BM for a bitmap", async () => {
+    await writeFile(path.join(root, "note.md"), "BMW service notes\n");
+    const file = await service.read("note.md");
+    expect(file.kind).toBe("text");
+  });
+
+  it("calls oversized files too-large rather than binary", async () => {
+    await writeFile(path.join(root, "big.txt"), "x".repeat(3 * 1024 * 1024));
+    const file = await service.read("big.txt");
+    expect(file).toEqual({
+      path: "big.txt",
+      kind: "unreadable",
+      reason: "too-large",
+    });
+  });
+
+  it("refuses a directory rather than throwing", async () => {
+    await mkdir(path.join(root, "adir"), { recursive: true });
+    const file = await service.read("adir");
+    expect(file).toEqual({
+      path: "adir",
+      kind: "unreadable",
+      reason: "unsupported",
+    });
   });
 });

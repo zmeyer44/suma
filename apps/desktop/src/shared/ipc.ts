@@ -370,13 +370,27 @@ export interface WorkspaceTree {
   truncated: boolean;
 }
 
-export interface WorkspaceFile {
-  path: string;
-  /** UTF-8 text; empty when `unreadable`. */
-  contents: string;
-  /** Binary or over the size cap — shown as a notice, never edited. */
-  unreadable: boolean;
-}
+/**
+ * What the IDE got back for a file: editable text, an image it can render but
+ * not edit, or a notice. The kind decides the pane — main never hands the
+ * renderer bytes it has no way to show.
+ */
+export type WorkspaceFile =
+  | { path: string; kind: "text"; contents: string }
+  | {
+      path: string;
+      kind: "image";
+      /** `data:` URL, ready for an <img src>. The chrome's CSP allows data:. */
+      dataUrl: string;
+      /** Sniffed from the file's magic bytes, not its extension. */
+      mime: string;
+      bytes: number;
+    }
+  | {
+      path: string;
+      kind: "unreadable";
+      reason: "binary" | "too-large" | "unsupported";
+    };
 
 /** Per-space egress state surfaced in the site controls (§8.4, §8.7). */
 export interface EgressStatus {
@@ -656,7 +670,10 @@ export interface SumaInvokeMap {
    * (HUD) — both senders are trusted for the voice:* channels.
    */
   "voice:settings": { args: void; result: VoiceSettingsInfo };
-  "voice:updateSettings": { args: VoiceSettingsPatch; result: VoiceSettingsInfo };
+  "voice:updateSettings": {
+    args: VoiceSettingsPatch;
+    result: VoiceSettingsInfo;
+  };
   /** Pull on mount — status pushes sent before a surface existed are gone. */
   "voice:status": { args: void; result: VoiceStatus };
   "voice:audio": { args: VoiceAudioInArgs; result: void };
@@ -864,12 +881,18 @@ export interface SumaInvokeMap {
   "nostr:generateKey": { args: void; result: NostrSettingsInfo };
   "nostr:removeKey": { args: void; result: NostrSettingsInfo };
   /** What `window.nostr.getRelays()` will answer — edited on the settings page. */
-  "nostr:setRelays": { args: { relays: NostrRelayPolicy }; result: NostrSettingsInfo };
+  "nostr:setRelays": {
+    args: { relays: NostrRelayPolicy };
+    result: NostrSettingsInfo;
+  };
   "nostr:setSitePolicy": {
     args: { host: string; patch: NostrSitePolicyPatch };
     result: NostrSettingsInfo;
   };
-  "nostr:removeSitePolicy": { args: { host: string }; result: NostrSettingsInfo };
+  "nostr:removeSitePolicy": {
+    args: { host: string };
+    result: NostrSettingsInfo;
+  };
   /** The approval queue, oldest first — pull for a surface that just mounted
    *  (pushes sent before it existed are gone). Preview-overlay trust lane. */
   "nostr:pending": { args: void; result: NostrPendingRequest[] };
@@ -963,7 +986,10 @@ export interface SumaInvokeMap {
    * around it would deaden the whole top-right strip of the page. Omitted ⇒
    * the classic full card width.
    */
-  "savePreview:bounds": { args: { height: number; width?: number }; result: void };
+  "savePreview:bounds": {
+    args: { height: number; width?: number };
+    result: void;
+  };
   /** A card was clicked: open the Saves panel in the chrome on this item. */
   "savePreview:activate": { args: { id: string }; result: void };
   /**

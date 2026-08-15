@@ -14,6 +14,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
+import type { WorkspaceFile } from "../../../shared/ipc";
 import { cn } from "../lib/cn";
 import { ideBuffers } from "../lib/ide";
 import { useSumaStore } from "../store";
@@ -26,6 +27,9 @@ import { useSumaStore } from "../store";
  * document while typing (re-rendering `File` with new contents would fight
  * it), and the buffers must survive this page unmounting on tab switches.
  * The store carries only the file LIST, the active path, and dirty booleans.
+ *
+ * Images are the one non-text thing the pane renders: main sniffs them and
+ * sends a data URL, which shows read-only (no buffer, no dirty state, no save).
  *
  * Theming: syntax colors come from the library's own Shiki theme pair
  * (pierre-dark/pierre-light) following the chrome's data-theme, while the
@@ -53,7 +57,9 @@ function readAppThemeType(): "dark" | "light" {
 function useAppThemeType(): "dark" | "light" {
   const [themeType, setThemeType] = useState(readAppThemeType);
   useEffect(() => {
-    const observer = new MutationObserver(() => setThemeType(readAppThemeType()));
+    const observer = new MutationObserver(() =>
+      setThemeType(readAppThemeType()),
+    );
     observer.observe(document.documentElement, {
       attributes: true,
       attributeFilter: ["data-theme"],
@@ -67,10 +73,53 @@ function basename(path: string): string {
   return path.split("/").at(-1) ?? path;
 }
 
-interface LoadedFile {
-  path: string;
-  contents: string;
-  unreadable: boolean;
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kib = bytes / 1024;
+  if (kib < 1024) return `${Math.round(kib)} KB`;
+  return `${(kib / 1024).toFixed(1)} MB`;
+}
+
+/** "image/png" → "PNG"; the caption wants the format, not the media type. */
+function formatLabel(mime: string): string {
+  return (mime.split("/").at(-1) ?? mime).replace("x-", "").toUpperCase();
+}
+
+function unreadableNotice(
+  file: Extract<WorkspaceFile, { kind: "unreadable" }>,
+): string {
+  if (file.reason === "too-large")
+    return `${file.path} is too large to open here.`;
+  if (file.reason === "unsupported") return `${file.path} is not a file.`;
+  return `${file.path} is binary — nothing to show.`;
+}
+
+/** Read-only image view: fits the pane, with format/size/dimensions beneath. */
+function ImageView({
+  file,
+}: {
+  file: Extract<WorkspaceFile, { kind: "image" }>;
+}) {
+  const [dimensions, setDimensions] = useState<string | null>(null);
+  return (
+    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 p-6">
+      <img
+        src={file.dataUrl}
+        alt={basename(file.path)}
+        onLoad={(e) =>
+          setDimensions(
+            `${e.currentTarget.naturalWidth}×${e.currentTarget.naturalHeight}`,
+          )
+        }
+        className="max-h-full min-h-0 max-w-full rounded-md object-contain"
+      />
+      <p className="shrink-0 text-[11px] text-faint">
+        {[formatLabel(file.mime), dimensions, formatBytes(file.bytes)]
+          .filter((part) => part !== null)
+          .join(" · ")}
+      </p>
+    </div>
+  );
 }
 
 export function IdeEditor() {
@@ -84,7 +133,7 @@ export function IdeEditor() {
   const saveIdeFile = useSumaStore((s) => s.saveIdeFile);
 
   const themeType = useAppThemeType();
-  const [loaded, setLoaded] = useState<LoadedFile | null>(null);
+  const [loaded, setLoaded] = useState<WorkspaceFile | null>(null);
 
   useEffect(() => {
     if (activeFile === null) {
@@ -94,23 +143,19 @@ export function IdeEditor() {
     // An existing buffer wins over disk — it may hold unsaved edits.
     const buffer = ideBuffers.get(activeFile);
     if (buffer !== undefined) {
-      setLoaded({ path: activeFile, contents: buffer.current, unreadable: false });
+      setLoaded({ path: activeFile, kind: "text", contents: buffer.current });
       return;
     }
     let cancelled = false;
     void readIdeFile(activeFile).then((file) => {
       if (cancelled || file === undefined) return;
-      if (!file.unreadable) {
+      if (file.kind === "text") {
         ideBuffers.set(activeFile, {
           saved: file.contents,
           current: file.contents,
         });
       }
-      setLoaded({
-        path: activeFile,
-        contents: file.contents,
-        unreadable: file.unreadable,
-      });
+      setLoaded(file);
     });
     return () => {
       cancelled = true;
@@ -235,9 +280,11 @@ export function IdeEditor() {
           <p className="p-4 text-[12px] text-faint">
             No file open — pick one in the explorer.
           </p>
-        ) : loaded === null ? null : loaded.unreadable ? (
+        ) : loaded === null ? null : loaded.kind === "image" ? (
+          <ImageView key={loaded.path} file={loaded} />
+        ) : loaded.kind === "unreadable" ? (
           <p className="p-4 text-[12px] text-faint">
-            {loaded.path} is binary or too large to edit here.
+            {unreadableNotice(loaded)}
           </p>
         ) : (
           <EditProvider createEditor={createEditor}>
