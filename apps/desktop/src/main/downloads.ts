@@ -20,8 +20,12 @@ const PROGRESS_PUSH_MS = 250;
 export interface DownloadDeps {
   store: WorkspaceStore;
   emit: (items: DownloadItemInfo[]) => void;
-  /** Where local downloads land — `app.getPath("downloads")` in the app. */
-  downloadsDir: () => string;
+  /**
+   * Where this space's downloads land. Local compute mode points into the
+   * shared filesystem (`~/Suma/<space>/Downloads`); otherwise this Mac's
+   * Downloads folder. Must stay SYNCHRONOUS — it runs inside will-download.
+   */
+  downloadsDirFor: (spaceId: string) => string;
   /**
    * One file finished writing. Separate from `emit`, which pushes the whole
    * list on every progress tick: this fires exactly once per download, which
@@ -66,6 +70,16 @@ export class DownloadManager {
     this.live.get(id)?.cancel();
   }
 
+  /** Cloud mode mirrored the finished file onto the shared FS — record where,
+   *  so the panel can say so and other devices know to look for it. */
+  noteCloudMirror(id: string, cloudPath: string): void {
+    const item = this.items.find((i) => i.id === id);
+    if (item === undefined || item.state !== "completed") return;
+    item.cloudPath = cloudPath;
+    this.deps.store.setDownloads(this.items.filter((i) => i.state === "completed"));
+    this.deps.emit(this.list());
+  }
+
   /* ------------------------------ internals ------------------------------ */
 
   private track(spaceId: string, item: DownloadItem): void {
@@ -78,7 +92,7 @@ export class DownloadManager {
     // DownloadRouter may still preventDefault this same event to hand the
     // fetch to the cloud (§8.6); a cancelled item settles as cancelled and
     // the path is simply never used.
-    this.assignSavePath(item);
+    this.assignSavePath(spaceId, item);
     this.apply({
       type: "started",
       id,
@@ -123,10 +137,10 @@ export class DownloadManager {
   }
 
   /** Never throws: a download without a save path is worse than a clumsy one. */
-  private assignSavePath(item: DownloadItem): void {
+  private assignSavePath(spaceId: string, item: DownloadItem): void {
     try {
       if (item.getSavePath() !== "") return; // something upstream already chose
-      const dir = this.deps.downloadsDir();
+      const dir = this.deps.downloadsDirFor(spaceId);
       item.setSavePath(uniqueSavePath(dir, item.getFilename(), existsSync, path.sep));
     } catch (err) {
       console.error("suma downloads: could not set a save path", err);

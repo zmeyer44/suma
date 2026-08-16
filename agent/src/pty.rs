@@ -23,6 +23,42 @@ use tokio::sync::broadcast;
 use crate::proto::{PtyRestoreKind, PtySessionEntry, PtySignal, PTY_SCROLLBACK_LINES};
 
 /* ------------------------------------------------------------------ *
+ * Working directory
+ * ------------------------------------------------------------------ */
+
+/// Where a shell lands when the caller names no directory: the shared Files
+/// root (`$HOME/cloud`), so the terminal opens onto the same tree the files
+/// surfaces show (§8.6). Falls back to `$HOME`, then `/`, if the root cannot
+/// be created.
+fn default_cwd(home: Option<&str>) -> String {
+    match home {
+        Some(home) => {
+            let cloud = format!("{home}/cloud");
+            if fs::create_dir_all(&cloud).is_ok() {
+                cloud
+            } else {
+                home.to_string()
+            }
+        }
+        None => "/".to_string(),
+    }
+}
+
+/// `~` and `~/x` mean `$HOME` and `$HOME/x`: the desktop names directories
+/// inside the shared tree without knowing the VM's home path. Anything else —
+/// including a bare `~user` — passes through untouched.
+fn expand_home(cwd: String, home: Option<&str>) -> String {
+    match home {
+        Some(home) if cwd == "~" => home.to_string(),
+        Some(home) => match cwd.strip_prefix("~/") {
+            Some(rest) => format!("{home}/{rest}"),
+            None => cwd,
+        },
+        None => cwd,
+    }
+}
+
+/* ------------------------------------------------------------------ *
  * Scrollback ring
  * ------------------------------------------------------------------ */
 
@@ -257,11 +293,11 @@ impl PtyManager {
             bail!("pty {} already exists", params.pty_id);
         }
 
-        let cwd = params
-            .cwd
-            .clone()
-            .or_else(|| std::env::var("HOME").ok())
-            .unwrap_or_else(|| "/".to_string());
+        let home = std::env::var("HOME").ok();
+        let cwd = match params.cwd.clone() {
+            Some(cwd) => expand_home(cwd, home.as_deref()),
+            None => default_cwd(home.as_deref()),
+        };
 
         let pair = native_pty_system().openpty(PtySize {
             rows: params.rows,
@@ -558,6 +594,39 @@ impl PtyManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_cwd_is_the_files_root_with_honest_fallbacks() {
+        let home = test_dir("cwd-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home_str = home.to_string_lossy().into_owned();
+
+        // The shared root is created on demand and becomes the default.
+        assert_eq!(default_cwd(Some(&home_str)), format!("{home_str}/cloud"));
+        assert!(home.join("cloud").is_dir());
+
+        // No home at all: `/`, not a panic.
+        assert_eq!(default_cwd(None), "/");
+
+        // A home whose `cloud` cannot be created falls back to the home.
+        std::fs::remove_dir_all(home.join("cloud")).unwrap();
+        std::fs::write(home.join("cloud"), "a file where the dir should go").unwrap();
+        assert_eq!(default_cwd(Some(&home_str)), home_str);
+
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn tilde_expands_against_home_and_nothing_else() {
+        assert_eq!(
+            expand_home("~/cloud/Personal".into(), Some("/root")),
+            "/root/cloud/Personal"
+        );
+        assert_eq!(expand_home("~".into(), Some("/root")), "/root");
+        assert_eq!(expand_home("/abs/path".into(), Some("/root")), "/abs/path");
+        assert_eq!(expand_home("~alice/x".into(), Some("/root")), "~alice/x");
+        assert_eq!(expand_home("~/x".into(), None), "~/x");
+    }
 
     fn test_dir(tag: &str) -> PathBuf {
         let unique = format!(

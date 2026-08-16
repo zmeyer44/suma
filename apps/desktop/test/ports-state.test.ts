@@ -111,6 +111,12 @@ describe("PortsService forward refusal and flag plumbing", () => {
     forward(): void {
       throw new Error("the stub link never forwards");
     }
+    async vfs(): Promise<never> {
+      throw new Error("the stub link has no filesystem");
+    }
+    vfsRootLabel(): string {
+      return "/stub";
+    }
     stop(): void {
       /* nothing to stop */
     }

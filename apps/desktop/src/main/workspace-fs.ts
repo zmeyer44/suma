@@ -1,19 +1,27 @@
 /**
- * WorkspaceFsService — the local filesystem behind the suma://terminal IDE
- * (explorer + editor). It is deliberately NOT the cloud files plane (§8.6,
- * `files:*`, rooted at ~/cloud): the IDE wants the directory the shells run
- * in, which today is this Mac (SimAgent spawns at $HOME; dev shells inherit
- * the repo). When shells move fully to the VM agent, this service is the seam
- * to reroute through the agent's vfs channel.
+ * WorkspaceFsService — the filesystem behind the suma://terminal IDE
+ * (explorer + editor), served over the agent link's vfs channel.
  *
- * Trust model: the renderer only ever holds workspace-RELATIVE paths. Every
- * path is resolved against the root here and rejected if it escapes —
- * chrome-renderer compromise must not become arbitrary file read/write.
+ * This is the "one virtual computer" seam: the IDE reads and writes whatever
+ * machine the terminal talks to — the Fly VM's ~/cloud through
+ * TcpAgentClient, or the local shared folder through SimAgent's LocalVfs.
+ * The service itself no longer touches the disk; it turns renderer requests
+ * into vfs frames and vfs answers into the renderer's Workspace* shapes.
+ *
+ * Trust model unchanged: the renderer only ever holds workspace-RELATIVE
+ * paths. Every path is normalized here and refused if it escapes — a
+ * chrome-renderer compromise must not become arbitrary file access on
+ * whichever machine is behind the link. An optional scope prefixes every
+ * path with the active space's folder, so the explorer sees one space's
+ * tree, never the whole root.
  */
 
-import { promises as fs } from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import {
+  normalizeVfsPath,
+  VFS_MAX_READ_BYTES,
+  type VfsResponse,
+} from "@suma/protocol";
+import type { AgentLink } from "./compute/agent-client";
 import type { WorkspaceFile, WorkspaceTree } from "../shared/ipc";
 import { workspaceMediaUrl } from "./workspace-media";
 import {
@@ -23,146 +31,97 @@ import {
   SNIFF_BYTES,
 } from "./workspace-sniff";
 
-/**
- * Where the IDE roots. Dev runs (`electron-vite dev`) sit in the project
- * being worked on — that IS the workspace. Packaged apps have a useless cwd
- * ("/"), so they fall back to $HOME, matching where SimAgent spawns shells.
- * SUMA_WORKSPACE_ROOT overrides both.
- */
-export function resolveWorkspaceRoot(isPackaged: boolean): string {
-  const override = process.env["SUMA_WORKSPACE_ROOT"];
-  if (override !== undefined && override.length > 0)
-    return path.resolve(override);
-  return isPackaged ? os.homedir() : process.cwd();
-}
-
-/** Dependency/VCS/system trees that would drown the explorer. */
-const SKIPPED_DIRS: ReadonlySet<string> = new Set([
-  ".git",
-  ".hg",
-  ".svn",
-  "node_modules",
-  ".pnpm-store",
-  ".npm",
-  ".cache",
-  ".cargo",
-  ".rustup",
-  ".Trash",
-  "Library",
-]);
-
-/** Junk files that carry no information in a tree. */
-const SKIPPED_FILES: ReadonlySet<string> = new Set([".DS_Store"]);
-
-/** Caps keep a homedir-rooted walk bounded; `truncated` makes the cut visible. */
-const MAX_TREE_ENTRIES = 10_000;
-const MAX_TREE_DEPTH = 12;
-
-/** Editor cap — matches what a text editor can usefully hold, not files:*'s
- *  16 MiB preview budget. */
+/** Editor cap — matches what a text editor can usefully hold. */
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
 /**
- * Images ride to the renderer as a base64 data URL (~4/3 the bytes over IPC),
- * so they get their own, larger cap: screenshots and photos routinely clear
- * the editor's 2 MiB without being unreasonable to display.
+ * Images ride to the renderer as a base64 data URL, so they get their own,
+ * larger cap — which is also the vfs single-read cap, so one read suffices.
  */
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
-/**
- * Enough of a file's head to identify it — the sniffers only ever look at the
- * first few bytes, and an audio file is never read past this.
- */
-async function readHead(abs: string): Promise<Buffer> {
-  const handle = await fs.open(abs, "r");
-  try {
-    const buffer = Buffer.alloc(SNIFF_BYTES);
-    const { bytesRead } = await handle.read(buffer, 0, SNIFF_BYTES, 0);
-    return buffer.subarray(0, bytesRead);
-  } finally {
-    await handle.close();
-  }
+function unwrap(
+  resp: VfsResponse,
+  context: string,
+): Exclude<VfsResponse, { t: "error" }> {
+  if (resp.t === "error") throw new Error(`${context}: ${resp.message}`);
+  return resp;
 }
 
 export class WorkspaceFsService {
-  constructor(private readonly root: string) {}
+  private link: AgentLink | null = null;
+  /**
+   * Workspace-relative folder every path is confined under ("" = the whole
+   * root). The provider is read per call: the active space can change at any
+   * moment and the next request must land in the new folder.
+   */
+  private scope: () => string = () => "";
 
-  /** The absolute root, for the tree payload and logs. */
-  get rootDir(): string {
-    return this.root;
+  /** Wire the service to the (switchable) agent link at service start. */
+  bind(link: AgentLink, scope?: () => string): void {
+    this.link = link;
+    if (scope !== undefined) this.scope = scope;
   }
 
-  /**
-   * Resolve a renderer-supplied relative path inside the root, throwing on
-   * anything that would land outside it (absolute paths, ..-escapes).
-   */
-  resolve(rel: string): string {
-    if (path.isAbsolute(rel)) throw new Error(`absolute path refused: ${rel}`);
-    const abs = path.resolve(this.root, rel);
-    if (abs !== this.root && !abs.startsWith(this.root + path.sep)) {
-      throw new Error(`path escapes workspace: ${rel}`);
-    }
-    return abs;
+  unbind(): void {
+    this.link = null;
+  }
+
+  /** Display label for the workspace root (never a path the renderer resolves). */
+  rootLabel(): string {
+    const scope = this.scope();
+    const base = this.link?.vfsRootLabel() ?? "";
+    return scope === "" ? base : `${base}/${scope}`;
   }
 
   async tree(): Promise<WorkspaceTree> {
-    const paths: string[] = [];
-    let truncated = false;
-
-    const walk = async (dirAbs: string, dirRel: string, depth: number) => {
-      if (paths.length >= MAX_TREE_ENTRIES) {
-        truncated = true;
-        return;
-      }
-      if (depth > MAX_TREE_DEPTH) {
-        truncated = true;
-        return;
-      }
-      let entries;
-      try {
-        entries = await fs.readdir(dirAbs, { withFileTypes: true });
-      } catch {
-        return; // Unreadable directory (permissions) — skip, don't fail the tree.
-      }
-      for (const entry of entries) {
-        if (paths.length >= MAX_TREE_ENTRIES) {
-          truncated = true;
-          break;
-        }
-        const rel = dirRel === "" ? entry.name : `${dirRel}/${entry.name}`;
-        // Symlinks are skipped entirely: following them invites cycles and
-        // walks outside the root.
-        if (entry.isSymbolicLink()) continue;
-        if (entry.isDirectory()) {
-          if (SKIPPED_DIRS.has(entry.name)) continue;
-          const before = paths.length;
-          await walk(path.join(dirAbs, entry.name), rel, depth + 1);
-          // Empty directories still deserve a row (trees accepts "dir/").
-          if (paths.length === before) paths.push(`${rel}/`);
-        } else if (entry.isFile()) {
-          if (SKIPPED_FILES.has(entry.name)) continue;
-          paths.push(rel);
-        }
-      }
+    const base = this.scopedRoot();
+    let resp = await this.vfs().vfs({ t: "vfs.tree", path: base });
+    if (resp.t === "error" && resp.code === "vfs_not_found") {
+      // First visit: the scope folder (or a fresh machine's root) does not
+      // exist yet. Create it and retry once — an empty tree, not an error.
+      unwrap(
+        await this.vfs().vfs({ t: "vfs.mkdir", path: base }),
+        "creating workspace",
+      );
+      resp = await this.vfs().vfs({ t: "vfs.tree", path: base });
+    }
+    const paths = unwrap(resp, "listing workspace");
+    if (paths.t !== "vfs.paths")
+      throw new Error("listing workspace: unexpected vfs answer");
+    const prefix = base === "/" ? "/" : `${base}/`;
+    return {
+      root: this.rootLabel(),
+      paths: paths.paths
+        .filter((p) => p.startsWith(prefix))
+        .map((p) => p.slice(prefix.length)),
+      truncated: paths.truncated,
     };
-
-    await walk(this.root, "", 0);
-    paths.sort();
-    return { root: this.root, paths, truncated };
   }
 
   /**
    * Identify the file from its head first, then read only what the answer
-   * needs: audio never leaves the disk here (the player streams it over
+   * needs: audio never crosses IPC (the player streams it over
    * suma-workspace://), while images and text are read whole under their caps.
    */
   async read(rel: string): Promise<WorkspaceFile> {
-    const abs = this.resolve(rel);
-    const stat = await fs.stat(abs);
-    if (!stat.isFile()) {
+    const wire = this.toVfsPath(rel);
+    const info = unwrap(
+      await this.vfs().vfs({ t: "vfs.stat", path: wire }),
+      `reading ${rel}`,
+    );
+    if (info.t !== "vfs.info")
+      throw new Error(`reading ${rel}: unexpected vfs answer`);
+    if (info.entry.kind !== "file") {
       return { path: rel, kind: "unreadable", reason: "unsupported" };
     }
-    const head = await readHead(abs);
+    const size = info.entry.sizeBytes;
+    const head = await this.readSlice(
+      wire,
+      0,
+      Math.min(SNIFF_BYTES, size),
+      rel,
+    );
 
     const audioMime = sniffAudioMime(head, rel);
     if (audioMime !== null) {
@@ -171,29 +130,29 @@ export class WorkspaceFsService {
         kind: "audio",
         url: workspaceMediaUrl(rel),
         mime: audioMime,
-        bytes: stat.size,
+        bytes: size,
       };
     }
 
     const imageMime = sniffImageMime(head);
     if (imageMime !== null) {
-      if (stat.size > MAX_IMAGE_BYTES) {
+      if (size > MAX_IMAGE_BYTES) {
         return { path: rel, kind: "unreadable", reason: "too-large" };
       }
-      const buffer = await fs.readFile(abs);
+      const buffer = await this.readSlice(wire, 0, size, rel);
       return {
         path: rel,
         kind: "image",
         dataUrl: `data:${imageMime};base64,${buffer.toString("base64")}`,
         mime: imageMime,
-        bytes: stat.size,
+        bytes: size,
       };
     }
 
-    if (stat.size > MAX_FILE_BYTES) {
+    if (size > MAX_FILE_BYTES) {
       return { path: rel, kind: "unreadable", reason: "too-large" };
     }
-    const buffer = await fs.readFile(abs);
+    const buffer = await this.readSlice(wire, 0, size, rel);
     if (looksBinary(buffer)) {
       return { path: rel, kind: "unreadable", reason: "binary" };
     }
@@ -201,8 +160,138 @@ export class WorkspaceFsService {
   }
 
   async write(rel: string, contents: string): Promise<{ ok: true }> {
-    const abs = this.resolve(rel);
-    await fs.writeFile(abs, contents, "utf8");
+    const dataB64 = Buffer.from(contents, "utf8").toString("base64");
+    unwrap(
+      await this.vfs().vfs({
+        t: "vfs.write",
+        path: this.toVfsPath(rel, false),
+        dataB64,
+      }),
+      `saving ${rel}`,
+    );
     return { ok: true };
+  }
+
+  async mkdir(rel: string): Promise<{ ok: true }> {
+    unwrap(
+      await this.vfs().vfs({ t: "vfs.mkdir", path: this.toVfsPath(rel) }),
+      `creating ${rel}`,
+    );
+    return { ok: true };
+  }
+
+  async remove(rel: string, recursive: boolean): Promise<{ ok: true }> {
+    unwrap(
+      await this.vfs().vfs({
+        t: "vfs.delete",
+        path: this.toVfsPath(rel, false),
+        recursive,
+      }),
+      `deleting ${rel}`,
+    );
+    return { ok: true };
+  }
+
+  async rename(fromRel: string, toRel: string): Promise<{ ok: true }> {
+    unwrap(
+      await this.vfs().vfs({
+        t: "vfs.rename",
+        from: this.toVfsPath(fromRel, false),
+        to: this.toVfsPath(toRel, false),
+      }),
+      `renaming ${fromRel}`,
+    );
+    return { ok: true };
+  }
+
+  /* --------------------- media streaming (suma-workspace://) --------------------- */
+
+  /** Size of a workspace file, or null when it is missing or not a file. */
+  async mediaSize(rel: string): Promise<number | null> {
+    const resp = await this.vfs().vfs({
+      t: "vfs.stat",
+      path: this.toVfsPath(rel),
+    });
+    if (resp.t !== "vfs.info" || resp.entry.kind !== "file") return null;
+    return resp.entry.sizeBytes;
+  }
+
+  /**
+   * One bounded slice of a workspace file, for the media protocol's paged
+   * streaming. `length` may exceed the vfs single-read cap by one page at
+   * most — callers page with `nextMediaPage`.
+   */
+  async mediaSlice(
+    rel: string,
+    offset: number,
+    length: number,
+  ): Promise<Buffer> {
+    return this.readSlice(this.toVfsPath(rel), offset, length, rel);
+  }
+
+  /* ------------------------------ internals ------------------------------ */
+
+  private vfs(): AgentLink {
+    if (this.link === null) throw new Error("workspace is not connected yet");
+    return this.link;
+  }
+
+  private scopedRoot(): string {
+    const scope = this.scope();
+    if (scope === "") return "/";
+    const normalized = normalizeVfsPath(scope);
+    if (normalized === null || normalized === "/") {
+      throw new Error(`workspace scope is invalid: ${scope}`);
+    }
+    return normalized;
+  }
+
+  /**
+   * Map a renderer-supplied relative path onto the vfs wire, under the
+   * scope. Same trust model as ever: absolute paths and escapes are refused
+   * with the messages the store already surfaces.
+   */
+  private toVfsPath(rel: string, allowWorkspaceRoot = true): string {
+    if (rel.startsWith("/")) throw new Error(`absolute path refused: ${rel}`);
+    const normalized = normalizeVfsPath(rel);
+    if (normalized === null) throw new Error(`path escapes workspace: ${rel}`);
+    if (!allowWorkspaceRoot && normalized === "/") {
+      throw new Error(`workspace root refused: ${rel}`);
+    }
+    const base = this.scopedRoot();
+    if (base === "/") return normalized;
+    return normalized === "/" ? base : `${base}${normalized}`;
+  }
+
+  /** Read exactly [offset, offset+length) in vfs-cap pages. */
+  private async readSlice(
+    wire: string,
+    offset: number,
+    length: number,
+    rel: string,
+  ): Promise<Buffer> {
+    if (length === 0) return Buffer.alloc(0);
+    const parts: Buffer[] = [];
+    let cursor = offset;
+    const end = offset + length;
+    while (cursor < end) {
+      const want = Math.min(VFS_MAX_READ_BYTES, end - cursor);
+      const resp = unwrap(
+        await this.vfs().vfs({
+          t: "vfs.read",
+          path: wire,
+          offset: cursor,
+          length: want,
+        }),
+        `reading ${rel}`,
+      );
+      if (resp.t !== "vfs.data")
+        throw new Error(`reading ${rel}: unexpected vfs answer`);
+      const bytes = Buffer.from(resp.dataB64, "base64");
+      parts.push(bytes);
+      cursor += bytes.byteLength;
+      if (resp.eof || bytes.byteLength === 0) break;
+    }
+    return Buffer.concat(parts);
   }
 }

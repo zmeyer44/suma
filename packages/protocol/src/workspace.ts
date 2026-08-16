@@ -157,6 +157,10 @@ export type WorkspaceSettingsField =
 /** Typed workspace document — the plaintext inside a sealed WorkspaceRecordWire. */
 export type WorkspaceDoc =
   | { kind: "space"; space: SpaceMeta }
+  /** The space's folder name in the shared filesystem (one folder per space
+   *  under the account's computer root). Synced so every device agrees on
+   *  the binding — a folder is derived from the name once, then looked up. */
+  | { kind: "spaceFolder"; spaceId: string; folder: string }
   | { kind: "pin"; pin: PinnedTab }
   | { kind: "tabPresence"; tab: SyncedTabPresence }
   | { kind: "tabUrl"; tab: SyncedTabUrl }
@@ -181,6 +185,8 @@ export function workspaceKeyFor(doc: WorkspaceDoc): string {
   switch (doc.kind) {
     case "space":
       return `space:${doc.space.id}`;
+    case "spaceFolder":
+      return `spaceFolder:${doc.spaceId}`;
     case "pin":
       return `pin:${doc.pin.id}`;
     case "tabPresence":

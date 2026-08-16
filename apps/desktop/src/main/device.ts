@@ -8,7 +8,14 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import {
   fromBase64,
@@ -32,6 +39,12 @@ export interface EnrollmentState {
   controlDeviceId: string | null;
   /** Dev bearer for control + hub — the signed-JWT stand-in. TODO(keychain). */
   authToken: string | null;
+  /** Where the account's computer lives. null = unknown (legacy record or
+   *  linked device pre-backfill) — treated as cloud until /v1/me answers. */
+  computeMode?: "cloud" | "local" | null;
+  /** Local mode only: whether this enrolled device owns the computer seat.
+   *  null on legacy records until /v1/machine confirms it once. */
+  isHomeMachine?: boolean | null;
 }
 
 interface DeviceFile {
@@ -61,6 +74,8 @@ const UNENROLLED: EnrollmentState = {
   credentialKind: null,
   controlDeviceId: null,
   authToken: null,
+  computeMode: null,
+  isHomeMachine: null,
 };
 
 export class DeviceStore {
@@ -75,13 +90,25 @@ export class DeviceStore {
     const filePath = path.join(userDataDir, "device.json");
     if (existsSync(filePath)) {
       const file = JSON.parse(readFileSync(filePath, "utf8")) as DeviceFile;
-      const privateKey = await crypto.subtle.importKey("jwk", file.privateKeyJwk, "Ed25519", true, [
-        "sign",
-      ]);
-      const publicKey = await crypto.subtle.importKey("jwk", file.publicKeyJwk, "Ed25519", true, [
-        "verify",
-      ]);
-      return new DeviceStore(filePath, file, { deviceId: file.deviceId, publicKey, privateKey });
+      const privateKey = await crypto.subtle.importKey(
+        "jwk",
+        file.privateKeyJwk,
+        "Ed25519",
+        true,
+        ["sign"],
+      );
+      const publicKey = await crypto.subtle.importKey(
+        "jwk",
+        file.publicKeyJwk,
+        "Ed25519",
+        true,
+        ["verify"],
+      );
+      return new DeviceStore(filePath, file, {
+        deviceId: file.deviceId,
+        publicKey,
+        privateKey,
+      });
     }
     const pair = await generateDeviceKeypair();
     const file: DeviceFile = {

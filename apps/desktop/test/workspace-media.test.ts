@@ -12,9 +12,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  nextMediaPage,
   parseWorkspaceMediaUrl,
   workspaceMediaUrl,
 } from "../src/main/workspace-media";
+import { SimAgent } from "../src/main/compute/sim-agent";
 import { WorkspaceFsService } from "../src/main/workspace-fs";
 import { sniffAudioMime } from "../src/main/workspace-sniff";
 
@@ -37,7 +39,7 @@ describe("workspaceMediaUrl / parseWorkspaceMediaUrl", () => {
     expect(parseWorkspaceMediaUrl("not a url")).toBeNull();
   });
 
-  it("returns the decoded path even when it escapes — resolve() refuses", () => {
+  it("returns the decoded path even when it escapes — the service refuses", async () => {
     // Parsing is not the guard; it hands the caller exactly what was asked for
     // so the root check is the single place that says no.
     const escape = parseWorkspaceMediaUrl(
@@ -45,8 +47,26 @@ describe("workspaceMediaUrl / parseWorkspaceMediaUrl", () => {
     );
     expect(escape).toBe("../../etc/passwd");
 
-    const service = new WorkspaceFsService("/tmp/some-workspace");
-    expect(() => service.resolve(escape ?? "")).toThrow(/escapes/);
+    const service = new WorkspaceFsService();
+    service.bind(new SimAgent({ root: () => "/tmp/some-workspace" }));
+    await expect(service.mediaSize(escape ?? "")).rejects.toThrow(/escapes/);
+  });
+});
+
+describe("nextMediaPage", () => {
+  it("pages a range in cap-sized slices with an exact final page", () => {
+    // [0, 9] in pages of 4 → 4, 4, 2, done.
+    expect(nextMediaPage(0, 9, 4)).toBe(4);
+    expect(nextMediaPage(4, 9, 4)).toBe(4);
+    expect(nextMediaPage(8, 9, 4)).toBe(2);
+    expect(nextMediaPage(10, 9, 4)).toBe(0);
+  });
+
+  it("handles a single-byte range and an exact page boundary", () => {
+    expect(nextMediaPage(5, 5, 4)).toBe(1);
+    // [0, 7] in pages of 4 ends exactly on the boundary.
+    expect(nextMediaPage(4, 7, 4)).toBe(4);
+    expect(nextMediaPage(8, 7, 4)).toBe(0);
   });
 });
 

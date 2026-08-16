@@ -191,6 +191,9 @@ export interface DownloadItemInfo {
   receivedBytes: number;
   totalBytes: number;
   startedAtMs: number;
+  /** Cloud mode: where the finished file was also mirrored on the account's
+   *  computer (a vfs wire path like "/Personal/Downloads/report.pdf"). */
+  cloudPath?: string;
 }
 
 export interface EnrollmentStatus {
@@ -208,6 +211,9 @@ export interface EnrollmentStatus {
   /** A WebAuthn or device-key credential is registered for login. */
   passkeyRegistered: boolean;
   credentialKind: "webauthn" | "device-key" | null;
+  /** Where the account's computer lives ("cloud" VM vs this Mac). null =
+   *  unknown (legacy/linked record awaiting /v1/me backfill) ⇒ treat as cloud. */
+  computeMode: "cloud" | "local" | null;
   /** Present ONLY in the response that first reveals it — shown once (§8.2). */
   recoveryCode?: string;
 }
@@ -762,6 +768,7 @@ export interface SumaInvokeMap {
       displayName?: string;
       controlUrl?: string;
       inviteCode?: string;
+      computeMode?: "cloud" | "local";
     };
     result: EnrollmentStatus;
   };
@@ -846,6 +853,15 @@ export interface SumaInvokeMap {
    *  undefined that the store's `call` helper returns on failure. */
   "workspace:writeFile": {
     args: { path: string; contents: string };
+    result: { ok: true };
+  };
+  "workspace:mkdir": { args: { path: string }; result: { ok: true } };
+  "workspace:delete": {
+    args: { path: string; recursive?: boolean };
+    result: { ok: true };
+  };
+  "workspace:rename": {
+    args: { from: string; to: string };
     result: { ok: true };
   };
 
@@ -1142,6 +1158,13 @@ export interface SumaEventMap {
   "terminal:data": { ptyId: string; data: string };
   "terminal:updated": TerminalInfo[];
   "ports:updated": PortForwardInfo[];
+  /** The machine behind the IDE's filesystem changed (sim⇄VM swap, reconnect,
+   *  active-space move) — the explorer refetches, stale buffers drop. */
+  "workspace:changed": {
+    source: "sim" | "remote";
+    connected: boolean;
+    activeSpaceId: string | null;
+  };
   /** Gateway health or per-space egress config changed (§8.4 fail-closed banner). */
   "egress:changed": EgressStatus;
   /** A site challenged us; offer a per-site bypass rather than acting silently. */
@@ -1339,6 +1362,9 @@ export const INVOKE_CHANNELS: ReadonlyArray<InvokeChannel> = [
   "workspace:tree",
   "workspace:readFile",
   "workspace:writeFile",
+  "workspace:mkdir",
+  "workspace:delete",
+  "workspace:rename",
   "egress:status",
   "egress:setPolicy",
   "egress:browseDirectForNow",
@@ -1428,6 +1454,7 @@ export const EVENT_CHANNELS: ReadonlyArray<EventChannel> = [
   "terminal:data",
   "terminal:updated",
   "ports:updated",
+  "workspace:changed",
   "egress:changed",
   "egress:bypassSuggested",
   "egress:checkoutBypassed",

@@ -18,13 +18,26 @@
  * process gone.
  */
 
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  execFile,
+  spawn,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
+import { mkdirSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
+import path from "node:path";
 import type { Duplex } from "node:stream";
-import type { AgentCtlRequest, AgentCtlResponse, ListeningPort } from "@suma/protocol";
+import type {
+  AgentCtlRequest,
+  AgentCtlResponse,
+  ListeningPort,
+  VfsRequest,
+  VfsResponse,
+} from "@suma/protocol";
 import type { IPty } from "node-pty";
 import type { AgentLink, PtyChannel } from "./agent-client";
+import { LocalVfs } from "./local-vfs";
 import { parseLsofListeners } from "./ports-state";
 
 type NodePtyModule = typeof import("node-pty");
@@ -72,15 +85,69 @@ function isLive(pty: SimPty): boolean {
   return !pty.exited && (pty.tty !== null || pty.child !== null);
 }
 
+export interface SimAgentOptions {
+  /**
+   * Where the simulated machine's shared filesystem lives — the sim's
+   * `~/cloud`. A provider rather than a value: compute mode is chosen
+   * mid-session during onboarding, and the next vfs call (or shell spawn)
+   * must land at the newly chosen root without a restart.
+   */
+  root?: () => string;
+  /** False when a local-mode account's computer seat belongs to another Mac. */
+  available?: () => boolean;
+}
+
+/** The sim's default shared root — the local-mode product folder. */
+export function defaultSimRoot(): string {
+  return path.join(os.homedir(), "Suma");
+}
+
 export class SimAgent implements AgentLink {
   readonly kind = "simulated" as const;
 
   private readonly ptys = new Map<string, SimPty>();
-  private readonly ctlEventListeners = new Set<(event: AgentCtlResponse) => void>();
+  private readonly ctlEventListeners = new Set<
+    (event: AgentCtlResponse) => void
+  >();
   private stopped = false;
+  private readonly rootProvider: () => string;
+  private readonly availabilityProvider: () => boolean;
+  private localVfs: LocalVfs | null = null;
+
+  constructor(options: SimAgentOptions = {}) {
+    this.rootProvider = options.root ?? defaultSimRoot;
+    this.availabilityProvider = options.available ?? (() => true);
+  }
 
   connected(): boolean {
-    return true; // in-process — there is no link to lose
+    return !this.stopped && this.availabilityProvider();
+  }
+
+  async vfs(request: VfsRequest): Promise<VfsResponse> {
+    this.requireAvailable();
+    return this.vfsFor(this.currentRoot()).handle(request);
+  }
+
+  vfsRootLabel(): string {
+    return this.currentRoot();
+  }
+
+  /** The provider is re-read per call so a mode change lands immediately. */
+  private currentRoot(): string {
+    const root = this.rootProvider();
+    try {
+      mkdirSync(root, { recursive: true });
+    } catch {
+      // Surfaces as an honest vfs/spawn error below instead of a crash here.
+    }
+    return root;
+  }
+
+  private vfsFor(root: string): LocalVfs {
+    if (this.localVfs === null || this.localVfs.rootDir() !== root) {
+      this.localVfs = new LocalVfs(root);
+    }
+    return this.localVfs;
   }
 
   onConnectionChanged(): () => void {
@@ -93,13 +160,24 @@ export class SimAgent implements AgentLink {
   }
 
   async ctl(request: AgentCtlRequest): Promise<AgentCtlResponse | null> {
+    this.requireAvailable();
     switch (request.t) {
       case "pty.spawn":
-        return this.spawnPty(request.ptyId, request.cwd, request.cols, request.rows, request.env);
+        return this.spawnPty(
+          request.ptyId,
+          request.cwd,
+          request.cols,
+          request.rows,
+          request.env,
+        );
       case "pty.attach": {
         const pty = this.ptys.get(request.ptyId);
         if (pty === undefined) {
-          return { t: "error", code: "not_found", message: `no pty ${request.ptyId}` };
+          return {
+            t: "error",
+            code: "not_found",
+            message: `no pty ${request.ptyId}`,
+          };
         }
         // Replay the retained scrollback through the pty channel — after this
         // response settles, so the caller can reset its display first.
@@ -129,7 +207,11 @@ export class SimAgent implements AgentLink {
       case "pty.kill": {
         const pty = this.ptys.get(request.ptyId);
         const signal =
-          request.signal === "KILL" ? "SIGKILL" : request.signal === "INT" ? "SIGINT" : "SIGTERM";
+          request.signal === "KILL"
+            ? "SIGKILL"
+            : request.signal === "INT"
+              ? "SIGINT"
+              : "SIGTERM";
         try {
           pty?.tty?.kill(signal);
         } catch {
@@ -141,7 +223,11 @@ export class SimAgent implements AgentLink {
       case "job.set": {
         const pty = this.ptys.get(request.ptyId);
         if (pty === undefined) {
-          return { t: "error", code: "not_found", message: `no pty ${request.ptyId}` };
+          return {
+            t: "error",
+            code: "not_found",
+            message: `no pty ${request.ptyId}`,
+          };
         }
         pty.jobMode = request.enabled;
         return { t: "job.ack", ptyId: pty.ptyId, enabled: request.enabled };
@@ -173,6 +259,9 @@ export class SimAgent implements AgentLink {
   }
 
   openPty(ptyId: string, onData: (data: Buffer) => void): PtyChannel {
+    if (!this.connected()) {
+      return { write: () => undefined, close: () => undefined };
+    }
     const pty = this.ptys.get(ptyId);
     if (pty === undefined) {
       return { write: () => undefined, close: () => undefined };
@@ -185,6 +274,12 @@ export class SimAgent implements AgentLink {
   }
 
   forward(port: number, local: Duplex): void {
+    if (!this.connected()) {
+      local.destroy(
+        new Error("this account's computer belongs to another Mac"),
+      );
+      return;
+    }
     // The simulated "VM" is this Mac, so fwd/<port> is a loopback pipe.
     const socket = net.connect(port, "127.0.0.1");
     socket.pipe(local);
@@ -213,6 +308,12 @@ export class SimAgent implements AgentLink {
 
   /* ------------------------------ internals ------------------------------ */
 
+  private requireAvailable(): void {
+    if (!this.connected()) {
+      throw new Error("this account's computer belongs to another Mac");
+    }
+  }
+
   private async spawnPty(
     ptyId: string,
     cwd: string | undefined,
@@ -221,10 +322,16 @@ export class SimAgent implements AgentLink {
     env?: Record<string, string>,
   ): Promise<AgentCtlResponse> {
     if (this.ptys.has(ptyId)) {
-      return { t: "error", code: "exists", message: `pty ${ptyId} already exists` };
+      return {
+        t: "error",
+        code: "exists",
+        message: `pty ${ptyId} already exists`,
+      };
     }
     const shell = process.env["SHELL"] ?? "/bin/sh";
-    const dir = cwd ?? os.homedir();
+    // Shells land in the shared root by default — the same tree the explorer
+    // shows — mirroring the Rust agent's `$HOME/cloud` default.
+    const dir = cwd ?? this.currentRoot();
     const pty: SimPty = {
       ptyId,
       tty: null,
@@ -304,7 +411,10 @@ export class SimAgent implements AgentLink {
     // A write racing the shell's exit must not take the app down with EPIPE.
     child.stdin.on("error", () => undefined);
     child.on("error", (err) => {
-      this.emitOutput(pty, Buffer.from(`\r\n[suma sim] shell failed: ${err.message}\r\n`));
+      this.emitOutput(
+        pty,
+        Buffer.from(`\r\n[suma sim] shell failed: ${err.message}\r\n`),
+      );
     });
     child.on("exit", (code) => this.onShellExit(pty, code));
     return { t: "pty.spawned", ptyId: pty.ptyId };
@@ -318,9 +428,15 @@ export class SimAgent implements AgentLink {
     if (!this.stopped) {
       this.emitOutput(
         pty,
-        Buffer.from(`\r\n[process exited${code === null ? "" : ` (${code})`}]\r\n`),
+        Buffer.from(
+          `\r\n[process exited${code === null ? "" : ` (${code})`}]\r\n`,
+        ),
       );
-      const event: AgentCtlResponse = { t: "pty.exited", ptyId: pty.ptyId, code: code ?? -1 };
+      const event: AgentCtlResponse = {
+        t: "pty.exited",
+        ptyId: pty.ptyId,
+        code: code ?? -1,
+      };
       for (const listener of this.ctlEventListeners) listener(event);
     }
   }
@@ -378,7 +494,11 @@ export class SimAgent implements AgentLink {
         { timeout: LSOF_TIMEOUT_MS },
         (err, stdout) => {
           // lsof exits 1 when nothing matches; any failure just means "no ports".
-          resolve(err !== null && stdout.length === 0 ? [] : parseLsofListeners(stdout));
+          resolve(
+            err !== null && stdout.length === 0
+              ? []
+              : parseLsofListeners(stdout),
+          );
         },
       );
     });

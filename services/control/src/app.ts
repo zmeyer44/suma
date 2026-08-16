@@ -225,6 +225,9 @@ const signupSchema = z.object({
   homeRegion: z.string().min(2).max(16).optional(),
   /** Required in deployments where the invite gate is on (§11). */
   inviteCode: z.string().min(1).max(128).optional(),
+  /** "cloud" (default) provisions a VM; "local" records that the user
+   *  dedicated their first Mac as the computer — no VM is created. */
+  computeMode: z.enum(["cloud", "local"]).optional(),
 });
 
 const mintInvitesSchema = z.object({
@@ -1043,6 +1046,7 @@ export function createApp(
       }
     };
 
+    const computeMode = body.computeMode ?? "cloud";
     const [user] = await db
       .insert(users)
       .values({
@@ -1050,6 +1054,7 @@ export function createApp(
         displayName: body.displayName ?? null,
         homeRegion: body.homeRegion ?? "iad",
         features: [...DEFAULT_ACCOUNT_FEATURES],
+        computeMode,
       })
       .returning();
     if (!user) {
@@ -1075,34 +1080,41 @@ export function createApp(
       })
       .returning();
 
-    const [machine] = await db
-      .insert(machines)
-      .values({
-        userId: user.id,
-        state: "provisioning",
-        region: user.homeRegion,
-        cpuKind: DEFAULT_MACHINE_SPEC.cpuKind,
-        cpus: DEFAULT_MACHINE_SPEC.cpus,
-        memoryMb: DEFAULT_MACHINE_SPEC.memoryMb,
-      })
-      .returning();
-    if (!space || !machine) return c.json({ error: "internal" }, 500);
-
-    const provisioned = await sandbox.provision({
-      userId: user.id,
-      machineId: machine.id,
-      region: machine.region,
-      spec: DEFAULT_MACHINE_SPEC,
-    });
-    if (provisioned.agentAddress !== null) {
-      const [addressed] = await db
-        .update(machines)
-        .set({ agentAddress: provisioned.agentAddress })
-        .where(eq(machines.id, machine.id))
+    // Local mode: the user's first Mac IS the computer — no machines row,
+    // nothing to provision. The home device is recorded at enrollment.
+    let machine = null;
+    if (computeMode === "cloud") {
+      const [inserted] = await db
+        .insert(machines)
+        .values({
+          userId: user.id,
+          state: "provisioning",
+          region: user.homeRegion,
+          cpuKind: DEFAULT_MACHINE_SPEC.cpuKind,
+          cpus: DEFAULT_MACHINE_SPEC.cpus,
+          memoryMb: DEFAULT_MACHINE_SPEC.memoryMb,
+        })
         .returning();
-      if (addressed) Object.assign(machine, addressed);
+      if (!inserted) return c.json({ error: "internal" }, 500);
+      machine = inserted;
+
+      const provisioned = await sandbox.provision({
+        userId: user.id,
+        machineId: machine.id,
+        region: machine.region,
+        spec: DEFAULT_MACHINE_SPEC,
+      });
+      if (provisioned.agentAddress !== null) {
+        const [addressed] = await db
+          .update(machines)
+          .set({ agentAddress: provisioned.agentAddress })
+          .where(eq(machines.id, machine.id))
+          .returning();
+        if (addressed) Object.assign(machine, addressed);
+      }
     }
-    await audit(user.id, "account.created", { email: user.email });
+    if (!space) return c.json({ error: "internal" }, 500);
+    await audit(user.id, "account.created", { email: user.email, computeMode });
 
     // Signed bootstrap token (did = sub): unforgeable from a known userId,
     // lets the first device enroll before it has a device credential. The
@@ -1302,6 +1314,25 @@ export function createApp(
       })
       .returning();
     if (!device) return c.json({ error: "internal" }, 500);
+    // Local compute mode: the first enrolled device becomes the home
+    // machine. The isNull guard makes it first-wins — a racing second
+    // enroll cannot steal the seat.
+    let isHomeMachine = false;
+    const [claimed] = await db
+      .update(users)
+      .set({ homeDeviceId: device.id })
+      .where(
+        and(
+          eq(users.id, userId),
+          eq(users.computeMode, "local"),
+          isNull(users.homeDeviceId),
+        ),
+      )
+      .returning({ id: users.id });
+    if (claimed) {
+      isHomeMachine = true;
+      await audit(userId, "device.homeMachine", { deviceId: device.id }, device.id);
+    }
     await audit(
       userId,
       "device.enrolled",
@@ -1309,7 +1340,10 @@ export function createApp(
       device.id,
     );
     // Device-bound token: dies with the device on revocation (see auth.ts).
-    return c.json({ device, hubToken: hubTokenFor(userId, device.id) }, 201);
+    return c.json(
+      { device, hubToken: hubTokenFor(userId, device.id), isHomeMachine },
+      201,
+    );
   });
 
   v1.get("/devices", async (c) => {
@@ -1617,14 +1651,34 @@ export function createApp(
       .select()
       .from(machines)
       .where(eq(machines.userId, userId));
-    if (!machine) return c.json({ error: "not_found" }, 404);
+    if (!machine) {
+      // Local mode has no machines row by design — answer 200 with the mode
+      // so the desktop can tell "your Mac is the computer" from "control
+      // plane down" (a real 404 stays a cloud-mode bug signal).
+      const [user] = await db
+        .select({
+          computeMode: users.computeMode,
+          homeDeviceId: users.homeDeviceId,
+        })
+        .from(users)
+        .where(eq(users.id, userId));
+      if (user && user.computeMode === "local") {
+        return c.json({
+          mode: "local",
+          machine: null,
+          events: [],
+          homeDeviceId: user.homeDeviceId,
+        });
+      }
+      return c.json({ error: "not_found" }, 404);
+    }
     const events = await db
       .select()
       .from(machineEvents)
       .where(eq(machineEvents.machineId, machine.id))
       .orderBy(desc(machineEvents.createdAt))
       .limit(20);
-    return c.json({ machine, events });
+    return c.json({ mode: "cloud", machine, events });
   });
 
   v1.post(

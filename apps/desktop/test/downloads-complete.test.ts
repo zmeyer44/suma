@@ -82,7 +82,7 @@ function harness(): Harness {
   const manager = new DownloadManager({
     store,
     emit: () => undefined,
-    downloadsDir: () => "/tmp/suma-test-downloads",
+    downloadsDirFor: () => "/tmp/suma-test-downloads",
     onCompleted: (item) => completed.push(item),
   });
 

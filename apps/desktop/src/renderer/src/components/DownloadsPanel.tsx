@@ -14,7 +14,14 @@ function stateLabel(item: DownloadItemInfo, movedToCloud: boolean): { text: stri
     case "progressing":
       return { text: downloadProgress(item.receivedBytes, item.totalBytes).label, className: "text-muted" };
     case "completed":
-      return { text: formatBytes(item.receivedBytes), className: "text-faint" };
+      // cloudPath = the finished file was also mirrored onto the account's
+      // computer (cloud mode) — the one detail worth a word here.
+      return item.cloudPath !== undefined
+        ? {
+            text: `${formatBytes(item.receivedBytes)} · also on your computer`,
+            className: "text-faint",
+          }
+        : { text: formatBytes(item.receivedBytes), className: "text-faint" };
     case "cancelled":
       // The local download was stopped because the cloud is fetching it — say
       // that, rather than leaving a bare "Cancelled" the user did not do.

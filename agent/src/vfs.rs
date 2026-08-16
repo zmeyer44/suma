@@ -1,13 +1,11 @@
-//! The `vfs` channel (PRD Appendix C, §8.6) — list/stat/read/write/delete/
-//! mkdir under capability tokens, rooted at `~/cloud`.
+//! The `vfs` channel (PRD Appendix C, §8.6) — list/stat/read/write/append/
+//! delete/mkdir/tree/rename under capability tokens, rooted at `~/cloud`.
 //!
-//! Request shapes mirror `vfsRequestSchema` in `packages/protocol/src/files.ts`
-//! field for field. The response shapes have no TS counterpart yet: files.ts
-//! defines only the request union, so this module is the one place in the
-//! agent that *leads* the protocol package instead of following it. Names were
-//! chosen to match the ctl convention (a past-tense or noun answer, never the
-//! request's own `t`), and the TS module should mirror them when it grows a
-//! response schema.
+//! Request and response shapes mirror `vfsRequestSchema`/`vfsResponseSchema`
+//! in `packages/protocol/src/files.ts` field for field. This module leads the
+//! protocol package: a wire change lands here first and in files.ts in the
+//! same commit. Names match the ctl convention (a past-tense or noun answer,
+//! never the request's own `t`).
 //!
 //! Two things this module refuses, and why:
 //!
@@ -38,6 +36,12 @@
 //! second one that has to be remembered.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -61,6 +65,33 @@ pub const VFS_MAX_WRITE_BYTES: usize = 8 * 1024 * 1024;
 /// `truncated: true` rather than an oversized frame or a silent short list.
 pub const VFS_MAX_LIST_ENTRIES: usize = 5_000;
 
+/// Paths returned by one `vfs.tree`, and how deep the walk goes. These mirror
+/// the desktop IDE's old local-walk caps (`WorkspaceFsService`), which the
+/// explorer's tree was designed around.
+pub const VFS_MAX_TREE_ENTRIES: usize = 10_000;
+pub const VFS_MAX_TREE_DEPTH: usize = 12;
+
+/// Directories a `vfs.tree` walk does not descend into, and files it omits.
+/// Keep in step with `VFS_TREE_SKIPPED_DIRS`/`VFS_TREE_SKIPPED_FILES` in
+/// packages/protocol/src/files.ts and the sim's local-vfs.ts.
+pub const VFS_TREE_SKIPPED_DIRS: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    ".pnpm-store",
+    ".npm",
+    ".cache",
+    ".cargo",
+    ".rustup",
+    ".Trash",
+    "Library",
+];
+pub const VFS_TREE_SKIPPED_FILES: &[&str] = &[".DS_Store"];
+
+/** Keeps the no-overwrite check atomic on platforms without renameat2. */
+static VFS_RENAME_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
 /* ------------------------------------------------------------------ *
  * Wire shapes
  * ------------------------------------------------------------------ */
@@ -81,10 +112,20 @@ pub enum VfsRequest {
     },
     #[serde(rename = "vfs.write", rename_all = "camelCase")]
     Write { path: String, data_b64: String },
+    #[serde(rename = "vfs.append", rename_all = "camelCase")]
+    Append { path: String, data_b64: String },
     #[serde(rename = "vfs.delete")]
-    Delete { path: String },
+    Delete {
+        path: String,
+        #[serde(default)]
+        recursive: bool,
+    },
     #[serde(rename = "vfs.mkdir")]
     Mkdir { path: String },
+    #[serde(rename = "vfs.tree")]
+    Tree { path: String },
+    #[serde(rename = "vfs.rename")]
+    Rename { from: String, to: String },
 }
 
 impl VfsRequest {
@@ -94,8 +135,12 @@ impl VfsRequest {
             | VfsRequest::Stat { path }
             | VfsRequest::Read { path, .. }
             | VfsRequest::Write { path, .. }
-            | VfsRequest::Delete { path }
-            | VfsRequest::Mkdir { path } => path,
+            | VfsRequest::Append { path, .. }
+            | VfsRequest::Delete { path, .. }
+            | VfsRequest::Mkdir { path }
+            | VfsRequest::Tree { path } => path,
+            // The destination is resolved separately in `handle`.
+            VfsRequest::Rename { from, .. } => from,
         }
     }
 
@@ -113,6 +158,12 @@ impl VfsRequest {
                     return Err(format!(
                         "length must be at most {VFS_MAX_READ_BYTES} bytes: a larger read cannot fit one mux frame once base64-encoded"
                     ));
+                }
+                Ok(())
+            }
+            VfsRequest::Rename { to, .. } => {
+                if to.len() > 4096 {
+                    return Err("to must be at most 4096 chars".to_string());
                 }
                 Ok(())
             }
@@ -173,6 +224,17 @@ pub enum VfsResponse {
     Deleted { path: String },
     #[serde(rename = "vfs.created")]
     Created { path: String },
+    #[serde(rename = "vfs.renamed")]
+    Renamed { from: String, to: String },
+    #[serde(rename = "vfs.paths")]
+    Paths {
+        path: String,
+        /// Every file under `path`, rooted, sorted; a directory that
+        /// contributed nothing appears as `"{path}/"` so empty dirs survive.
+        paths: Vec<String>,
+        /// The walk hit `VFS_MAX_TREE_ENTRIES` or `VFS_MAX_TREE_DEPTH`.
+        truncated: bool,
+    },
     #[serde(rename = "error")]
     Error { code: String, message: String },
 }
@@ -318,12 +380,15 @@ impl VfsRoot {
 /// covers the ctl channel only — the `vfs` channel has no TS table to mirror.
 pub fn required_capability(request: &VfsRequest) -> Capability {
     match request {
-        VfsRequest::List { .. } | VfsRequest::Stat { .. } | VfsRequest::Read { .. } => {
-            Capability::FsRead
-        }
-        VfsRequest::Write { .. } | VfsRequest::Delete { .. } | VfsRequest::Mkdir { .. } => {
-            Capability::FsWrite
-        }
+        VfsRequest::List { .. }
+        | VfsRequest::Stat { .. }
+        | VfsRequest::Read { .. }
+        | VfsRequest::Tree { .. } => Capability::FsRead,
+        VfsRequest::Write { .. }
+        | VfsRequest::Append { .. }
+        | VfsRequest::Delete { .. }
+        | VfsRequest::Mkdir { .. }
+        | VfsRequest::Rename { .. } => Capability::FsWrite,
     }
 }
 
@@ -375,8 +440,11 @@ pub async fn handle(
         VfsRequest::Stat { .. } => stat(&path, &target).await,
         VfsRequest::Read { offset, length, .. } => read(&path, &target, offset, length).await,
         VfsRequest::Write { data_b64, .. } => write(&path, &target, &data_b64).await,
-        VfsRequest::Delete { .. } => delete(root, &path, &target).await,
+        VfsRequest::Append { data_b64, .. } => append(&path, &target, &data_b64).await,
+        VfsRequest::Delete { recursive, .. } => delete(root, &path, &target, recursive).await,
         VfsRequest::Mkdir { .. } => mkdir(&path, &target).await,
+        VfsRequest::Tree { .. } => tree(&path, &target).await,
+        VfsRequest::Rename { to, .. } => rename(root, &path, &target, &to).await,
     }
 }
 
@@ -584,7 +652,7 @@ async fn write(path: &str, target: &Path, data_b64: &str) -> VfsResponse {
     }
 }
 
-async fn delete(root: &VfsRoot, path: &str, target: &Path) -> VfsResponse {
+async fn delete(root: &VfsRoot, path: &str, target: &Path, recursive: bool) -> VfsResponse {
     if target == root.path() {
         return error("vfs_path_refused", "the Files root cannot be deleted");
     }
@@ -593,9 +661,15 @@ async fn delete(root: &VfsRoot, path: &str, target: &Path) -> VfsResponse {
         Err(err) => return io_error(&format!("deleting {path}"), err),
     };
     let result = if metadata.is_dir() {
-        // Non-recursive on purpose: one message must not be able to erase a
-        // subtree. The caller deletes what it can see, entry by entry.
-        tokio::fs::remove_dir(target).await
+        if recursive {
+            // Erasing a subtree takes an explicit flag plus `fs.write`; a bare
+            // delete still cannot do it, and the root is refused above.
+            tokio::fs::remove_dir_all(target).await
+        } else {
+            // Non-recursive on purpose: one message must not be able to erase
+            // a subtree. The caller deletes what it can see, entry by entry.
+            tokio::fs::remove_dir(target).await
+        }
     } else {
         tokio::fs::remove_file(target).await
     };
@@ -620,6 +694,217 @@ async fn mkdir(path: &str, target: &Path) -> VfsResponse {
             path: path.to_string(),
         },
         Err(err) => io_error(&format!("creating {path}"), err),
+    }
+}
+
+async fn append(path: &str, target: &Path, data_b64: &str) -> VfsResponse {
+    if data_b64.len() / 4 * 3 > VFS_MAX_WRITE_BYTES {
+        return error(
+            "vfs_too_large",
+            format!("a single append is limited to {VFS_MAX_WRITE_BYTES} bytes"),
+        );
+    }
+    let bytes = match b64::decode(data_b64) {
+        Ok(bytes) => bytes,
+        Err(reason) => {
+            return error(
+                "invalid_request",
+                format!("dataB64 is not base64: {reason}"),
+            )
+        }
+    };
+    if bytes.len() > VFS_MAX_WRITE_BYTES {
+        return error(
+            "vfs_too_large",
+            format!("a single append is limited to {VFS_MAX_WRITE_BYTES} bytes"),
+        );
+    }
+    // Append extends a file that already exists — creating one is `vfs.write`'s
+    // job, so a typo'd path fails loudly instead of starting a stray file.
+    let metadata = match tokio::fs::symlink_metadata(target).await {
+        Ok(metadata) => metadata,
+        Err(err) => return io_error(&format!("appending to {path}"), err),
+    };
+    if metadata.is_dir() {
+        return error("vfs_is_a_directory", format!("{path} is a directory"));
+    }
+    let mut file = match tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(target)
+        .await
+    {
+        Ok(file) => file,
+        Err(err) => return io_error(&format!("appending to {path}"), err),
+    };
+    let appended = async {
+        file.write_all(&bytes).await?;
+        file.flush().await
+    }
+    .await;
+    if let Err(err) = appended {
+        return io_error(&format!("appending to {path}"), err);
+    }
+    VfsResponse::Wrote {
+        path: path.to_string(),
+        size_bytes: metadata.len() + bytes.len() as u64,
+    }
+}
+
+async fn tree(path: &str, target: &Path) -> VfsResponse {
+    match tokio::fs::symlink_metadata(target).await {
+        Ok(metadata) if !metadata.is_dir() => {
+            return error("vfs_io_failed", format!("{path} is not a directory"))
+        }
+        Ok(_) => {}
+        Err(err) => return io_error(&format!("walking {path}"), err),
+    }
+    let mut paths: Vec<String> = Vec::new();
+    let mut truncated = false;
+    // Iterative DFS; depth counts from the requested path. Unreadable
+    // directories are skipped, not fatal — the tree stays honest about what it
+    // could see without one bad directory hiding the rest.
+    let mut stack: Vec<(PathBuf, String, usize)> =
+        vec![(target.to_path_buf(), path.to_string(), 0)];
+    while let Some((dir, dir_rel, depth)) = stack.pop() {
+        if paths.len() >= VFS_MAX_TREE_ENTRIES {
+            truncated = true;
+            break;
+        }
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+            continue;
+        };
+        let mut contributed = false;
+        while let Ok(Some(next)) = entries.next_entry().await {
+            if paths.len() >= VFS_MAX_TREE_ENTRIES {
+                truncated = true;
+                break;
+            }
+            // Does not follow links: a link out of the root never enters the
+            // walk, matching list()'s treatment of `other` kinds.
+            let Ok(file_type) = next.file_type().await else {
+                continue;
+            };
+            let name = next.file_name().to_string_lossy().into_owned();
+            if file_type.is_dir() {
+                if VFS_TREE_SKIPPED_DIRS.contains(&name.as_str()) {
+                    continue;
+                }
+                if depth + 1 > VFS_MAX_TREE_DEPTH {
+                    truncated = true;
+                    continue;
+                }
+                stack.push((next.path(), join_path(&dir_rel, &name), depth + 1));
+                contributed = true;
+            } else if file_type.is_file() {
+                if VFS_TREE_SKIPPED_FILES.contains(&name.as_str()) {
+                    continue;
+                }
+                paths.push(join_path(&dir_rel, &name));
+                contributed = true;
+            }
+            // Symlinks/sockets/devices are omitted entirely.
+        }
+        if !contributed && !truncated && dir_rel != *path {
+            // A directory that contributed nothing survives as an empty-dir row.
+            paths.push(format!("{dir_rel}/"));
+        }
+    }
+    paths.sort();
+    VfsResponse::Paths {
+        path: path.to_string(),
+        paths,
+        truncated,
+    }
+}
+
+async fn rename(root: &VfsRoot, from: &str, from_target: &Path, to: &str) -> VfsResponse {
+    let (to_path, to_target) = match root.resolve_within(to) {
+        Ok(resolved) => resolved,
+        Err(reason) => return error("vfs_path_refused", reason),
+    };
+    if from_target == root.path() {
+        return error("vfs_path_refused", "the Files root cannot be renamed");
+    }
+    if to_path == "/" {
+        return error(
+            "vfs_path_refused",
+            format!("{CLOUD_ROOT} is a directory, not a destination"),
+        );
+    }
+    // `rename(2)` replaces an existing destination. Serialize the fallback
+    // check+rename path, and on Linux additionally ask the kernel for an
+    // atomic no-replace operation so another process cannot win the race.
+    let _rename_guard = VFS_RENAME_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    if tokio::fs::symlink_metadata(from_target).await.is_err() {
+        return error("vfs_not_found", format!("{from}: no such path"));
+    }
+    // Never overwrite: rename is not a delete in disguise. The caller deletes
+    // the destination first if replacing is what it means.
+    if tokio::fs::symlink_metadata(&to_target).await.is_ok() {
+        return error(
+            "vfs_already_exists",
+            format!("{to_path} already exists: rename must not overwrite"),
+        );
+    }
+    let Some(parent) = to_target.parent() else {
+        return error("vfs_path_refused", "destination has no parent directory");
+    };
+    if !parent.is_dir() {
+        return error(
+            "vfs_not_found",
+            format!("{to_path}: parent directory does not exist (use vfs.mkdir first)"),
+        );
+    }
+    #[cfg(target_os = "linux")]
+    let rename_result = rename_no_replace(from_target, &to_target);
+    #[cfg(not(target_os = "linux"))]
+    let rename_result = tokio::fs::rename(from_target, &to_target).await;
+
+    match rename_result {
+        Ok(()) => VfsResponse::Renamed {
+            from: from.to_string(),
+            to: to_path,
+        },
+        Err(err)
+            if err.kind() == std::io::ErrorKind::AlreadyExists
+                || err.raw_os_error() == Some(libc::EEXIST)
+                || err.raw_os_error() == Some(libc::ENOTEMPTY) =>
+        {
+            error(
+                "vfs_already_exists",
+                format!("{to_path} already exists: rename must not overwrite"),
+            )
+        }
+        Err(err) => io_error(&format!("renaming {from}"), err),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let from = CString::new(from.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "source contains NUL")
+    })?;
+    let to = CString::new(to.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination contains NUL")
+    })?;
+    // SAFETY: both C strings are owned for the duration of the syscall and
+    // are NUL-terminated; AT_FDCWD makes their absolute paths self-contained.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }
 
@@ -973,7 +1258,7 @@ mod tests {
             &c,
             VfsRequest::Read {
                 path: "/notes/2026/a.txt".into(),
-                offset: 7,
+                offset: 5,
                 length: 5,
             },
         )
@@ -987,7 +1272,7 @@ mod tests {
             } => {
                 assert_eq!(b64::decode(&data_b64).unwrap(), b"files");
                 assert!(!eof);
-                assert_eq!(offset, 7);
+                assert_eq!(offset, 5);
             }
             other => panic!("expected data, got {other:?}"),
         }
@@ -1032,6 +1317,7 @@ mod tests {
             &c,
             VfsRequest::Delete {
                 path: "/notes".into(),
+                recursive: false,
             },
         )
         .await;
@@ -1045,7 +1331,8 @@ mod tests {
                 &root,
                 &c,
                 VfsRequest::Delete {
-                    path: "/notes/2026/a.txt".into()
+                    path: "/notes/2026/a.txt".into(),
+                    recursive: false,
                 }
             )
             .await,
@@ -1081,6 +1368,7 @@ mod tests {
             },
             VfsRequest::Delete {
                 path: "/x.txt".into(),
+                recursive: false,
             },
             VfsRequest::Mkdir { path: "/x".into() },
         ] {
@@ -1270,6 +1558,477 @@ mod tests {
         assert_eq!(json["eof"], true);
 
         std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tree_walks_skips_and_truncates() {
+        let root = temp_root("tree");
+        let base = root.path().to_path_buf();
+        std::fs::create_dir_all(base.join("src/lib")).unwrap();
+        std::fs::create_dir_all(base.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(base.join(".git/objects")).unwrap();
+        std::fs::create_dir_all(base.join("empty")).unwrap();
+        std::fs::write(base.join("src/main.ts"), "x").unwrap();
+        std::fs::write(base.join("src/lib/util.ts"), "x").unwrap();
+        std::fs::write(base.join("node_modules/pkg/index.js"), "x").unwrap();
+        std::fs::write(base.join(".DS_Store"), "x").unwrap();
+        std::fs::write(base.join("README.md"), "x").unwrap();
+        std::os::unix::fs::symlink("/etc", base.join("outside")).unwrap();
+
+        let resp = run(&root, &both(), VfsRequest::Tree { path: "/".into() }).await;
+        match resp {
+            VfsResponse::Paths {
+                path,
+                paths,
+                truncated,
+            } => {
+                assert_eq!(path, "/");
+                assert!(!truncated);
+                // Sorted, rooted, skip-listed dirs and files gone, symlink
+                // omitted, empty dir kept as a trailing-slash row.
+                assert_eq!(
+                    paths,
+                    vec![
+                        "/README.md".to_string(),
+                        "/empty/".to_string(),
+                        "/src/lib/util.ts".to_string(),
+                        "/src/main.ts".to_string(),
+                    ]
+                );
+            }
+            other => panic!("expected paths, got {other:?}"),
+        }
+
+        // A subtree request roots its paths at the requested directory's
+        // normalized form, not at "/".
+        let resp = run(
+            &root,
+            &both(),
+            VfsRequest::Tree {
+                path: "/src".into(),
+            },
+        )
+        .await;
+        match resp {
+            VfsResponse::Paths { paths, .. } => {
+                assert_eq!(
+                    paths,
+                    vec!["/src/lib/util.ts".to_string(), "/src/main.ts".to_string()]
+                );
+            }
+            other => panic!("expected paths, got {other:?}"),
+        }
+
+        // Depth is bounded: a chain deeper than VFS_MAX_TREE_DEPTH reports
+        // truncated instead of walking forever.
+        let mut deep = base.clone();
+        for i in 0..(VFS_MAX_TREE_DEPTH + 2) {
+            deep = deep.join(format!("d{i}"));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("bottom.txt"), "x").unwrap();
+        let resp = run(&root, &both(), VfsRequest::Tree { path: "/".into() }).await;
+        match resp {
+            VfsResponse::Paths {
+                paths, truncated, ..
+            } => {
+                assert!(truncated);
+                assert!(!paths.iter().any(|p| p.ends_with("bottom.txt")));
+            }
+            other => panic!("expected paths, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tree_is_read_gated_and_confined() {
+        let root = temp_root("tree-gate");
+        let write_only = claims(vec![Capability::FsWrite]);
+        let resp = run(&root, &write_only, VfsRequest::Tree { path: "/".into() }).await;
+        assert_eq!(
+            resp,
+            error("capability_denied", "capability fs.read not granted")
+        );
+
+        let resp = run(
+            &root,
+            &both(),
+            VfsRequest::Tree {
+                path: "/../".into(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(&resp, VfsResponse::Error { code, .. } if code == "vfs_path_refused"),
+            "{resp:?}"
+        );
+
+        // A file is not a walkable tree.
+        std::fs::write(root.path().join("f.txt"), "x").unwrap();
+        let resp = run(
+            &root,
+            &both(),
+            VfsRequest::Tree {
+                path: "/f.txt".into(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(&resp, VfsResponse::Error { code, .. } if code == "vfs_io_failed"),
+            "{resp:?}"
+        );
+
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rename_round_trip_and_refusals() {
+        let root = temp_root("rename");
+        let c = both();
+        std::fs::create_dir_all(root.path().join("dir")).unwrap();
+        std::fs::write(root.path().join("a.txt"), "hello").unwrap();
+        std::fs::write(root.path().join("b.txt"), "other").unwrap();
+
+        // File rename round-trips; the old path is gone.
+        let resp = run(
+            &root,
+            &c,
+            VfsRequest::Rename {
+                from: "/a.txt".into(),
+                to: "/dir/a2.txt".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            resp,
+            VfsResponse::Renamed {
+                from: "/a.txt".into(),
+                to: "/dir/a2.txt".into()
+            }
+        );
+        assert!(matches!(
+            run(
+                &root,
+                &c,
+                VfsRequest::Stat {
+                    path: "/a.txt".into()
+                }
+            )
+            .await,
+            VfsResponse::Error { .. }
+        ));
+
+        // Directory rename carries its contents.
+        let resp = run(
+            &root,
+            &c,
+            VfsRequest::Rename {
+                from: "/dir".into(),
+                to: "/dir2".into(),
+            },
+        )
+        .await;
+        assert!(matches!(resp, VfsResponse::Renamed { .. }), "{resp:?}");
+        assert!(root.path().join("dir2/a2.txt").exists());
+
+        // Never overwrites, never escapes, never invents parents, and the
+        // root is not a party to it.
+        let cases = [
+            ("/dir2/a2.txt", "/b.txt", "vfs_already_exists"),
+            ("/b.txt", "/../x", "vfs_path_refused"),
+            ("/b.txt", "/missing/x", "vfs_not_found"),
+            ("/", "/x", "vfs_path_refused"),
+            ("/b.txt", "/", "vfs_path_refused"),
+            ("/ghost.txt", "/x", "vfs_not_found"),
+        ];
+        for (from, to, want) in cases {
+            let resp = run(
+                &root,
+                &c,
+                VfsRequest::Rename {
+                    from: from.into(),
+                    to: to.into(),
+                },
+            )
+            .await;
+            assert!(
+                matches!(&resp, VfsResponse::Error { code, .. } if code == want),
+                "{from} -> {to}: {resp:?}"
+            );
+        }
+        assert!(root.path().join("b.txt").exists());
+
+        // Read-only claims cannot move anything.
+        let read_only = claims(vec![Capability::FsRead]);
+        let resp = run(
+            &root,
+            &read_only,
+            VfsRequest::Rename {
+                from: "/b.txt".into(),
+                to: "/c.txt".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            resp,
+            error("capability_denied", "capability fs.write not granted")
+        );
+        assert!(root.path().join("b.txt").exists());
+
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_renames_cannot_overwrite_the_winner() {
+        let root = temp_root("rename-race");
+        let c = both();
+        std::fs::write(root.path().join("a.txt"), "a").unwrap();
+        std::fs::write(root.path().join("b.txt"), "b").unwrap();
+
+        let (a, b) = tokio::join!(
+            run(
+                &root,
+                &c,
+                VfsRequest::Rename {
+                    from: "/a.txt".into(),
+                    to: "/winner.txt".into(),
+                },
+            ),
+            run(
+                &root,
+                &c,
+                VfsRequest::Rename {
+                    from: "/b.txt".into(),
+                    to: "/winner.txt".into(),
+                },
+            ),
+        );
+
+        let responses = [&a, &b];
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|response| matches!(response, VfsResponse::Renamed { .. }))
+                .count(),
+            1,
+            "{responses:?}"
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|response| {
+                    matches!(response, VfsResponse::Error { code, .. } if code == "vfs_already_exists")
+                })
+                .count(),
+            1,
+            "{responses:?}"
+        );
+        let winner = std::fs::read_to_string(root.path().join("winner.txt")).unwrap();
+        assert!(winner == "a" || winner == "b");
+        assert_eq!(
+            ["a.txt", "b.txt"]
+                .iter()
+                .filter(|name| root.path().join(name).exists())
+                .count(),
+            1
+        );
+
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn recursive_delete_erases_subtree_only_when_asked() {
+        let root = temp_root("rdelete");
+        let c = both();
+        std::fs::create_dir_all(root.path().join("sub/deep")).unwrap();
+        std::fs::write(root.path().join("sub/deep/f.txt"), "x").unwrap();
+
+        // The bare delete still refuses a populated directory.
+        let resp = run(
+            &root,
+            &c,
+            VfsRequest::Delete {
+                path: "/sub".into(),
+                recursive: false,
+            },
+        )
+        .await;
+        assert!(
+            matches!(&resp, VfsResponse::Error { code, .. } if code == "vfs_not_empty"),
+            "{resp:?}"
+        );
+
+        // Recursive needs fs.write like any other mutation.
+        let read_only = claims(vec![Capability::FsRead]);
+        let resp = run(
+            &root,
+            &read_only,
+            VfsRequest::Delete {
+                path: "/sub".into(),
+                recursive: true,
+            },
+        )
+        .await;
+        assert_eq!(
+            resp,
+            error("capability_denied", "capability fs.write not granted")
+        );
+        assert!(root.path().join("sub/deep/f.txt").exists());
+
+        // The root is refused even recursively.
+        let resp = run(
+            &root,
+            &c,
+            VfsRequest::Delete {
+                path: "/".into(),
+                recursive: true,
+            },
+        )
+        .await;
+        assert!(
+            matches!(&resp, VfsResponse::Error { code, .. } if code == "vfs_path_refused"),
+            "{resp:?}"
+        );
+
+        // With the flag and the capability, the subtree goes.
+        let resp = run(
+            &root,
+            &c,
+            VfsRequest::Delete {
+                path: "/sub".into(),
+                recursive: true,
+            },
+        )
+        .await;
+        assert!(matches!(resp, VfsResponse::Deleted { .. }), "{resp:?}");
+        assert!(!root.path().join("sub").exists());
+
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn append_extends_existing_files_only() {
+        let root = temp_root("append");
+        let c = both();
+
+        // Appending to a file that does not exist is refused — creation is
+        // vfs.write's job.
+        let resp = run(
+            &root,
+            &c,
+            VfsRequest::Append {
+                path: "/log.txt".into(),
+                data_b64: b64::encode(b"one"),
+            },
+        )
+        .await;
+        assert!(
+            matches!(&resp, VfsResponse::Error { code, .. } if code == "vfs_not_found"),
+            "{resp:?}"
+        );
+
+        std::fs::write(root.path().join("log.txt"), "one").unwrap();
+        let resp = run(
+            &root,
+            &c,
+            VfsRequest::Append {
+                path: "/log.txt".into(),
+                data_b64: b64::encode(b" two"),
+            },
+        )
+        .await;
+        assert_eq!(
+            resp,
+            VfsResponse::Wrote {
+                path: "/log.txt".into(),
+                size_bytes: 7
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("log.txt")).unwrap(),
+            "one two"
+        );
+
+        // A directory is not appendable, and fs.write is required.
+        std::fs::create_dir_all(root.path().join("d")).unwrap();
+        let resp = run(
+            &root,
+            &c,
+            VfsRequest::Append {
+                path: "/d".into(),
+                data_b64: b64::encode(b"x"),
+            },
+        )
+        .await;
+        assert!(
+            matches!(&resp, VfsResponse::Error { code, .. } if code == "vfs_is_a_directory"),
+            "{resp:?}"
+        );
+
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn new_ops_parse_from_the_typescript_wire_shape() {
+        // Exactly what the extended `vfsRequestSchema` produces.
+        let tree: VfsRequest = serde_json::from_str(r#"{"t":"vfs.tree","path":"/"}"#).unwrap();
+        assert_eq!(tree, VfsRequest::Tree { path: "/".into() });
+        let rename: VfsRequest =
+            serde_json::from_str(r#"{"t":"vfs.rename","from":"/a","to":"/b"}"#).unwrap();
+        assert_eq!(
+            rename,
+            VfsRequest::Rename {
+                from: "/a".into(),
+                to: "/b".into()
+            }
+        );
+        let append: VfsRequest =
+            serde_json::from_str(r#"{"t":"vfs.append","path":"/a","dataB64":"aGk="}"#).unwrap();
+        assert_eq!(
+            append,
+            VfsRequest::Append {
+                path: "/a".into(),
+                data_b64: "aGk=".into()
+            }
+        );
+        // The old delete shape (no flag) still parses, defaulting to false.
+        let bare: VfsRequest = serde_json::from_str(r#"{"t":"vfs.delete","path":"/d"}"#).unwrap();
+        assert_eq!(
+            bare,
+            VfsRequest::Delete {
+                path: "/d".into(),
+                recursive: false
+            }
+        );
+        let recursive: VfsRequest =
+            serde_json::from_str(r#"{"t":"vfs.delete","path":"/d","recursive":true}"#).unwrap();
+        assert_eq!(
+            recursive,
+            VfsRequest::Delete {
+                path: "/d".into(),
+                recursive: true
+            }
+        );
+
+        // Responses serialize to the names `vfsResponseSchema` reads.
+        let renamed = serde_json::to_value(VfsResponse::Renamed {
+            from: "/a".into(),
+            to: "/b".into(),
+        })
+        .unwrap();
+        assert_eq!(renamed["t"], "vfs.renamed");
+        assert_eq!(renamed["from"], "/a");
+        assert_eq!(renamed["to"], "/b");
+        let paths = serde_json::to_value(VfsResponse::Paths {
+            path: "/".into(),
+            paths: vec!["/a.txt".into(), "/empty/".into()],
+            truncated: false,
+        })
+        .unwrap();
+        assert_eq!(paths["t"], "vfs.paths");
+        assert_eq!(paths["paths"][1], "/empty/");
+        assert_eq!(paths["truncated"], false);
     }
 
     #[test]

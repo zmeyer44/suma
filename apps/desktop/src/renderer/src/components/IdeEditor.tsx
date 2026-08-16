@@ -17,7 +17,7 @@ import {
 import type { WorkspaceFile } from "../../../shared/ipc";
 import { cn } from "../lib/cn";
 import { formatBytes } from "../lib/format";
-import { ideBuffers } from "../lib/ide";
+import { getIdeBuffer, setIdeBuffer } from "../lib/ide";
 import { IdeAudioPlayer } from "./IdeAudioPlayer";
 import { useSumaStore } from "../store";
 
@@ -122,6 +122,8 @@ export function IdeEditor() {
   const openFiles = useSumaStore((s) => s.ideOpenFiles);
   const activeFile = useSumaStore((s) => s.ideActiveFile);
   const dirty = useSumaStore((s) => s.ideDirty);
+  const workspaceKey = useSumaStore((s) => s.workspaceKey);
+  const workspaceRevision = useSumaStore((s) => s.workspaceRevision);
   const setIdeActiveFile = useSumaStore((s) => s.setIdeActiveFile);
   const closeIdeFile = useSumaStore((s) => s.closeIdeFile);
   const setIdeFileDirty = useSumaStore((s) => s.setIdeFileDirty);
@@ -132,12 +134,12 @@ export function IdeEditor() {
   const [loaded, setLoaded] = useState<WorkspaceFile | null>(null);
 
   useEffect(() => {
+    setLoaded(null);
     if (activeFile === null) {
-      setLoaded(null);
       return;
     }
     // An existing buffer wins over disk — it may hold unsaved edits.
-    const buffer = ideBuffers.get(activeFile);
+    const buffer = getIdeBuffer(workspaceKey, activeFile);
     if (buffer !== undefined) {
       setLoaded({ path: activeFile, kind: "text", contents: buffer.current });
       return;
@@ -146,7 +148,7 @@ export function IdeEditor() {
     void readIdeFile(activeFile).then((file) => {
       if (cancelled || file === undefined) return;
       if (file.kind === "text") {
-        ideBuffers.set(activeFile, {
+        setIdeBuffer(workspaceKey, activeFile, {
           saved: file.contents,
           current: file.contents,
         });
@@ -156,19 +158,23 @@ export function IdeEditor() {
     return () => {
       cancelled = true;
     };
-  }, [activeFile, readIdeFile]);
+  }, [activeFile, readIdeFile, workspaceKey, workspaceRevision]);
 
   const save = useCallback(
     async (path: string): Promise<void> => {
-      const buffer = ideBuffers.get(path);
+      const buffer = getIdeBuffer(workspaceKey, path);
       if (buffer === undefined || buffer.current === buffer.saved) return;
       const contents = buffer.current;
       if (await saveIdeFile(path, contents)) {
         buffer.saved = contents;
-        setIdeFileDirty(path, buffer.current !== contents);
+        // A save started just before a workspace switch must not clear the
+        // dirty flag for an unrelated file with the same relative path.
+        if (useSumaStore.getState().workspaceKey === workspaceKey) {
+          setIdeFileDirty(path, buffer.current !== contents);
+        }
       }
     },
-    [saveIdeFile, setIdeFileDirty],
+    [saveIdeFile, setIdeFileDirty, workspaceKey],
   );
   const saveRef = useRef(save);
   saveRef.current = save;
@@ -179,7 +185,7 @@ export function IdeEditor() {
   dirtyRef.current = (file) => {
     const path = file.cacheKey;
     if (typeof path !== "string") return;
-    const buffer = ideBuffers.get(path);
+    const buffer = getIdeBuffer(workspaceKey, path);
     if (buffer === undefined) return;
     buffer.current = file.contents;
     setIdeFileDirty(path, buffer.current !== buffer.saved);
@@ -277,9 +283,15 @@ export function IdeEditor() {
             No file open — pick one in the explorer.
           </p>
         ) : loaded === null ? null : loaded.kind === "image" ? (
-          <ImageView key={loaded.path} file={loaded} />
+          <ImageView
+            key={`${workspaceKey}:${workspaceRevision}:${loaded.path}`}
+            file={loaded}
+          />
         ) : loaded.kind === "audio" ? (
-          <IdeAudioPlayer key={loaded.path} file={loaded} />
+          <IdeAudioPlayer
+            key={`${workspaceKey}:${workspaceRevision}:${loaded.path}`}
+            file={loaded}
+          />
         ) : loaded.kind === "unreadable" ? (
           <p className="p-4 text-[12px] text-faint">
             {unreadableNotice(loaded)}
@@ -289,7 +301,7 @@ export function IdeEditor() {
             <File
               // Keyed per path: each file gets a fresh Editor; the buffer map
               // preserves its text across switches.
-              key={loaded.path}
+              key={`${workspaceKey}:${workspaceRevision}:${loaded.path}`}
               file={{
                 name: loaded.path,
                 contents: loaded.contents,

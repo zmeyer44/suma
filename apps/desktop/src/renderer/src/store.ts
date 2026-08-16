@@ -24,7 +24,11 @@ import {
   clampExplorerWidth,
   clampTerminalHeight,
   dropIdeBuffer,
+  ideWorkspaceKey,
+  moveIdeBuffers,
   getStoredIdeLayout,
+  restoreIdeWorkspaceView,
+  stashIdeWorkspaceView,
   storeIdeLayout,
   type IdePanel,
 } from "./lib/ide";
@@ -230,6 +234,21 @@ interface SumaState {
   ideTerminalHeight: number;
   /** The workspace file listing behind the explorer; null until first fetch. */
   workspaceTree: WorkspaceTree | null;
+  /** Which machine serves the IDE's filesystem right now — "sim" until the
+   *  cloud VM link comes up; null before the first workspace:changed event. */
+  workspaceSource: "sim" | "remote" | null;
+  /** The space part of the filesystem identity; kept separately so the first
+   *  source announcement can migrate buffers loaded before it arrived. */
+  workspaceSpaceId: string | null;
+  /** Compute mode distinguishes two simulated roots (dev/local-mode). */
+  workspaceComputeMode: "cloud" | "local" | null;
+  /** null before the first connection event; false deliberately clears stale
+   *  explorer data while the selected computer is unavailable. */
+  workspaceConnected: boolean | null;
+  /** Composite machine+mode+space identity used to scope editor buffers. */
+  workspaceKey: string;
+  /** Increments on reconnects too, forcing clean editor surfaces to reload. */
+  workspaceRevision: number;
   /** Editor tabs, in open order; paths are workspace-relative. */
   ideOpenFiles: string[];
   ideActiveFile: string | null;
@@ -288,7 +307,10 @@ interface SumaState {
   generateNostrKey: () => Promise<string | null>;
   removeNostrKey: () => Promise<void>;
   setNostrRelays: (relays: NostrRelayPolicy) => Promise<void>;
-  setNostrSitePolicy: (host: string, patch: NostrSitePolicyPatch) => Promise<void>;
+  setNostrSitePolicy: (
+    host: string,
+    patch: NostrSitePolicyPatch,
+  ) => Promise<void>;
   removeNostrSitePolicy: (host: string) => Promise<void>;
   /** Save ("" clears) the Buzz relay URL; saving starts a roster fetch. */
   setBuzzRelay: (url: string) => Promise<boolean>;
@@ -466,6 +488,7 @@ interface SumaState {
     email: string,
     displayName?: string,
     inviteCode?: string,
+    computeMode?: "cloud" | "local",
   ) => Promise<EnrollmentStatus | undefined>;
   enrollDevice: (name: string) => Promise<EnrollmentStatus | undefined>;
   /** §8.2 second-device flow: mint on the enrolled Mac, sign in on the new one. */
@@ -589,6 +612,7 @@ const FALLBACK_AUTH: EnrollmentStatus = {
   suggestedDeviceName: "My Mac",
   passkeyRegistered: false,
   credentialKind: null,
+  computeMode: null,
 };
 
 const FALLBACK_CREDENTIAL_STATUS: CredentialProviderStatus = {
@@ -744,8 +768,7 @@ export const useSumaStore = create<SumaState>()((set, get) => {
       const ids = Object.keys(next);
       if (ids.length > MAX_TAB_THUMBNAILS) {
         ids.sort(
-          (a, b) =>
-            (next[a]?.capturedAtMs ?? 0) - (next[b]?.capturedAtMs ?? 0),
+          (a, b) => (next[a]?.capturedAtMs ?? 0) - (next[b]?.capturedAtMs ?? 0),
         );
         for (const id of ids.slice(0, ids.length - MAX_TAB_THUMBNAILS)) {
           delete next[id];
@@ -757,6 +780,81 @@ export const useSumaStore = create<SumaState>()((set, get) => {
 
   function activeSpaceId(): string | null {
     return get().spaces.find((s) => s.active)?.id ?? null;
+  }
+
+  /**
+   * Change the filesystem identity atomically. Each workspace keeps its own
+   * tabs and dirty buffers; clean buffers are discarded so a reconnect reads
+   * the disk again. The first source announcement is special: files may have
+   * already loaded before main announced whether the link is sim or remote,
+   * so those buffers are re-keyed instead of being treated as another place.
+   */
+  function transitionIdeWorkspace(
+    source: "sim" | "remote" | null,
+    spaceId: string | null,
+    connected: boolean | null,
+    refreshTree: boolean,
+  ): void {
+    const previous = get();
+    const computeMode = previous.auth.computeMode;
+    const nextKey = ideWorkspaceKey(source, spaceId, computeMode);
+    const identityChanged = nextKey !== previous.workspaceKey;
+    const firstSourceAnnouncement =
+      previous.workspaceSource === null &&
+      source !== null &&
+      previous.workspaceSpaceId === spaceId &&
+      previous.workspaceComputeMode === computeMode;
+
+    let openFiles = previous.ideOpenFiles;
+    let activeFile = previous.ideActiveFile;
+    let dirty = previous.ideDirty;
+
+    if (identityChanged) {
+      if (firstSourceAnnouncement) {
+        moveIdeBuffers(previous.workspaceKey, nextKey, openFiles);
+      } else {
+        stashIdeWorkspaceView(previous.workspaceKey, {
+          openFiles,
+          activeFile,
+          dirty,
+        });
+        const restored = restoreIdeWorkspaceView(nextKey);
+        openFiles = restored.openFiles;
+        activeFile = restored.activeFile;
+        dirty = restored.dirty;
+      }
+    }
+
+    for (const path of openFiles) {
+      if (!(dirty[path] ?? false)) dropIdeBuffer(nextKey, path);
+    }
+
+    set({
+      workspaceTree: null,
+      workspaceSource: source,
+      workspaceSpaceId: spaceId,
+      workspaceComputeMode: computeMode,
+      workspaceConnected: connected,
+      workspaceKey: nextKey,
+      workspaceRevision: previous.workspaceRevision + 1,
+      ideOpenFiles: openFiles,
+      ideActiveFile: activeFile,
+      ideDirty: dirty,
+    });
+
+    if (
+      identityChanged &&
+      !firstSourceAnnouncement &&
+      previous.ideOpenFiles.some((path) => previous.ideDirty[path] ?? false)
+    ) {
+      get().pushToast(
+        "Workspace changed — unsaved edits remain with the workspace where you made them.",
+        "warning",
+      );
+    }
+    if (refreshTree && connected !== false) {
+      void get().refreshWorkspaceTree();
+    }
   }
 
   function activeTab(): TabInfo | null {
@@ -875,6 +973,12 @@ export const useSumaStore = create<SumaState>()((set, get) => {
     ideExplorerWidth: initialIdeLayout.explorerWidth,
     ideTerminalHeight: initialIdeLayout.terminalHeight,
     workspaceTree: null,
+    workspaceSource: null,
+    workspaceSpaceId: null,
+    workspaceComputeMode: null,
+    workspaceConnected: null,
+    workspaceKey: ideWorkspaceKey(null, null, null),
+    workspaceRevision: 0,
     ideOpenFiles: [],
     ideActiveFile: null,
     ideDirty: {},
@@ -971,7 +1075,19 @@ export const useSumaStore = create<SumaState>()((set, get) => {
           set({ signInQueue }),
         ),
         window.suma.on("downloads:updated", (downloads) => set({ downloads })),
-        window.suma.on("auth:changed", (status) => setAuthStatus(status)),
+        window.suma.on("auth:changed", (status) => {
+          const previousMode = get().auth.computeMode;
+          setAuthStatus(status);
+          if (status.computeMode !== previousMode) {
+            const workspace = get();
+            transitionIdeWorkspace(
+              workspace.workspaceSource,
+              workspace.workspaceSpaceId,
+              workspace.workspaceConnected,
+              false,
+            );
+          }
+        }),
         window.suma.on("devices:updated", (devices) => set({ devices })),
         window.suma.on("workspaceSync:changed", (workspaceSync) =>
           set({ workspaceSync }),
@@ -994,6 +1110,14 @@ export const useSumaStore = create<SumaState>()((set, get) => {
           ),
         ),
         window.suma.on("machine:changed", (machine) => set({ machine })),
+        // The filesystem behind the IDE moved (sim⇄VM swap, reconnect, or
+        // active-space change). Tabs and dirty text belong to that exact
+        // identity, never whichever machine happens to be connected next.
+        window.suma.on(
+          "workspace:changed",
+          ({ source, connected, activeSpaceId }) =>
+            transitionIdeWorkspace(source, activeSpaceId, connected, true),
+        ),
         // terminal:data streams straight to the TerminalPanel — the byte
         // stream never routes through the store.
         window.suma.on("terminal:updated", (terminals) => set({ terminals })),
@@ -1084,7 +1208,8 @@ export const useSumaStore = create<SumaState>()((set, get) => {
           set((s) => ({
             checkoutBypassNotices: [
               ...s.checkoutBypassNotices.filter(
-                (n) => !(n.spaceId === notice.spaceId && n.host === notice.host),
+                (n) =>
+                  !(n.spaceId === notice.spaceId && n.host === notice.host),
               ),
               notice,
             ],
@@ -1289,7 +1414,8 @@ export const useSumaStore = create<SumaState>()((set, get) => {
       set({ nostrSettings: info });
       // Clearing the relay clears the roster; a set relay's fetch results
       // arrive via nostr:buzzAgentsChanged.
-      if (info.buzzRelayUrl === null) set({ buzzAgents: { ...IDLE_BUZZ_STATE } });
+      if (info.buzzRelayUrl === null)
+        set({ buzzAgents: { ...IDLE_BUZZ_STATE } });
       return true;
     },
 
@@ -1717,12 +1843,13 @@ export const useSumaStore = create<SumaState>()((set, get) => {
       set({ onboardingDismissed: false, overlay: "none", originPopover: null }),
     dismissOnboarding: () => set({ onboardingDismissed: true }),
 
-    signup: async (email, displayName, inviteCode) => {
+    signup: async (email, displayName, inviteCode, computeMode) => {
       const args: SumaInvokeMap["auth:signup"]["args"] = { email };
       if (displayName !== undefined && displayName.length > 0)
         args.displayName = displayName;
       if (inviteCode !== undefined && inviteCode.length > 0)
         args.inviteCode = inviteCode;
+      if (computeMode !== undefined) args.computeMode = computeMode;
       const status = await call("auth:signup", args);
       if (status !== undefined) setAuthStatus(status);
       return status;
@@ -1955,8 +2082,33 @@ export const useSumaStore = create<SumaState>()((set, get) => {
     },
 
     refreshWorkspaceTree: async () => {
+      // The first terminal visit can precede main's initial source event, but
+      // the hydrated space roster already knows which space is active.
+      const before = get();
+      const spaceId = activeSpaceId();
+      const expectedKey = ideWorkspaceKey(
+        before.workspaceSource,
+        spaceId,
+        before.auth.computeMode,
+      );
+      if (before.workspaceKey !== expectedKey) {
+        transitionIdeWorkspace(
+          before.workspaceSource,
+          spaceId,
+          before.workspaceConnected,
+          false,
+        );
+      }
+      const request = get();
       const workspaceTree = await call("workspace:tree", undefined);
-      if (workspaceTree !== undefined) set({ workspaceTree });
+      const current = get();
+      if (
+        workspaceTree !== undefined &&
+        current.workspaceKey === request.workspaceKey &&
+        current.workspaceRevision === request.workspaceRevision
+      ) {
+        set({ workspaceTree });
+      }
     },
 
     readIdeFile: (path) => call("workspace:readFile", { path }),
@@ -1980,7 +2132,7 @@ export const useSumaStore = create<SumaState>()((set, get) => {
     },
 
     closeIdeFile: (path) => {
-      dropIdeBuffer(path);
+      dropIdeBuffer(get().workspaceKey, path);
       set((s) => {
         const remaining = s.ideOpenFiles.filter((p) => p !== path);
         const { [path]: _dropped, ...dirty } = s.ideDirty;
@@ -1990,7 +2142,11 @@ export const useSumaStore = create<SumaState>()((set, get) => {
           const index = s.ideOpenFiles.indexOf(path);
           active = remaining[Math.min(index, remaining.length - 1)] ?? null;
         }
-        return { ideOpenFiles: remaining, ideActiveFile: active, ideDirty: dirty };
+        return {
+          ideOpenFiles: remaining,
+          ideActiveFile: active,
+          ideDirty: dirty,
+        };
       });
     },
 

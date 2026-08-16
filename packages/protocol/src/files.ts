@@ -349,14 +349,79 @@ export const vfsRequestSchema = z.discriminatedUnion("t", [
   z.object({ t: z.literal("vfs.stat"), path: z.string().max(4096) }),
   z.object({ t: z.literal("vfs.read"), path: z.string().max(4096), offset: z.number().int().nonnegative(), length: z.number().int().positive().max(64 * 1024 * 1024) }),
   z.object({ t: z.literal("vfs.write"), path: z.string().max(4096), dataB64: z.string() }),
-  z.object({ t: z.literal("vfs.delete"), path: z.string().max(4096) }),
+  z.object({ t: z.literal("vfs.append"), path: z.string().max(4096), dataB64: z.string() }),
+  z.object({ t: z.literal("vfs.delete"), path: z.string().max(4096), recursive: z.boolean().optional() }),
   z.object({ t: z.literal("vfs.mkdir"), path: z.string().max(4096) }),
+  z.object({ t: z.literal("vfs.tree"), path: z.string().max(4096) }),
+  z.object({ t: z.literal("vfs.rename"), from: z.string().max(4096), to: z.string().max(4096) }),
 ]);
 export type VfsRequest = z.infer<typeof vfsRequestSchema>;
 
 export function parseVfsRequest(raw: string): VfsRequest {
   return vfsRequestSchema.parse(JSON.parse(raw));
 }
+
+export const vfsKindSchema = z.enum(["file", "dir", "other"]);
+export type VfsKind = z.infer<typeof vfsKindSchema>;
+
+export const vfsEntrySchema = z.object({
+  name: z.string(),
+  path: z.string(), // normalized, always rooted ("/a/b")
+  kind: vfsKindSchema,
+  sizeBytes: z.number().int().nonnegative(),
+  modifiedAtMs: z.number().int().nonnegative(),
+});
+export type VfsEntry = z.infer<typeof vfsEntrySchema>;
+
+/**
+ * Mirror of `VfsResponse` in agent/src/vfs.rs — the agent leads this shape;
+ * any change lands there first and here in the same commit. `error.code` is
+ * an open string so newer agent codes degrade to a message, not a parse
+ * failure on old desktops.
+ */
+export const vfsResponseSchema = z.discriminatedUnion("t", [
+  z.object({ t: z.literal("vfs.listing"), path: z.string(), entries: z.array(vfsEntrySchema), truncated: z.boolean() }),
+  z.object({ t: z.literal("vfs.info"), entry: vfsEntrySchema }),
+  z.object({ t: z.literal("vfs.data"), path: z.string(), offset: z.number().int().nonnegative(), dataB64: z.string(), eof: z.boolean() }),
+  z.object({ t: z.literal("vfs.wrote"), path: z.string(), sizeBytes: z.number().int().nonnegative() }),
+  z.object({ t: z.literal("vfs.deleted"), path: z.string() }),
+  z.object({ t: z.literal("vfs.created"), path: z.string() }),
+  z.object({ t: z.literal("vfs.renamed"), from: z.string(), to: z.string() }),
+  z.object({ t: z.literal("vfs.paths"), path: z.string(), paths: z.array(z.string()), truncated: z.boolean() }),
+  z.object({ t: z.literal("error"), code: z.string(), message: z.string() }),
+]);
+export type VfsResponse = z.infer<typeof vfsResponseSchema>;
+
+export function parseVfsResponse(raw: string): VfsResponse {
+  return vfsResponseSchema.parse(JSON.parse(raw));
+}
+
+/** Which agent capability each vfs op requires (mirror of vfs.rs `required_capability`). */
+export const VFS_CAPABILITY: Record<VfsRequest["t"], "fs.read" | "fs.write"> = {
+  "vfs.list": "fs.read",
+  "vfs.stat": "fs.read",
+  "vfs.read": "fs.read",
+  "vfs.tree": "fs.read",
+  "vfs.write": "fs.write",
+  "vfs.append": "fs.write",
+  "vfs.delete": "fs.write",
+  "vfs.mkdir": "fs.write",
+  "vfs.rename": "fs.write",
+};
+
+/* Caps shared with the agent (vfs.rs) and the sim (local-vfs.ts). Read/write
+ * are bounded by base64 expansion fitting the 16 MiB mux frame. */
+export const VFS_MAX_READ_BYTES = 8 * 1024 * 1024;
+export const VFS_MAX_WRITE_BYTES = 8 * 1024 * 1024;
+export const VFS_MAX_LIST_ENTRIES = 5_000;
+export const VFS_MAX_TREE_ENTRIES = 10_000;
+export const VFS_MAX_TREE_DEPTH = 12;
+/** Keep in step with SKIPPED_DIRS in agent/src/vfs.rs and local-vfs.ts. */
+export const VFS_TREE_SKIPPED_DIRS: ReadonlyArray<string> = [
+  ".git", ".hg", ".svn", "node_modules", ".pnpm-store", ".npm",
+  ".cache", ".cargo", ".rustup", ".Trash", "Library",
+];
+export const VFS_TREE_SKIPPED_FILES: ReadonlyArray<string> = [".DS_Store"];
 
 /**
  * Only `~/cloud` is cloud-native (JuiceFS-backed, canonical in R2). `$HOME`

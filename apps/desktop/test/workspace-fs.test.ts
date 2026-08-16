@@ -1,13 +1,16 @@
 /**
- * The IDE's workspace filesystem (suma://terminal): the root guard that keeps
- * renderer-supplied paths inside the workspace, and the tree walk the
- * explorer renders.
+ * The IDE's workspace filesystem (suma://terminal), now served over the
+ * agent link's vfs channel: the path guard that keeps renderer-supplied
+ * paths inside the workspace, the tree the explorer renders, and the
+ * read-classification ladder — all against a SimAgent on a temp root, the
+ * same link shape production uses.
  */
 
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { SimAgent } from "../src/main/compute/sim-agent";
 import { WorkspaceFsService } from "../src/main/workspace-fs";
 
 let root: string;
@@ -15,33 +18,37 @@ let service: WorkspaceFsService;
 
 beforeEach(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), "suma-workspace-"));
-  service = new WorkspaceFsService(root);
+  service = new WorkspaceFsService();
+  service.bind(new SimAgent({ root: () => root }));
 });
 
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-describe("resolve", () => {
-  it("keeps relative paths inside the root", () => {
-    expect(service.resolve("src/index.ts")).toBe(
-      path.join(root, "src/index.ts"),
+describe("path guard", () => {
+  it("refuses absolute paths", async () => {
+    await expect(service.read("/etc/passwd")).rejects.toThrow(/absolute/);
+    await expect(service.write("/etc/x", "")).rejects.toThrow(/absolute/);
+  });
+
+  it("refuses ..-escapes", async () => {
+    await expect(service.read("../outside")).rejects.toThrow(/escapes/);
+    await expect(service.write("src/../../outside", "")).rejects.toThrow(
+      /escapes/,
     );
   });
 
-  it("refuses absolute paths", () => {
-    expect(() => service.resolve("/etc/passwd")).toThrow(/absolute/);
-  });
-
-  it("refuses ..-escapes", () => {
-    expect(() => service.resolve("../outside")).toThrow(/escapes/);
-    expect(() => service.resolve("src/../../outside")).toThrow(/escapes/);
-  });
-
-  it("refuses a sibling directory sharing the root as a prefix", () => {
+  it("refuses a sibling directory sharing the root as a prefix", async () => {
     // /tmp/suma-workspace-x must not authorize /tmp/suma-workspace-x-evil.
-    expect(() => service.resolve(`../${path.basename(root)}-evil/f`)).toThrow(
-      /escapes/,
+    await expect(
+      service.read(`../${path.basename(root)}-evil/f`),
+    ).rejects.toThrow(/escapes/);
+  });
+
+  it("throws before it is bound to a link", async () => {
+    await expect(new WorkspaceFsService().tree()).rejects.toThrow(
+      /not connected/,
     );
   });
 });
@@ -74,6 +81,42 @@ describe("tree", () => {
 
     const tree = await service.tree();
     expect(tree.paths).toEqual(["kept.txt"]);
+  });
+
+  it("scopes to a workspace folder and creates it on first visit", async () => {
+    service.bind(new SimAgent({ root: () => root }), () => "Personal");
+    const first = await service.tree();
+    expect(first.paths).toEqual([]);
+    expect(first.root).toBe(`${root}/Personal`);
+
+    await service.write("hello.txt", "hi");
+    const after = await service.tree();
+    expect(after.paths).toEqual(["hello.txt"]);
+    // The file landed inside the scope folder, not at the shared root.
+    expect((await service.read("hello.txt")).kind).toBe("text");
+    const unscoped = new WorkspaceFsService();
+    unscoped.bind(new SimAgent({ root: () => root }));
+    expect((await unscoped.tree()).paths).toEqual(["Personal/hello.txt"]);
+  });
+
+  it("never lets a normalized dot target mutate the scoped workspace root", async () => {
+    service.bind(new SimAgent({ root: () => root }), () => "Personal");
+    await service.tree();
+    await service.write("keep.txt", "precious");
+
+    await expect(service.remove(".", true)).rejects.toThrow(/workspace root/);
+    await expect(service.rename(".", "moved")).rejects.toThrow(
+      /workspace root/,
+    );
+    await expect(service.rename("keep.txt", ".")).rejects.toThrow(
+      /workspace root/,
+    );
+
+    expect(await service.read("keep.txt")).toEqual({
+      path: "keep.txt",
+      kind: "text",
+      contents: "precious",
+    });
   });
 });
 
@@ -216,5 +259,24 @@ describe("read/write", () => {
       kind: "unreadable",
       reason: "unsupported",
     });
+  });
+
+  it("creates, renames, and deletes through the explorer surface", async () => {
+    await service.mkdir("newdir");
+    await service.write("newdir/f.txt", "x");
+    await service.rename("newdir/f.txt", "newdir/g.txt");
+    expect((await service.tree()).paths).toEqual(["newdir/g.txt"]);
+    await expect(service.remove("newdir", false)).rejects.toThrow(/not empty/);
+    await service.remove("newdir", true);
+    expect((await service.tree()).paths).toEqual([]);
+  });
+
+  it("streams media slices by size and offset", async () => {
+    const big = Buffer.concat([MP3, Buffer.alloc(1024, 0x22)]);
+    await writeFile(path.join(root, "pod.mp3"), big);
+    expect(await service.mediaSize("pod.mp3")).toBe(big.byteLength);
+    expect(await service.mediaSize("missing.mp3")).toBeNull();
+    const slice = await service.mediaSlice("pod.mp3", 10, 32);
+    expect(slice.equals(big.subarray(10, 42))).toBe(true);
   });
 });

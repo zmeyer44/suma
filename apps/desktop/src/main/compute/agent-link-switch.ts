@@ -19,7 +19,7 @@
  */
 
 import type { Duplex } from "node:stream";
-import type { AgentCtlRequest, AgentCtlResponse } from "@suma/protocol";
+import type { AgentCtlRequest, AgentCtlResponse, VfsRequest, VfsResponse } from "@suma/protocol";
 import { TcpAgentClient, type AgentLink, type PtyChannel } from "./agent-client";
 
 export class SwitchableAgentLink implements AgentLink {
@@ -86,6 +86,14 @@ export class SwitchableAgentLink implements AgentLink {
 
   forward(port: number, socket: Duplex): void {
     this.inner.forward(port, socket);
+  }
+
+  vfs(request: VfsRequest): Promise<VfsResponse> {
+    return this.inner.vfs(request);
+  }
+
+  vfsRootLabel(): string {
+    return this.inner.vfsRootLabel();
   }
 
   stop(): void {

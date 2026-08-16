@@ -6,6 +6,9 @@ import {
   cloudFetchEligibility,
   normalizeVfsPath,
   parseVfsRequest,
+  parseVfsResponse,
+  vfsRequestSchema,
+  VFS_CAPABILITY,
   type DownloadContext,
 } from "../src/index.js";
 
@@ -179,5 +182,51 @@ describe("vfs paths", () => {
     expect(() =>
       parseVfsRequest(JSON.stringify({ t: "vfs.read", path: "/a", offset: 0, length: 1 << 30 })),
     ).toThrow();
+  });
+
+  it("parses the new ops, with delete's recursive flag optional", () => {
+    expect(parseVfsRequest(JSON.stringify({ t: "vfs.tree", path: "/" })).t).toBe("vfs.tree");
+    expect(parseVfsRequest(JSON.stringify({ t: "vfs.rename", from: "/a", to: "/b" })).t).toBe("vfs.rename");
+    expect(parseVfsRequest(JSON.stringify({ t: "vfs.append", path: "/a", dataB64: "" })).t).toBe("vfs.append");
+    const bare = parseVfsRequest(JSON.stringify({ t: "vfs.delete", path: "/d" }));
+    expect(bare).toEqual({ t: "vfs.delete", path: "/d" });
+    const recursive = parseVfsRequest(JSON.stringify({ t: "vfs.delete", path: "/d", recursive: true }));
+    expect(recursive).toEqual({ t: "vfs.delete", path: "/d", recursive: true });
+  });
+});
+
+describe("vfs responses (wire shapes led by agent/src/vfs.rs)", () => {
+  it("round-trips every response variant from agent wire JSON", () => {
+    const entry = { name: "a.txt", path: "/a.txt", kind: "file", sizeBytes: 5, modifiedAtMs: 1 };
+    const samples = [
+      { t: "vfs.listing", path: "/", entries: [entry], truncated: false },
+      { t: "vfs.info", entry },
+      { t: "vfs.data", path: "/a.txt", offset: 0, dataB64: "aGk=", eof: true },
+      { t: "vfs.wrote", path: "/a.txt", sizeBytes: 5 },
+      { t: "vfs.deleted", path: "/a.txt" },
+      { t: "vfs.created", path: "/d" },
+      { t: "vfs.renamed", from: "/a", to: "/b" },
+      { t: "vfs.paths", path: "/", paths: ["/a.txt", "/empty/"], truncated: false },
+      { t: "error", code: "vfs_not_found", message: "no such path" },
+    ];
+    for (const sample of samples) {
+      expect(parseVfsResponse(JSON.stringify(sample))).toEqual(sample);
+    }
+  });
+
+  it("rejects an unknown response tag but accepts unknown error codes", () => {
+    expect(() => parseVfsResponse(JSON.stringify({ t: "vfs.nope" }))).toThrow();
+    const err = parseVfsResponse(JSON.stringify({ t: "error", code: "vfs_new_code", message: "m" }));
+    expect(err.t).toBe("error");
+  });
+
+  it("VFS_CAPABILITY covers the whole request union, reads read and writes write", () => {
+    for (const option of vfsRequestSchema.options) {
+      const t = option.shape.t.value as keyof typeof VFS_CAPABILITY;
+      expect(VFS_CAPABILITY[t], t).toMatch(/^fs\.(read|write)$/);
+    }
+    expect(VFS_CAPABILITY["vfs.tree"]).toBe("fs.read");
+    expect(VFS_CAPABILITY["vfs.rename"]).toBe("fs.write");
+    expect(VFS_CAPABILITY["vfs.append"]).toBe("fs.write");
   });
 });

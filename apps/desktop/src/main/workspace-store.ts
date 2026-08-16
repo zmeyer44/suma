@@ -197,6 +197,35 @@ export class WorkspaceStore {
     this.recordTombstone(`space:${id}`);
   }
 
+  /* ---------------------------- space folders ---------------------------- */
+
+  /**
+   * spaceId → folder name in the shared filesystem. Materialized straight
+   * from the LWW registers (like tab presence): the binding is authoritative
+   * and synced, so every device derives a folder from the name at most once
+   * and looks it up ever after.
+   */
+  spaceFolders(): Record<string, string> {
+    const folders: Record<string, string> = {};
+    for (const entry of Object.values(this.file.lww)) {
+      const doc = entry.doc;
+      if (doc !== null && doc.kind === "spaceFolder") {
+        folders[doc.spaceId] = doc.folder;
+      }
+    }
+    return folders;
+  }
+
+  setSpaceFolder(spaceId: string, folder: string): void {
+    this.recordDoc({ kind: "spaceFolder", spaceId, folder });
+  }
+
+  /** Drop the binding (space deleted). The FOLDER is deliberately kept —
+   *  user data outlives the persona that named it. */
+  removeSpaceFolder(spaceId: string): void {
+    this.recordTombstone(`spaceFolder:${spaceId}`);
+  }
+
   /* --------------------------------- pins -------------------------------- */
 
   pinsFor(spaceId: string): PinnedTab[] {
@@ -830,8 +859,10 @@ export class WorkspaceStore {
         case "tabOrder":
         case "workspaceFocus":
         case "deviceActivity":
-          // Realtime tabs, focus, and device identities materialize directly
-          // from their independent LWW registers.
+        case "spaceFolder":
+          // Realtime tabs, focus, device identities, and space-folder
+          // bindings materialize directly from their independent LWW
+          // registers.
           break;
       }
     }

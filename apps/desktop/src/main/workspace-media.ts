@@ -9,6 +9,10 @@
  * means the whole track crosses IPC as base64 and sits in renderer memory,
  * while <audio> seeking is nothing but Range requests — which this answers.
  *
+ * The bytes come from wherever the workspace lives — the agent link's vfs
+ * channel — in single-read-cap pages, pulled on demand: a paused player
+ * stops issuing vfs reads because the stream's pull() stops being called.
+ *
  * Two guards, because this scheme addresses arbitrary user files rather than
  * an app-owned cache like suma-video://:
  *   1. Every request re-resolves the path through WorkspaceFsService, so a
@@ -21,14 +25,7 @@
  * the URL.
  */
 
-import {
-  closeSync,
-  createReadStream,
-  openSync,
-  readSync,
-  statSync,
-} from "node:fs";
-import { Readable } from "node:stream";
+import { VFS_MAX_READ_BYTES } from "@suma/protocol";
 import type { Session } from "electron";
 import { parseRangeHeader } from "./videos/videos-core";
 import { sniffAudioMime, SNIFF_BYTES } from "./workspace-sniff";
@@ -65,36 +62,43 @@ export function parseWorkspaceMediaUrl(url: string): string | null {
   }
 }
 
+/**
+ * The next page of a byte range: how many bytes to request at `cursor` when
+ * streaming [start, endInclusive] in pages of `pageSize`. Zero means done.
+ */
+export function nextMediaPage(cursor: number, endInclusive: number, pageSize: number): number {
+  if (cursor > endInclusive) return 0;
+  return Math.min(pageSize, endInclusive - cursor + 1);
+}
+
 export function installWorkspaceMediaProtocol(
   ses: Session,
   workspaceFs: WorkspaceFsService,
 ): void {
-  ses.protocol.handle(WORKSPACE_MEDIA_SCHEME, (request) => {
+  ses.protocol.handle(WORKSPACE_MEDIA_SCHEME, async (request) => {
     const rel = parseWorkspaceMediaUrl(request.url);
     if (rel === null) return new Response(null, { status: 404 });
 
-    let abs: string;
+    let size: number | null;
     try {
-      abs = workspaceFs.resolve(rel);
+      size = await workspaceFs.mediaSize(rel);
     } catch {
-      return new Response(null, { status: 403 }); // Escaped the root.
+      return new Response(null, { status: 403 }); // Escaped the root, or no link yet.
     }
+    if (size === null) return new Response(null, { status: 404 });
 
-    let size: number;
+    let head: Buffer;
     try {
-      const stat = statSync(abs);
-      if (!stat.isFile()) return new Response(null, { status: 404 });
-      size = stat.size;
+      head = await workspaceFs.mediaSlice(rel, 0, Math.min(SNIFF_BYTES, size));
     } catch {
       return new Response(null, { status: 404 });
     }
-
-    const contentType = sniffAudioMime(readHeadSync(abs), rel);
+    const contentType = sniffAudioMime(head, rel);
     if (contentType === null) return new Response(null, { status: 415 });
 
     const range = parseRangeHeader(request.headers.get("range"), size);
     if (range === null) {
-      return new Response(streamFile(abs), {
+      return new Response(streamSlices(workspaceFs, rel, 0, size - 1), {
         status: 200,
         headers: {
           "content-type": contentType,
@@ -103,7 +107,7 @@ export function installWorkspaceMediaProtocol(
         },
       });
     }
-    return new Response(streamFile(abs, range.start, range.end), {
+    return new Response(streamSlices(workspaceFs, rel, range.start, range.end), {
       status: 206,
       headers: {
         "content-type": contentType,
@@ -115,27 +119,37 @@ export function installWorkspaceMediaProtocol(
   });
 }
 
-function readHeadSync(abs: string): Buffer {
-  const fd = openSync(abs, "r");
-  try {
-    const buffer = Buffer.alloc(SNIFF_BYTES);
-    const read = readSync(fd, buffer, 0, SNIFF_BYTES, 0);
-    return buffer.subarray(0, read);
-  } catch {
-    return Buffer.alloc(0);
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function streamFile(
-  filePath: string,
-  start?: number,
-  end?: number,
+/**
+ * Pull-based paging over the vfs single-read cap: each pull() fetches one
+ * page, so backpressure from the <audio> element throttles vfs traffic.
+ */
+function streamSlices(
+  workspaceFs: WorkspaceFsService,
+  rel: string,
+  start: number,
+  endInclusive: number,
 ): ReadableStream<Uint8Array> {
-  const stream =
-    start === undefined
-      ? createReadStream(filePath)
-      : createReadStream(filePath, { start, end });
-  return Readable.toWeb(stream) as ReadableStream<Uint8Array>;
+  let cursor = start;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const want = nextMediaPage(cursor, endInclusive, VFS_MAX_READ_BYTES);
+      if (want === 0) {
+        controller.close();
+        return;
+      }
+      let page: Buffer;
+      try {
+        page = await workspaceFs.mediaSlice(rel, cursor, want);
+      } catch (err) {
+        controller.error(err);
+        return;
+      }
+      if (page.byteLength === 0) {
+        controller.close(); // File shrank underneath us — end honestly.
+        return;
+      }
+      cursor += page.byteLength;
+      controller.enqueue(page);
+    },
+  });
 }

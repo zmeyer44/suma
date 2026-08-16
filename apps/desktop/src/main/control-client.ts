@@ -32,6 +32,8 @@ export interface ControlUser {
   id: string;
   email: string;
   displayName: string | null;
+  /** Where the account's computer lives; absent on older control planes. */
+  computeMode?: "cloud" | "local";
 }
 
 export interface ControlSpace {
@@ -170,18 +172,25 @@ export class ControlClient {
     email: string,
     displayName?: string,
     inviteCode?: string,
+    computeMode?: "cloud" | "local",
   ): Promise<{
     user: ControlUser;
     space: ControlSpace;
     bootstrapToken?: string;
   }> {
-    const body: { email: string; displayName?: string; inviteCode?: string } = {
+    const body: {
+      email: string;
+      displayName?: string;
+      inviteCode?: string;
+      computeMode?: "cloud" | "local";
+    } = {
       email,
     };
     if (displayName !== undefined && displayName.length > 0)
       body.displayName = displayName;
     if (inviteCode !== undefined && inviteCode.length > 0)
       body.inviteCode = inviteCode;
+    if (computeMode !== undefined) body.computeMode = computeMode;
     const out = await this.request<{
       user: ControlUser;
       space: ControlSpace;
@@ -290,12 +299,17 @@ export class ControlClient {
     name: string;
     platform: string;
     devicePublicKey: string;
-  }): Promise<{ device: ControlDevice; hubToken: string }> {
-    const out = await this.request<{ device: ControlDevice; hubToken: string }>(
-      "POST",
-      "/v1/devices/enroll",
-      args,
-    );
+  }): Promise<{
+    device: ControlDevice;
+    hubToken: string;
+    /** Absent on control planes predating local compute mode. */
+    isHomeMachine?: boolean;
+  }> {
+    const out = await this.request<{
+      device: ControlDevice;
+      hubToken: string;
+      isHomeMachine?: boolean;
+    }>("POST", "/v1/devices/enroll", args);
     this.setToken(out.hubToken);
     return out;
   }
@@ -406,12 +420,18 @@ export class ControlClient {
   /* ---------------- Phase 2: machine / Job Mode / audit ------------------ */
 
   async getMachine(): Promise<{
-    machine: ControlMachine;
+    /** Absent on control planes that predate compute modes (⇒ cloud). */
+    mode?: "cloud" | "local";
+    machine: ControlMachine | null;
     events: ControlMachineEvent[];
+    /** Local mode: the one enrolled device that owns the computer seat. */
+    homeDeviceId?: string | null;
   }> {
     return this.request<{
-      machine: ControlMachine;
+      mode?: "cloud" | "local";
+      machine: ControlMachine | null;
       events: ControlMachineEvent[];
+      homeDeviceId?: string | null;
     }>("GET", "/v1/machine");
   }
 

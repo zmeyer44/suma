@@ -29,6 +29,13 @@ export const users = pgTable("users", {
   // Account feature flags gating non-terminal capabilities ("files",
   // "cloud-fetch" — §8.6). Empty until billing/entitlements set them.
   features: text("features").array().notNull().default(sql`'{}'::text[]`),
+  /** Where the account's computer lives: "cloud" (a provisioned VM) or
+   *  "local" (the user dedicated their first Mac; no VM exists). */
+  computeMode: text("compute_mode").notNull().default("cloud"),
+  /** Local mode: the enrolled device acting as the computer — the seam the
+   *  future control-plane relay hangs off. Plain uuid, not a FK: `devices`
+   *  is declared after `users` (same precedent as revocationOutbox's ids). */
+  homeDeviceId: uuid("home_device_id"),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
 

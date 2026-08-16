@@ -938,6 +938,7 @@ export function registerIpc(deps: IpcDeps): void {
       displayName?: string;
       controlUrl?: string;
       inviteCode?: string;
+      computeMode?: "cloud" | "local";
     } = {
       email: requireString(a["email"], "email"),
     };
@@ -947,6 +948,8 @@ export function registerIpc(deps: IpcDeps): void {
       signup.controlUrl = a["controlUrl"];
     if (typeof a["inviteCode"] === "string")
       signup.inviteCode = a["inviteCode"];
+    if (a["computeMode"] === "cloud" || a["computeMode"] === "local")
+      signup.computeMode = a["computeMode"];
     return deps.auth.signup(signup);
   });
 
@@ -1130,6 +1133,28 @@ export function registerIpc(deps: IpcDeps): void {
     if (typeof contents !== "string")
       throw new Error("contents must be a string");
     return deps.workspaceFs.write(requireString(a["path"], "path"), contents);
+  });
+
+  handle("workspace:mkdir", (args) => {
+    return deps.workspaceFs.mkdir(
+      requireString(requireRecord(args, "workspace:mkdir")["path"], "path"),
+    );
+  });
+
+  handle("workspace:delete", (args) => {
+    const a = requireRecord(args, "workspace:delete");
+    return deps.workspaceFs.remove(
+      requireString(a["path"], "path"),
+      a["recursive"] === true,
+    );
+  });
+
+  handle("workspace:rename", (args) => {
+    const a = requireRecord(args, "workspace:rename");
+    return deps.workspaceFs.rename(
+      requireString(a["from"], "from"),
+      requireString(a["to"], "to"),
+    );
   });
 
   /* ----------------------- identity egress (§8.4) ------------------------ */

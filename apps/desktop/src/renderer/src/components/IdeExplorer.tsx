@@ -37,6 +37,20 @@ export function IdeExplorer() {
   const openFiles = useSumaStore((s) => s.ideOpenFiles);
   const openIdeFile = useSumaStore((s) => s.openIdeFile);
   const refreshWorkspaceTree = useSumaStore((s) => s.refreshWorkspaceTree);
+  const auth = useSumaStore((s) => s.auth);
+  const machine = useSumaStore((s) => s.machine);
+  const workspaceSource = useSumaStore((s) => s.workspaceSource);
+  const workspaceConnected = useSumaStore((s) => s.workspaceConnected);
+
+  // Cloud mode before the VM link is up: the simulator's tree is about to be
+  // swapped out, so showing it would present files that are about to vanish.
+  const awaitingComputer =
+    auth.computeMode === "cloud" &&
+    (workspaceSource !== "remote" || workspaceConnected === false);
+  const computerIsAnotherMac =
+    auth.computeMode === "local" &&
+    (workspaceConnected === false ||
+      (machine?.machineId === null && machine.state === "suspended"));
 
   // useFileTree options are creation-time only ("later option changes do not
   // update the model"), so callbacks read refs and data updates go through
@@ -99,8 +113,9 @@ export function IdeExplorer() {
           type="button"
           aria-label="Refresh file tree"
           title="Refresh file tree"
+          disabled={workspaceConnected === false || computerIsAnotherMac}
           onClick={() => void refreshWorkspaceTree()}
-          className="grid size-5 shrink-0 cursor-pointer place-items-center rounded text-faint hover:bg-ink/8 hover:text-text"
+          className="grid size-5 shrink-0 cursor-pointer place-items-center rounded text-faint hover:bg-ink/8 hover:text-text disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
         >
           <RefreshCw className="size-3" aria-hidden="true" />
         </button>
@@ -111,7 +126,16 @@ export function IdeExplorer() {
         </div>
       ) : null}
       <div className="min-h-0 flex-1">
-        {tree === null ? (
+        {computerIsAnotherMac ? (
+          <p className="p-3 text-[12px] text-faint">
+            Your computer is another Mac. Access from this device isn’t
+            available yet.
+          </p>
+        ) : awaitingComputer ? (
+          <p className="p-3 text-[12px] text-faint">
+            Connecting to your computer…
+          </p>
+        ) : tree === null ? (
           <p className="p-3 text-[12px] text-faint">Loading workspace…</p>
         ) : tree.paths.length === 0 ? (
           <p className="p-3 text-[12px] text-faint">The workspace is empty.</p>
