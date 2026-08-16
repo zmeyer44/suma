@@ -763,7 +763,11 @@ function Tab({
             // already reads as part of the gap.
             tab.active
             ? "min-w-[176px] max-w-[240px] flex-1 pr-2 pl-2.5"
-            : "min-w-[56px] max-w-[240px] flex-1 pr-2 pl-3",
+            : // 88px floor: even with the title truncated to nothing, hover
+              // still needs pl-3 + 16px mark + two gap-2 + the unfolded
+              // controls (16px dots + gap-0.5 + 16px close) + pr-2 = 86px
+              // before the close button spills past the tab's edge.
+              "min-w-[88px] max-w-[240px] flex-1 pr-2 pl-3",
         shape,
       )}
     >

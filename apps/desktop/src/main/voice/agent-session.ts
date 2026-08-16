@@ -48,6 +48,7 @@ import type { RealtimeTtsProvider, RealtimeTtsTurn } from "./tts-realtime-core";
 import {
   concatFrames,
   frameRms,
+  NarrationQueue,
   pcm16ToWav,
   UtteranceDetector,
 } from "./voice-core";
@@ -76,6 +77,15 @@ const BARGE_IN_RMS = 0.015;
 
 /** A transcript this short is echo residue, not a command. */
 const MIN_TRANSCRIPT_CHARS = 2;
+
+/**
+ * Narration pacing: the next queued sentence is handed to the TTS this far
+ * before the current playback runs out (covers synthesis latency, keeps
+ * sentences near-gapless), checked on this cadence. See NarrationQueue for
+ * why sentences are held back at all.
+ */
+const SPEECH_LEAD_MS = 800;
+const SPEECH_PUMP_MS = 250;
 
 export type Gateway = ReturnType<typeof createGateway>;
 
@@ -300,15 +310,8 @@ export class VoiceAgentSession {
         tools: this.opts.tools,
         stopWhen: stepCountIs(MAX_STEPS),
         abortSignal: controller.signal,
-        onStepFinish: (step) => {
-          for (const call of step.toolCalls) {
-            console.log(`suma voice: tool ${call.toolName} ran`);
-          }
-          callbacks.onActivity();
-        },
       });
 
-      let said = "";
       stage = "speech connect";
       ttsTurn = await ttsReady;
       stage = "agent";
@@ -316,21 +319,74 @@ export class VoiceAgentSession {
         ttsTurn.cancel();
         return;
       }
-      for await (const delta of result.textStream) {
+
+      // The agent runs at tool speed, the voice at talking speed. Sentences
+      // are held in the narration queue and pumped to the TTS one at a
+      // time, each as the previous one finishes playing — at which moment
+      // anything the intervening tool calls made stale is dropped instead
+      // of narrating a past the user already watched happen.
+      const narration = new NarrationQueue();
+      let spoken = "";
+      const speakSegment = (text: string): void => {
+        spoken = spoken === "" ? text : `${spoken} ${text}`;
+        ttsTurn?.speakStatement(text);
+        callbacks.onTranscript("assistant", spoken);
+      };
+      const logDropped = (dropped: string[]): void => {
+        for (const text of dropped) {
+          console.log(`suma voice: skipping stale narration ${JSON.stringify(text)}`);
+        }
+      };
+      const pump = (): void => {
         if (!this.live(generation)) return;
-        if (delta === "") continue;
-        said += delta;
-        ttsTurn.sendText(delta);
-        callbacks.onTranscript("assistant", said.trim());
+        if (Date.now() < this.speakingUntil - SPEECH_LEAD_MS) return;
+        const { segment, dropped } = narration.takeNext();
+        logDropped(dropped);
+        if (segment !== null) speakSegment(segment.text);
+      };
+      const pumpTimer = setInterval(pump, SPEECH_PUMP_MS);
+
+      try {
+        for await (const part of result.fullStream) {
+          if (!this.live(generation)) return;
+          switch (part.type) {
+            case "text-delta":
+              narration.pushDelta(part.text);
+              break;
+            case "tool-call":
+              console.log(`suma voice: tool ${part.toolName} called`);
+              narration.noteToolCall();
+              callbacks.onActivity();
+              break;
+            case "error":
+              throw part.error instanceof Error
+                ? part.error
+                : new Error(String(part.error));
+            default:
+              break;
+          }
+        }
+      } finally {
+        clearInterval(pumpTimer);
       }
       if (!this.live(generation)) return;
+
+      // Run over: the remaining fresh sentences ARE the answer — spoken as
+      // ONE statement (gapless prosody beats pacing now that nothing can
+      // go stale under them).
+      narration.finish();
+      const { segments, dropped } = narration.drain();
+      logDropped(dropped);
+      if (segments.length > 0) {
+        speakSegment(segments.map((segment) => segment.text).join(" "));
+      }
 
       // The conversation's memory: the SDK's own response messages, tool
       // calls and results included, exactly as the chat sidebar would keep
       // them — "the second link" has an antecedent next turn.
       this.history.push(...(await result.response).messages);
 
-      if (said.trim() === "") {
+      if (spoken === "") {
         // A tool-only turn with no words; nothing to synthesize.
         console.log("suma voice: turn produced no text — nothing to speak");
         ttsTurn.cancel();
@@ -338,7 +394,7 @@ export class VoiceAgentSession {
       }
       stage = "speech";
       console.log(
-        `suma voice: reply streamed (${String(said.length)} chars), finishing speech`,
+        `suma voice: reply spoken (${String(spoken.length)} chars), finishing speech`,
       );
       ttsTurn.finish();
       const timeout = setTimeout(() => {
@@ -364,6 +420,9 @@ export class VoiceAgentSession {
       const detail = err instanceof Error ? err.message : String(err);
       callbacks.onClosed(`${stage} failed: ${detail}`);
     } finally {
+      // A turn that lost its liveness mid-flight (barge-in, teardown)
+      // returns from anywhere above — its speech socket must not linger.
+      if (!this.live(generation)) ttsTurn?.cancel();
       if (this.turn?.generation === generation) this.turn = null;
     }
   }

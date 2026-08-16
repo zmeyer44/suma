@@ -58,7 +58,16 @@ export class BlandRealtimeTts implements RealtimeTtsProvider {
       let ready = false; // resolved — callbacks own the turn now
       let finished = false; // onDone/onError delivered (or cancelled)
       let sampleRate = VOICE_OUTPUT_SAMPLE_RATE;
-      const contextId = "turn";
+      // Statement-per-context, and this is load-bearing for latency: Bland
+      // holds speak-frames in a context's buffer until its end_of_turn — a
+      // single long-lived context meant NO audio until the whole agent run
+      // finished (observed live as ~30 s of silence). Each statement gets
+      // its own context, spoken and end_of_turn'd in one breath, so
+      // synthesis starts immediately; the socket carries them in sequence.
+      let nextContext = 0;
+      let openContexts = 0; // spoken but no utterance_end yet
+      let noMoreStatements = false; // finish() called
+      let statementSentAt = 0; // first-audio latency diagnostics
 
       const settleReject = (message: string): void => {
         if (finished) return;
@@ -85,6 +94,16 @@ export class BlandRealtimeTts implements RealtimeTtsProvider {
           // Already gone.
         }
       };
+      /** Clean end of the whole turn: ack, report done, hang up. */
+      const hangUp = (): void => {
+        try {
+          ws.send(blandCloseMessage());
+        } catch {
+          // Closing anyway.
+        }
+        done();
+        close();
+      };
 
       const timer = setTimeout(() => {
         close();
@@ -106,6 +125,12 @@ export class BlandRealtimeTts implements RealtimeTtsProvider {
             Array.isArray(data) ? Buffer.concat(data) : (data as Buffer),
           );
           if (pcm.byteLength === 0) return;
+          if (statementSentAt !== 0) {
+            console.log(
+              `suma voice tts: first audio ${String(Date.now() - statementSentAt)}ms after statement`,
+            );
+            statementSentAt = 0;
+          }
           callbacks.onAudio(
             resamplePcm16(pcm, sampleRate, VOICE_OUTPUT_SAMPLE_RATE),
           );
@@ -125,16 +150,15 @@ export class BlandRealtimeTts implements RealtimeTtsProvider {
             resolve(turn);
             return;
           case "utterance_end":
+            // One statement's audio has fully arrived. The turn is over
+            // only when no statements are outstanding AND the session said
+            // no more are coming.
+            openContexts = Math.max(0, openContexts - 1);
+            if (noMoreStatements && openContexts === 0) hangUp();
+            return;
           case "done":
-            // Every byte for the turn has arrived. Ack and hang up — the
-            // one-socket-per-turn design has nothing further to say.
-            try {
-              ws.send(blandCloseMessage());
-            } catch {
-              // Closing anyway.
-            }
-            done();
-            close();
+            // Server-side confirmation everything has been delivered.
+            hangUp();
             return;
           case "error":
             // The parsed message is what the user sees; the raw frame (which
@@ -186,10 +210,20 @@ export class BlandRealtimeTts implements RealtimeTtsProvider {
       };
 
       const turn: RealtimeTtsTurn = {
-        sendText: (delta) => {
-          if (delta !== "") send(blandSpeakMessage(contextId, delta));
+        speakStatement: (text) => {
+          if (finished || text === "") return;
+          const contextId = `s${String(nextContext++)}`;
+          openContexts++;
+          statementSentAt = Date.now();
+          send(blandSpeakMessage(contextId, text));
+          // The immediate end_of_turn IS the flush — without it this
+          // statement's audio waits for text that is never coming.
+          send(blandEndOfTurnMessage(contextId));
         },
-        finish: () => send(blandEndOfTurnMessage(contextId)),
+        finish: () => {
+          noMoreStatements = true;
+          if (openContexts === 0) hangUp();
+        },
         cancel: () => {
           // Silence, immediately: mark finished FIRST so the socket's dying
           // gasps (close event, buffered audio) go nowhere.

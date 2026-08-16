@@ -78,6 +78,11 @@ function MachineSection({ onClose }: { onClose: () => void }) {
   const wakeMachine = useSumaStore((s) => s.wakeMachine);
   const suspendMachine = useSumaStore((s) => s.suspendMachine);
   const openTerminal = useSumaStore((s) => s.openTerminal);
+  // Down, as opposed to cold_booted — that one still gets the top banner
+  // because it means work was LOST, not merely paused.
+  const computeDown = useSumaStore(
+    (s) => s.health.computePlane !== "ok" && s.health.computePlane !== "cold_booted",
+  );
 
   const pulse =
     machine !== null &&
@@ -93,6 +98,11 @@ function MachineSection({ onClose }: { onClose: () => void }) {
       label={machinePillText(machine)}
       detail={machine?.reason ?? "Machine status unavailable"}
     >
+      {computeDown ? (
+        <p className="mt-1 text-[11px] leading-snug font-medium text-warn">
+          Compute plane unavailable — terminal and cloud fetch are offline
+        </p>
+      ) : null}
       {machine !== null && machine.machineId !== null ? (
         <p className="mt-1 text-[11px] text-muted">
           {machine.spec.cpus} vCPU · {Math.round(machine.spec.memoryMb / 1024)} GB · {machine.hourlyRate}
@@ -235,13 +245,9 @@ function bannerMessages(health: PlaneHealth): Array<{ key: string; text: string;
       text: "Terminal restored from cold start — running processes were not recovered",
       tone: "warn",
     });
-  } else if (health.computePlane !== "ok") {
-    out.push({
-      key: "compute",
-      text: "Compute plane unavailable — terminal and cloud fetch are offline",
-      tone: "warn",
-    });
   }
+  // Compute-plane-down is NOT a banner: the machine dot already carries it,
+  // and the full story lives in the status hover card (MachineSection).
   return out;
 }
 

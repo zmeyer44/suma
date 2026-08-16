@@ -20,8 +20,10 @@ import {
   buildKeywordsFile,
   concatFrames,
   encodeKeyword,
+  extractSentences,
   frameRms,
   keywordsFileContents,
+  NarrationQueue,
   parseTokenVocabulary,
   pcm16ToFloat32,
   pcm16ToWav,
@@ -282,6 +284,87 @@ describe("UtteranceDetector", () => {
     detector.reset();
     expect(detector.feed(quiet()).kind).toBe("none");
     expect(detector.feed(quiet()).kind).toBe("none");
+  });
+});
+
+/* --------------------------- narration scheduling -------------------------- */
+
+describe("extractSentences", () => {
+  it("splits on terminators followed by whitespace, keeping the tail", () => {
+    expect(extractSentences("Done. Opening the tab now. And th")).toEqual({
+      sentences: ["Done.", "Opening the tab now."],
+      rest: "And th",
+    });
+  });
+
+  it("does not split decimals or a terminator still at the buffer edge", () => {
+    expect(extractSentences("It costs 3.50 dollars.")).toEqual({
+      sentences: [],
+      rest: "It costs 3.50 dollars.",
+    });
+  });
+
+  it("treats newlines as boundaries and honors trailing quotes", () => {
+    expect(extractSentences('He said "done!" then left.\nNext')).toEqual({
+      sentences: ['He said "done!"', "then left."],
+      rest: "Next",
+    });
+  });
+});
+
+describe("NarrationQueue", () => {
+  it("speaks a sentence announcing the current action (one-call lag)", () => {
+    const queue = new NarrationQueue();
+    queue.pushDelta("Scrolling to find the item. ");
+    queue.noteToolCall(); // the scroll itself
+    const { segment, dropped } = queue.takeNext();
+    expect(segment?.text).toBe("Scrolling to find the item.");
+    expect(dropped).toEqual([]);
+  });
+
+  it("drops narration two or more tool calls behind", () => {
+    const queue = new NarrationQueue();
+    queue.pushDelta("Scrolling to find the item. ");
+    queue.noteToolCall();
+    queue.noteToolCall();
+    const { segment, dropped } = queue.takeNext();
+    expect(segment).toBeNull();
+    expect(dropped).toEqual(["Scrolling to find the item."]);
+  });
+
+  it("a newer step's sentence supersedes an older one still queued", () => {
+    const queue = new NarrationQueue();
+    queue.pushDelta("Adding it to the cart. ");
+    queue.noteToolCall();
+    queue.pushDelta("Wrong item, trying again. ");
+    const { segment, dropped } = queue.takeNext();
+    expect(segment?.text).toBe("Wrong item, trying again.");
+    expect(dropped).toEqual(["Adding it to the cart."]);
+  });
+
+  it("same-step sentences never supersede each other", () => {
+    const queue = new NarrationQueue();
+    queue.pushDelta("First thought. Second thought. ");
+    expect(queue.takeNext().segment?.text).toBe("First thought.");
+    expect(queue.takeNext().segment?.text).toBe("Second thought.");
+  });
+
+  it("drain keeps only the answer — text after the last tool call", () => {
+    const queue = new NarrationQueue();
+    queue.pushDelta("Let me try once more. ");
+    queue.noteToolCall();
+    queue.pushDelta("Done — the TV is in your cart");
+    queue.finish(); // flushes the unterminated tail
+    const { segments, dropped } = queue.drain();
+    expect(segments.map((s) => s.text)).toEqual(["Done — the TV is in your cart"]);
+    expect(dropped).toEqual(["Let me try once more."]);
+  });
+
+  it("finish flushes nothing when the buffer is blank", () => {
+    const queue = new NarrationQueue();
+    queue.pushDelta("  ");
+    queue.finish();
+    expect(queue.drain().segments).toEqual([]);
   });
 });
 

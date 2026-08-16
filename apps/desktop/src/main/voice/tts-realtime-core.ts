@@ -14,16 +14,19 @@ import { VOICE_OUTPUT_SAMPLE_RATE } from "../../shared/voice";
 /* ------------------------------ the contract ------------------------------- */
 
 /**
- * One assistant turn's speech stream. The session sends text deltas exactly
- * as streamText yields them; the provider buffers, detects sentence
- * boundaries, and streams PCM back through `onAudio` — 24 kHz 16-bit mono
- * (the reply wire's contract; implementations resample when their provider
- * negotiates something else).
+ * One assistant turn's speech stream. The session speaks in complete,
+ * self-contained STATEMENTS (the narration scheduler's output), and each
+ * must synthesize immediately — a provider that buffers text waiting for
+ * more context turns a live conversation into a tape delay (measured live:
+ * Bland holds speak-frames until an end_of_turn, so statement-per-context
+ * is the only low-latency shape). PCM comes back through `onAudio` —
+ * 24 kHz 16-bit mono (the reply wire's contract; implementations resample
+ * when their provider negotiates something else).
  */
 export interface RealtimeTtsTurn {
-  /** One text delta, verbatim (spaces and punctuation intact). */
-  sendText(delta: string): void;
-  /** All text sent; flush whatever is buffered and finish the stream. */
+  /** Synthesize one complete statement NOW (a sentence or a few). */
+  speakStatement(text: string): void;
+  /** No more statements are coming; onDone once all audio has arrived. */
   finish(): void;
   /** Barge-in / teardown: stop synthesizing NOW, drop everything queued. */
   cancel(): void;

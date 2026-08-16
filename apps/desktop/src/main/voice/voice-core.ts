@@ -304,6 +304,136 @@ export class UtteranceDetector {
   }
 }
 
+/* --------------------------- narration scheduling --------------------------- */
+
+/**
+ * Split off the COMPLETE sentences at the head of a streaming text buffer.
+ * A boundary is a newline, or a terminator run (.!?…, plus trailing quotes)
+ * followed by whitespace — the whitespace requirement keeps "3.5" and a
+ * sentence still arriving delta-by-delta intact. `rest` is the tail to keep
+ * buffering.
+ */
+export function extractSentences(buffer: string): {
+  sentences: string[];
+  rest: string;
+} {
+  const sentences: string[] = [];
+  let start = 0;
+  for (let i = 0; i < buffer.length; i++) {
+    const ch = buffer[i]!;
+    if (ch === "\n") {
+      const sentence = buffer.slice(start, i).trim();
+      if (sentence !== "") sentences.push(sentence);
+      start = i + 1;
+      continue;
+    }
+    if (".!?…".includes(ch)) {
+      let end = i;
+      while (end + 1 < buffer.length && ".!?…\"')".includes(buffer[end + 1]!)) {
+        end++;
+      }
+      if (end + 1 < buffer.length && /\s/.test(buffer[end + 1]!)) {
+        const sentence = buffer.slice(start, end + 1).trim();
+        if (sentence !== "") sentences.push(sentence);
+        // Consume the boundary's whitespace run too, so `rest` starts at
+        // real content and a newline in the run is not double-counted.
+        let next = end + 1;
+        while (next < buffer.length && /\s/.test(buffer[next]!)) next++;
+        start = next;
+        i = next - 1;
+      }
+    }
+  }
+  return { sentences, rest: buffer.slice(start) };
+}
+
+export interface NarrationSegment {
+  text: string;
+  /** How many tool calls had happened when this sentence completed. */
+  tools: number;
+}
+
+/**
+ * The agent thinks faster than the voice talks: tool calls finish in
+ * hundreds of milliseconds while each spoken sentence takes seconds, so
+ * narration queued verbatim plays half a minute behind the browser —
+ * announcing scrolls long since scrolled. This queue is the fix: the
+ * session holds sentences HERE (not in the TTS provider), asks for the next
+ * one only when the voice is about to fall silent, and at that moment the
+ * queue drops whatever the intervening tool calls have made stale.
+ *
+ * Staleness, tuned to how models narrate:
+ *  - A sentence announcing the CURRENT action stays speakable — narration
+ *    precedes its own tool call, so a one-call lag is "what I'm doing",
+ *    two calls is history (takeNext).
+ *  - A sentence from a newer step supersedes anything older still queued;
+ *    sentences of the SAME step never supersede each other (they are one
+ *    continuous utterance).
+ *  - When the run ends, only the text after the last tool call — the
+ *    answer — is still worth hearing; every unspoken progress remark is
+ *    about a resolved past (drain).
+ *
+ * Pure (no clock, no I/O): the session owns WHEN to pump; this owns WHAT.
+ */
+export class NarrationQueue {
+  private buffer = "";
+  private queue: NarrationSegment[] = [];
+  private toolCount = 0;
+
+  pushDelta(delta: string): void {
+    this.buffer += delta;
+    const { sentences, rest } = extractSentences(this.buffer);
+    this.buffer = rest;
+    for (const text of sentences) {
+      this.queue.push({ text, tools: this.toolCount });
+    }
+  }
+
+  noteToolCall(): void {
+    this.toolCount++;
+  }
+
+  /** The stream ended; the buffered tail (if any) is the answer's last words. */
+  finish(): void {
+    const tail = this.buffer.trim();
+    this.buffer = "";
+    if (tail !== "") this.queue.push({ text: tail, tools: this.toolCount });
+  }
+
+  /**
+   * Mid-run: the next sentence worth speaking now, with whatever staleness
+   * discarded to get there. Null when nothing (fresh) is queued.
+   */
+  takeNext(): { segment: NarrationSegment | null; dropped: string[] } {
+    const dropped: string[] = [];
+    while (this.queue.length > 0) {
+      const head = this.queue[0]!;
+      const superseded = this.queue.some((seg) => seg.tools > head.tools);
+      const lagging = this.toolCount - head.tools >= 2;
+      if (superseded || lagging) {
+        dropped.push(head.text);
+        this.queue.shift();
+        continue;
+      }
+      this.queue.shift();
+      return { segment: head, dropped };
+    }
+    return { segment: null, dropped };
+  }
+
+  /** Run over: everything still worth saying (the answer), rest dropped. */
+  drain(): { segments: NarrationSegment[]; dropped: string[] } {
+    const dropped: string[] = [];
+    const segments: NarrationSegment[] = [];
+    for (const seg of this.queue) {
+      if (seg.tools >= this.toolCount) segments.push(seg);
+      else dropped.push(seg.text);
+    }
+    this.queue = [];
+    return { segments, dropped };
+  }
+}
+
 /** Concatenate an utterance's frames into one PCM16 buffer. */
 export function concatFrames(frames: readonly Uint8Array[]): Uint8Array {
   let total = 0;
@@ -331,7 +461,7 @@ export function voiceSystemInstruction(wakeWord: string): string {
 
 Guidelines:
 - Act immediately. When a request needs the web — weather, news, facts, shopping — open a tab, search, read the page, and answer from what you read. Never claim you cannot browse.
-- Before your first tool call, say ONE short sentence about what you are doing ("Checking Amazon for TV deals.") — your words are the only sign you are working; a silent tool run feels broken. Stay silent between the tool calls that follow.
+- Before your first tool call, say ONE short sentence about what you are doing ("Checking Amazon for TV deals.") — then work silently. The user WATCHES the browser while you act: never narrate steps, corrections, or scrolling they can see, and never mention a mistake you already fixed. Speech lags your actions, so a progress remark may be skipped — make every sentence stand alone.
 - To search the web, open a tab at https://duckduckgo.com/?q=<query> (URL-encode the query), then read_page for the results.
 - Write exactly what should be spoken: one to three short sentences, lead with the answer, no lists, no markdown, no emoji, no URLs read letter by letter. Summarize; never recite a page.
 - Transcription is imperfect: if the words are garbled but the intent is clear, act on the intent; if genuinely ambiguous, ask one short question.
