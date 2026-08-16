@@ -61,6 +61,11 @@ export const VOICE_MODELS: readonly VoiceModelOption[] = [
     hint: "most capable, slower",
   },
   {
+    id: "anthropic/claude-opus-5-fast",
+    label: "Claude Opus 5 Fast",
+    hint: "most capable, faster",
+  },
+  {
     id: "openai/gpt-5.6-luna",
     label: "GPT-5.6 Luna",
     hint: "newest from OpenAI",
@@ -76,6 +81,14 @@ export const DEFAULT_VOICE_MODEL = VOICE_MODELS[0]!.id;
  */
 export const DEFAULT_VOICE_STT_MODEL = "openai/gpt-4o-mini-transcribe";
 
+/**
+ * The narrator: an ultra-fast gateway model that composes one-line spoken
+ * progress updates from tool events when the AGENT model works silently
+ * (thinking-heavy models often call a dozen tools without a word). Same
+ * persistence story as sttModel — hand-editable, no settings knob yet.
+ */
+export const DEFAULT_VOICE_NARRATOR_MODEL = "zai/glm-5.2-fast";
+
 /* ----------------------------- TTS providers ------------------------------ */
 
 /**
@@ -88,7 +101,9 @@ export const DEFAULT_VOICE_STT_MODEL = "openai/gpt-4o-mini-transcribe";
 export const VOICE_TTS_PROVIDERS = ["bland"] as const;
 export type VoiceTtsProviderId = (typeof VOICE_TTS_PROVIDERS)[number];
 
-export function isVoiceTtsProviderId(value: unknown): value is VoiceTtsProviderId {
+export function isVoiceTtsProviderId(
+  value: unknown,
+): value is VoiceTtsProviderId {
   return (
     typeof value === "string" &&
     (VOICE_TTS_PROVIDERS as readonly string[]).includes(value)
@@ -126,6 +141,8 @@ export interface VoiceSettings {
   model: string;
   /** Gateway model id for transcription. */
   sttModel: string;
+  /** Gateway model id for spoken progress updates during silent runs. */
+  narratorModel: string;
   ttsProvider: VoiceTtsProviderId;
   /** The TTS provider's voice id. */
   voice: string;
@@ -137,6 +154,7 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   wakeWord: DEFAULT_WAKE_WORD,
   model: DEFAULT_VOICE_MODEL,
   sttModel: DEFAULT_VOICE_STT_MODEL,
+  narratorModel: DEFAULT_VOICE_NARRATOR_MODEL,
   ttsProvider: DEFAULT_VOICE_TTS_PROVIDER,
   voice: DEFAULT_VOICE_TTS_VOICE,
 };
@@ -162,6 +180,7 @@ export interface VoiceSettingsInfo {
   wakeWord: string;
   model: string;
   sttModel: string;
+  narratorModel: string;
   ttsProvider: VoiceTtsProviderId;
   voice: string;
   keyState: VoiceKeyState;
@@ -174,6 +193,7 @@ export interface VoiceSettingsPatch {
   wakeWord?: string;
   model?: string;
   sttModel?: string;
+  narratorModel?: string;
   ttsProvider?: VoiceTtsProviderId;
   voice?: string;
 }
@@ -241,10 +261,17 @@ export function parseVoiceSettings(raw: string): VoiceSettings {
     wakeWord:
       normalizeWakeWord(text("wakeWord", DEFAULT_WAKE_WORD)) ??
       DEFAULT_WAKE_WORD,
-    model: migrateModel(text("model", DEFAULT_VOICE_MODEL), DEFAULT_VOICE_MODEL),
+    model: migrateModel(
+      text("model", DEFAULT_VOICE_MODEL),
+      DEFAULT_VOICE_MODEL,
+    ),
     sttModel: migrateModel(
       text("sttModel", DEFAULT_VOICE_STT_MODEL),
       DEFAULT_VOICE_STT_MODEL,
+    ),
+    narratorModel: migrateModel(
+      text("narratorModel", DEFAULT_VOICE_NARRATOR_MODEL),
+      DEFAULT_VOICE_NARRATOR_MODEL,
     ),
     ttsProvider: isVoiceTtsProviderId(record["ttsProvider"])
       ? record["ttsProvider"]
@@ -274,6 +301,12 @@ export function mergeVoiceSettings(
   if (typeof patch.sttModel === "string" && patch.sttModel.trim() !== "") {
     next.sttModel = patch.sttModel.trim();
   }
+  if (
+    typeof patch.narratorModel === "string" &&
+    patch.narratorModel.trim() !== ""
+  ) {
+    next.narratorModel = patch.narratorModel.trim();
+  }
   if (isVoiceTtsProviderId(patch.ttsProvider)) {
     next.ttsProvider = patch.ttsProvider;
   }
@@ -294,6 +327,7 @@ export function voiceSettingsInfo(
     wakeWord: settings.wakeWord,
     model: settings.model,
     sttModel: settings.sttModel,
+    narratorModel: settings.narratorModel,
     ttsProvider: settings.ttsProvider,
     voice: settings.voice,
     keyState,

@@ -752,6 +752,9 @@ export function registerIpc(deps: IpcDeps): void {
     if (typeof a["wakeWord"] === "string") patch.wakeWord = a["wakeWord"];
     if (typeof a["model"] === "string") patch.model = a["model"];
     if (typeof a["sttModel"] === "string") patch.sttModel = a["sttModel"];
+    if (typeof a["narratorModel"] === "string") {
+      patch.narratorModel = a["narratorModel"];
+    }
     if (isVoiceTtsProviderId(a["ttsProvider"])) {
       patch.ttsProvider = a["ttsProvider"];
     }

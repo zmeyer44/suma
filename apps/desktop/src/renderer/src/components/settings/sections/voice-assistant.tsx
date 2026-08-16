@@ -13,13 +13,14 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import type { TtsVoice } from "../../../../../shared/tts";
+import { TTS_PREVIEW_TEXT, type TtsVoice } from "../../../../../shared/tts";
 import {
   VOICE_MODELS,
   type VoiceSettingsInfo,
   type VoiceSettingsPatch,
   type VoiceStatus,
 } from "../../../../../shared/voice";
+import { useAudioStore } from "../../../lib/audio";
 import { useSumaStore } from "../../../store";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
@@ -112,6 +113,7 @@ const WAKE_NOTES: Record<VoiceStatus["wakeWord"], string> = {
 export function VoiceAssistantPage() {
   const { settings, status, update } = useVoiceSettings();
   const openSettings = useSumaStore((s) => s.openSettings);
+  const play = useAudioStore((s) => s.play);
   const [wakeDraft, setWakeDraft] = useState<string | null>(null);
   const [voices, setVoices] = useState<TtsVoice[]>([]);
 
@@ -250,26 +252,50 @@ export function VoiceAssistantPage() {
           label="Voice"
           note="How the assistant sounds — a Bland voice, spoken in realtime. With a Bland key added, your account's cloned and library voices appear here too."
         >
-          <Select
-            value={voice}
-            items={voiceItems}
-            disabled={settings === null}
-            onValueChange={(next: string) => update({ voice: next })}
-          >
-            <SelectTrigger aria-label="Assistant voice" className="w-[210px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {voiceItems.map((entry) => {
-                const hint = voices.find((v) => v.id === entry.value)?.hint;
-                return (
-                  <SelectItem key={entry.value} value={entry.value}>
-                    {hint === undefined ? entry.label : `${entry.label} — ${hint}`}
-                  </SelectItem>
-                );
-              })}
-            </SelectContent>
-          </Select>
+          <span className="flex items-center gap-2">
+            <Select
+              value={voice}
+              items={voiceItems}
+              disabled={settings === null}
+              onValueChange={(next: string) => update({ voice: next })}
+            >
+              <SelectTrigger aria-label="Assistant voice" className="w-[210px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {voiceItems.map((entry) => {
+                  const hint = voices.find((v) => v.id === entry.value)?.hint;
+                  return (
+                    <SelectItem key={entry.value} value={entry.value}>
+                      {hint === undefined ? entry.label : `${entry.label} — ${hint}`}
+                    </SelectItem>
+                  );
+                })}
+              </SelectContent>
+            </Select>
+            {/* Same preview path as Voice & audio: the clip renders through
+                Bland's batch endpoint with THIS voice, so what you hear is
+                the assistant's voice even though live replies stream. */}
+            <Button
+              variant="secondary"
+              disabled={settings === null || voice === ""}
+              onClick={() => {
+                play({
+                  id: `voice-assistant-preview-${voice}`,
+                  title: "Assistant voice preview",
+                  origin: "Settings",
+                  source: {
+                    kind: "tts",
+                    text: TTS_PREVIEW_TEXT,
+                    provider: settings?.ttsProvider ?? "bland",
+                    voice,
+                  },
+                });
+              }}
+            >
+              Preview
+            </Button>
+          </span>
         </Row>
         <Block>
           <Button variant="secondary" onClick={() => void openSettings("voice")}>

@@ -33,6 +33,7 @@
 
 import {
   experimental_transcribe,
+  generateText,
   NoTranscriptGeneratedError,
   stepCountIs,
   streamText,
@@ -49,8 +50,12 @@ import {
   concatFrames,
   frameRms,
   NarrationQueue,
+  narratorEvent,
+  narratorPrompt,
+  parseNarratorReply,
   pcm16ToWav,
   UtteranceDetector,
+  VOICE_ACK_PHRASES,
 } from "./voice-core";
 
 /** Same leash as the chat sidebar: a turn may take a while, not forever. */
@@ -87,6 +92,18 @@ const MIN_TRANSCRIPT_CHARS = 2;
 const SPEECH_LEAD_MS = 800;
 const SPEECH_PUMP_MS = 250;
 
+/** A turn silent this long (or at its first tool call, whichever comes
+ *  first) gets a canned acknowledgment — model narration is optional,
+ *  hearing SOMETHING is not. */
+const ACK_DEADLINE_MS = 2_500;
+
+/** The narrator model steps in once this many tool calls have run with the
+ *  voice idle and nothing queued — before that, silence reads as working. */
+const NARRATOR_MIN_EVENTS = 3;
+/** A narrator slower than this has missed its moment. Sized for a
+ *  thinking-tuned model that reasons before its SAY line. */
+const NARRATOR_TIMEOUT_MS = 4_000;
+
 export type Gateway = ReturnType<typeof createGateway>;
 
 export interface VoiceAgentSessionOpts {
@@ -97,6 +114,8 @@ export interface VoiceAgentSessionOpts {
   model: string;
   /** Gateway model id for transcription. */
   sttModel: string;
+  /** Ultra-fast gateway model for spoken progress lines during silent runs. */
+  narratorModel: string;
   /** The chat sidebar's browser tools, already permission-filtered. */
   tools: ToolSet;
   systemInstruction: string;
@@ -133,6 +152,11 @@ export class VoiceAgentSession {
   private bargeRun: number | null = null;
   /** Whether the utterance being collected has earned a turn. */
   private validated = false;
+  /** Rotates the canned acknowledgments so back-to-back turns don't chant. */
+  private ackCount = 0;
+  /** One narrator failure disables it for the session — a progress line is
+   *  garnish, and a broken narrator must not log-spam every turn. */
+  private narratorBroken = false;
 
   constructor(private readonly opts: VoiceAgentSessionOpts) {}
 
@@ -327,8 +351,14 @@ export class VoiceAgentSession {
       // of narrating a past the user already watched happen.
       const narration = new NarrationQueue();
       let spoken = "";
+      // Tool calls since the voice last said anything — the narrator's raw
+      // material, and the ack's trigger. Any speech resets the window.
+      let unspokenEvents: string[] = [];
+      let narratorInFlight = false;
+      let streamDone = false;
       const speakSegment = (text: string): void => {
         spoken = spoken === "" ? text : `${spoken} ${text}`;
+        unspokenEvents = [];
         ttsTurn?.speakStatement(text);
         callbacks.onTranscript("assistant", spoken);
       };
@@ -337,12 +367,81 @@ export class VoiceAgentSession {
           console.log(`suma voice: skipping stale narration ${JSON.stringify(text)}`);
         }
       };
+      // Guaranteed acknowledgment: prompt-based narration is model-dependent
+      // (thinking-heavy models run a dozen tools without a word), so if the
+      // agent has said nothing by its first tool call — or by the deadline —
+      // a canned phrase goes out. The wake word must never feel ignored.
+      const maybeAck = (): void => {
+        if (!this.live(generation) || streamDone) return;
+        if (spoken !== "" || narration.pending > 0) return;
+        const phrase =
+          VOICE_ACK_PHRASES[this.ackCount++ % VOICE_ACK_PHRASES.length]!;
+        console.log(`suma voice: acknowledging silently-working model ("${phrase}")`);
+        speakSegment(phrase);
+      };
+      const ackTimer = setTimeout(maybeAck, ACK_DEADLINE_MS);
+      // The narrator: with the voice idle, nothing queued, and several tool
+      // calls unaccounted for, an ultra-fast model turns those events into
+      // one spoken status line. Fire-and-forget with a hard deadline — by
+      // the time a slow narrator answers, its line is about the past.
+      const maybeNarrate = (): void => {
+        if (this.narratorBroken || narratorInFlight || streamDone) return;
+        if (unspokenEvents.length < NARRATOR_MIN_EVENTS) return;
+        narratorInFlight = true;
+        const events = [...unspokenEvents];
+        void generateText({
+          model: this.opts.gateway.languageModel(this.opts.narratorModel),
+          prompt: narratorPrompt({ userRequest: heard, spoken, events }),
+          // Generous on purpose: a thinking-tuned narrator reasons BEFORE
+          // its SAY line, and a cap that lands mid-reasoning produced a
+          // reply that was ALL reasoning. The parser keeps only the SAY
+          // line, so the extra budget costs pennies, not correctness.
+          maxOutputTokens: 800,
+          abortSignal: AbortSignal.any([
+            controller.signal,
+            AbortSignal.timeout(NARRATOR_TIMEOUT_MS),
+          ]),
+        })
+          .then((update) => {
+            narratorInFlight = false;
+            if (!this.live(generation) || streamDone) return;
+            // Real model text always outranks the narrator.
+            if (narration.pending > 0) return;
+            const line = parseNarratorReply(update.text);
+            if (line === null) {
+              console.log(
+                `suma voice: narrator reply unusable — skipped (${JSON.stringify(update.text.slice(0, 200))})`,
+              );
+              return;
+            }
+            console.log(`suma voice: narrator: ${JSON.stringify(line)}`);
+            speakSegment(line);
+          })
+          .catch((err: unknown) => {
+            narratorInFlight = false;
+            if (controller.signal.aborted) return;
+            // A timeout is a slow moment, not a broken narrator — the next
+            // gap gets another chance. Real errors (bad model id, auth)
+            // would repeat forever, so they disable it for the session.
+            const name = err instanceof Error ? err.name : "";
+            if (name === "TimeoutError" || name === "AbortError") {
+              console.log("suma voice: narrator missed its window (timeout)");
+              return;
+            }
+            this.narratorBroken = true;
+            console.error(
+              "suma voice: narrator failed (disabled for this session):",
+              err,
+            );
+          });
+      };
       const pump = (): void => {
         if (!this.live(generation)) return;
         if (Date.now() < this.speakingUntil - SPEECH_LEAD_MS) return;
         const { segment, dropped } = narration.takeNext();
         logDropped(dropped);
         if (segment !== null) speakSegment(segment.text);
+        else maybeNarrate();
       };
       const pumpTimer = setInterval(pump, SPEECH_PUMP_MS);
 
@@ -356,6 +455,8 @@ export class VoiceAgentSession {
             case "tool-call":
               console.log(`suma voice: tool ${part.toolName} called`);
               narration.noteToolCall();
+              unspokenEvents.push(narratorEvent(part.toolName, part.input));
+              maybeAck();
               callbacks.onActivity();
               break;
             case "error":
@@ -367,6 +468,8 @@ export class VoiceAgentSession {
           }
         }
       } finally {
+        streamDone = true;
+        clearTimeout(ackTimer);
         clearInterval(pumpTimer);
       }
       if (!this.live(generation)) return;

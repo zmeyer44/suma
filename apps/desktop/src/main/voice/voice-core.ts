@@ -421,6 +421,11 @@ export class NarrationQueue {
     return { segment: null, dropped };
   }
 
+  /** Sentences currently queued (the session's "has anything to say" probe). */
+  get pending(): number {
+    return this.queue.length;
+  }
+
   /** Run over: everything still worth saying (the answer), rest dropped. */
   drain(): { segments: NarrationSegment[]; dropped: string[] } {
     const dropped: string[] = [];
@@ -445,6 +450,94 @@ export function concatFrames(frames: readonly Uint8Array[]): Uint8Array {
     offset += frame.byteLength;
   }
   return out;
+}
+
+/* ------------------------ guaranteed acknowledgments ------------------------ */
+
+/**
+ * Spoken when a turn starts working before the agent model has said a word
+ * — narration by prompt is model-dependent (thinking-heavy models run a
+ * dozen tools in silence), and the user must hear SOMETHING or the wake
+ * word feels ignored. Rotated so back-to-back turns don't chant.
+ */
+export const VOICE_ACK_PHRASES: readonly string[] = [
+  "On it.",
+  "Sure, one moment.",
+  "Working on it.",
+  "Let me take a look.",
+];
+
+/* ------------------------------ narrator prompt ----------------------------- */
+
+/**
+ * The narrator's whole job in one prompt: given what the user asked and the
+ * tool calls since the voice last said anything, produce ONE short spoken
+ * status line. Runs on an ultra-fast model while the agent model works
+ * silently.
+ *
+ * The "SAY:" prefix is a survival contract, not decoration: thinking-tuned
+ * models (the default narrator included) may emit reasoning as plain text
+ * before their answer, and one leaked "I need to say what it's doing…" went
+ * to the SPEAKERS (observed live). parseNarratorReply extracts only a
+ * SAY-prefixed line — reasoning has no such line, so a reply that never
+ * gets to the point is dropped whole.
+ */
+export function narratorPrompt(opts: {
+  userRequest: string;
+  spoken: string;
+  events: readonly string[];
+}): string {
+  return `You are the live voice of a browser assistant that is working on a user's request right now. Based on its recent actions, say what it is doing at this moment.
+
+Rules: ONE spoken sentence under twelve words, present tense, plain conversational words, addressed to the user ("I'm…", never "the assistant"). No lists, no markdown, no URLs, no selector or code jargon. Do not repeat what was already said.
+
+Answer on a single line in exactly this form:
+SAY: <the sentence>
+
+The user asked: ${opts.userRequest}
+${opts.spoken === "" ? "Nothing has been said aloud yet this turn." : `Said aloud so far: ${opts.spoken}`}
+Actions since the last spoken update:
+${opts.events.join("\n")}`;
+}
+
+/** Sanity ceiling for a "short spoken sentence" — longer means the contract
+ *  was ignored and the reply is untrustworthy. */
+const MAX_NARRATION_CHARS = 140;
+
+/**
+ * Extract the speakable sentence from a narrator reply, or null when the
+ * reply must not be spoken. The LAST "SAY:" line wins (reasoning-then-
+ * answer models put the answer at the end); a reply with no SAY line is
+ * accepted only when it is already a single short line (a well-behaved
+ * model that skipped the prefix), and anything overlong is refused rather
+ * than trimmed — a truncated thought sounds worse than silence.
+ */
+export function parseNarratorReply(raw: string): string | null {
+  const withoutThink = raw.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "");
+  const sayLines = [...withoutThink.matchAll(/^[ \t]*SAY:\s*(.+)$/gim)];
+  let candidate: string;
+  if (sayLines.length > 0) {
+    candidate = sayLines[sayLines.length - 1]![1]!;
+  } else {
+    const trimmed = withoutThink.trim();
+    if (trimmed === "" || trimmed.includes("\n")) return null;
+    candidate = trimmed;
+  }
+  const line = candidate.trim().replace(/\s+/g, " ").replace(/^["'`]+|["'`]+$/g, "");
+  if (line === "" || line.length > MAX_NARRATION_CHARS) return null;
+  return line;
+}
+
+/** One tool call, compressed for the narrator ("click {"text":"Add to Cart"}"). */
+export function narratorEvent(toolName: string, input: unknown): string {
+  let args = "";
+  try {
+    args = JSON.stringify(input) ?? "";
+  } catch {
+    args = "";
+  }
+  if (args.length > 120) args = `${args.slice(0, 120)}…`;
+  return args === "" || args === "{}" ? toolName : `${toolName} ${args}`;
 }
 
 /* ------------------------------ system prompt ------------------------------ */

@@ -379,6 +379,7 @@ export class VoiceService {
           gateway,
           model: settings.model,
           sttModel: settings.sttModel,
+          narratorModel: settings.narratorModel,
           tools,
           systemInstruction: voiceSystemInstruction(settings.wakeWord),
           tts: this.ttsProvider(settings),

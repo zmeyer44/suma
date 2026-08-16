@@ -24,6 +24,9 @@ import {
   frameRms,
   keywordsFileContents,
   NarrationQueue,
+  narratorEvent,
+  narratorPrompt,
+  parseNarratorReply,
   parseTokenVocabulary,
   pcm16ToFloat32,
   pcm16ToWav,
@@ -365,6 +368,67 @@ describe("NarrationQueue", () => {
     queue.pushDelta("  ");
     queue.finish();
     expect(queue.drain().segments).toEqual([]);
+  });
+
+  it("reports how many sentences are pending", () => {
+    const queue = new NarrationQueue();
+    expect(queue.pending).toBe(0);
+    queue.pushDelta("One. Two. And a tail");
+    expect(queue.pending).toBe(2);
+  });
+});
+
+describe("narrator", () => {
+  it("compresses a tool call into one event line, capping huge inputs", () => {
+    expect(narratorEvent("list_tabs", {})).toBe("list_tabs");
+    expect(narratorEvent("click", { text: "Add to Cart" })).toBe(
+      'click {"text":"Add to Cart"}',
+    );
+    const huge = narratorEvent("type_text", { text: "x".repeat(500) });
+    expect(huge.length).toBeLessThan(160);
+    expect(huge.endsWith("…")).toBe(true);
+  });
+
+  it("prompt carries the request, the spoken line, the events, and the SAY contract", () => {
+    const prompt = narratorPrompt({
+      userRequest: "add the TV to my cart",
+      spoken: "On it.",
+      events: ["click {\"text\":\"Add to Cart\"}"],
+    });
+    expect(prompt).toContain("add the TV to my cart");
+    expect(prompt).toContain("Said aloud so far: On it.");
+    expect(prompt).toContain('click {"text":"Add to Cart"}');
+    expect(prompt).toContain("ONE spoken sentence");
+    expect(prompt).toContain("SAY: <the sentence>");
+    const silent = narratorPrompt({ userRequest: "x", spoken: "", events: [] });
+    expect(silent).toContain("Nothing has been said aloud yet");
+  });
+
+  it("parses the SAY line, preferring the last one", () => {
+    expect(parseNarratorReply("SAY: Checking your cart now.")).toBe(
+      "Checking your cart now.",
+    );
+    expect(
+      parseNarratorReply(
+        'The plan says "SAY: something".\nSAY: Draft one.\nSAY: Adding the TV to your cart.',
+      ),
+    ).toBe("Adding the TV to your cart.");
+  });
+
+  it("accepts a bare short single-line reply and strips quotes", () => {
+    expect(parseNarratorReply('"Opening Amazon now."')).toBe("Opening Amazon now.");
+  });
+
+  it("refuses reasoning leaks: multi-line prose without a SAY line", () => {
+    const leaked =
+      "The user is working with a browser assistant that's shopping on Amazon.\nI need to say what it's doing in one sentence under twelve words.\nLet me make sure I don't repeat";
+    expect(parseNarratorReply(leaked)).toBeNull();
+  });
+
+  it("refuses empty, think-tag-only, and overlong replies", () => {
+    expect(parseNarratorReply("")).toBeNull();
+    expect(parseNarratorReply("<think>hmm what to say</think>")).toBeNull();
+    expect(parseNarratorReply(`SAY: ${"very long ".repeat(30)}`)).toBeNull();
   });
 });
 
