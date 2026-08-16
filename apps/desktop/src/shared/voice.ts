@@ -42,23 +42,28 @@ export interface VoiceModelOption {
  * Voice wants the fast end of the catalog: a spoken exchange dies at
  * chat-grade latency, so the defaults lean small. Free-typing another id is
  * allowed, same as the chat model picker — a model launched tomorrow needs
- * no release.
+ * no release. Verified against the live gateway catalog 2026-08-15.
  */
 export const VOICE_MODELS: readonly VoiceModelOption[] = [
   {
-    id: "google/gemini-2.5-flash",
-    label: "Gemini 2.5 Flash",
-    hint: "fastest to answer",
+    id: "google/gemini-3.7-flash",
+    label: "Gemini 3.7 Flash",
+    hint: "fast, reliable tool use",
   },
   {
-    id: "anthropic/claude-haiku-4.5",
-    label: "Claude Haiku 4.5",
-    hint: "best tool use",
+    id: "zai/glm-5.2-fast",
+    label: "GLM 5.2 Fast",
+    hint: "fastest tokens (170+/s)",
   },
   {
-    id: "openai/gpt-4o-mini",
-    label: "GPT-4o mini",
-    hint: "smallest bill",
+    id: "anthropic/claude-opus-5",
+    label: "Claude Opus 5",
+    hint: "most capable, slower",
+  },
+  {
+    id: "openai/gpt-5.6-luna",
+    label: "GPT-5.6 Luna",
+    hint: "newest from OpenAI",
   },
 ];
 
