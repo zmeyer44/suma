@@ -455,6 +455,10 @@ const transferProgressSchema = z
   })
   .strict();
 
+const deviceTransferProgressSchema = transferProgressSchema
+  .omit({ transferId: true })
+  .strict();
+
 const auditQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
   // Keyset cursor: the id of the last entry on the previous page.
@@ -3014,6 +3018,104 @@ export function createApp(
     },
   );
 
+  /** Apply a progress report after its caller has been authenticated. Both
+   * the capability route (direct agents) and the device route (the desktop
+   * relaying unsolicited agent events) use this exact transition gate. */
+  const updateTransferProgress = async (
+    userId: string,
+    body: z.infer<typeof transferProgressSchema>,
+  ): Promise<Response> => {
+    const [transfer] = await db
+      .select()
+      .from(transfers)
+      .where(
+        and(eq(transfers.id, body.transferId), eq(transfers.userId, userId)),
+      );
+    if (!transfer)
+      return Response.json({ error: "not_found" }, { status: 404 });
+
+    const from = transfer.state as (typeof TRANSFER_STATES)[number];
+    if (isTerminalTransfer(from)) {
+      return Response.json(
+        { error: "transfer_terminal", state: from },
+        { status: 409 },
+      );
+    }
+    if (!canTransferTransition(from, body.state)) {
+      return Response.json(
+        { error: "illegal_transition", from, to: body.state },
+        { status: 409 },
+      );
+    }
+    // A total the creating device took from Content-Length is fixed: letting
+    // the VM restate it would let a transfer redefine the quota it was
+    // admitted against.
+    if (
+      body.totalBytes !== undefined &&
+      transfer.totalBytes > 0 &&
+      body.totalBytes !== transfer.totalBytes
+    ) {
+      return Response.json(
+        {
+          error: "out_of_range",
+          field: "totalBytes",
+          reason: "total_changed",
+        },
+        { status: 400 },
+      );
+    }
+    const totalBytes =
+      transfer.totalBytes > 0 ? transfer.totalBytes : (body.totalBytes ?? 0);
+    // Progress is a counter, not a gauge: a decrease is a corrupt report.
+    if (body.receivedBytes < transfer.receivedBytes) {
+      return Response.json(
+        {
+          error: "out_of_range",
+          field: "receivedBytes",
+          reason: "decreased",
+        },
+        { status: 400 },
+      );
+    }
+    if (totalBytes > 0 && body.receivedBytes > totalBytes) {
+      return Response.json(
+        {
+          error: "out_of_range",
+          field: "receivedBytes",
+          reason: "exceeds_total",
+        },
+        { status: 400 },
+      );
+    }
+
+    const [updated] = await db
+      .update(transfers)
+      .set({
+        state: body.state,
+        receivedBytes: body.receivedBytes,
+        totalBytes,
+        error: body.error ?? null,
+        updatedAt: new Date(),
+        // The stored URL is kept only while the fetch can still use it. Once
+        // the transfer stops moving, what remains is a link that may be
+        // bearer authority over someone else's object, sitting in a row with
+        // no expiry — so it is truncated to the part the UI needs.
+        ...(isTerminalTransfer(body.state)
+          ? { url: redactTransferUrl(transfer.url) }
+          : {}),
+      })
+      // Conditional on the state we validated against, so two concurrent
+      // reports cannot interleave into an illegal move.
+      .where(and(eq(transfers.id, transfer.id), eq(transfers.state, from)))
+      .returning();
+    if (!updated)
+      return Response.json(
+        { error: "conflict", from, to: body.state },
+        { status: 409 },
+      );
+    return Response.json({ transfer: transferView(updated) });
+  };
+
   // Agent-authenticated progress. The caller is inside the user's VM, so every
   // number is bounded and every illegal move is refused rather than stored.
   v1.post(
@@ -3024,93 +3126,22 @@ export function createApp(
       const refusal = transferReportRefusal(agent.caps);
       if (refusal)
         return c.json({ error: "capability_refused", reason: refusal }, 403);
-      const body = c.req.valid("json");
-      const [transfer] = await db
-        .select()
-        .from(transfers)
-        .where(
-          and(
-            eq(transfers.id, body.transferId),
-            eq(transfers.userId, agent.userId),
-          ),
-        );
-      if (!transfer) return c.json({ error: "not_found" }, 404);
-
-      const from = transfer.state as (typeof TRANSFER_STATES)[number];
-      if (isTerminalTransfer(from)) {
-        return c.json({ error: "transfer_terminal", state: from }, 409);
-      }
-      if (!canTransferTransition(from, body.state)) {
-        return c.json(
-          { error: "illegal_transition", from, to: body.state },
-          409,
-        );
-      }
-      // A total the creating device took from Content-Length is fixed: letting
-      // the VM restate it would let a transfer redefine the quota it was
-      // admitted against.
-      if (
-        body.totalBytes !== undefined &&
-        transfer.totalBytes > 0 &&
-        body.totalBytes !== transfer.totalBytes
-      ) {
-        return c.json(
-          {
-            error: "out_of_range",
-            field: "totalBytes",
-            reason: "total_changed",
-          },
-          400,
-        );
-      }
-      const totalBytes =
-        transfer.totalBytes > 0 ? transfer.totalBytes : (body.totalBytes ?? 0);
-      // Progress is a counter, not a gauge: a decrease is a corrupt report.
-      if (body.receivedBytes < transfer.receivedBytes) {
-        return c.json(
-          {
-            error: "out_of_range",
-            field: "receivedBytes",
-            reason: "decreased",
-          },
-          400,
-        );
-      }
-      if (totalBytes > 0 && body.receivedBytes > totalBytes) {
-        return c.json(
-          {
-            error: "out_of_range",
-            field: "receivedBytes",
-            reason: "exceeds_total",
-          },
-          400,
-        );
-      }
-
-      const [updated] = await db
-        .update(transfers)
-        .set({
-          state: body.state,
-          receivedBytes: body.receivedBytes,
-          totalBytes,
-          error: body.error ?? null,
-          updatedAt: new Date(),
-          // The stored URL is kept only while the fetch can still use it. Once
-          // the transfer stops moving, what remains is a link that may be
-          // bearer authority over someone else's object, sitting in a row with
-          // no expiry — so it is truncated to the part the UI needs.
-          ...(isTerminalTransfer(body.state)
-            ? { url: redactTransferUrl(transfer.url) }
-            : {}),
-        })
-        // Conditional on the state we validated against, so two concurrent
-        // reports cannot interleave into an illegal move.
-        .where(and(eq(transfers.id, transfer.id), eq(transfers.state, from)))
-        .returning();
-      if (!updated)
-        return c.json({ error: "conflict", from, to: body.state }, 409);
-      return c.json({ transfer: transferView(updated) });
+      return updateTransferProgress(agent.userId, c.req.valid("json"));
     },
+  );
+
+  // Device-authenticated relay for agent events. The desktop owns the live
+  // mux connection in both cloud and local modes, so it is the component that
+  // can durably report those events when the agent has no control-plane token.
+  v1.post(
+    "/files/transfers/:id/progress",
+    zValidator("param", idParamSchema),
+    zValidator("json", deviceTransferProgressSchema),
+    async (c) =>
+      updateTransferProgress(c.get("userId"), {
+        transferId: c.req.valid("param").id,
+        ...c.req.valid("json"),
+      }),
   );
 
   v1.post(

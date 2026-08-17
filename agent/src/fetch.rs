@@ -51,12 +51,14 @@ use crate::proto::AgentCtlResponse;
 /// What a fetch is allowed to know. No headers — see module docs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchSpec {
+    /// Stable caller-provided correlation id (normally the Files transfer id).
+    pub fetch_id: String,
     pub url: String,
     /// Where the bytes land, as an already-confined host path. Nothing here
     /// re-checks it: `dispatch` builds every real spec from
     /// `VfsRoot::resolve_new_file`, so the path is inside `~/cloud` before it
-    /// reaches this module. Construct one some other way and `File::create`
-    /// below will write wherever you pointed it.
+    /// reaches this module. Construct one some other way and the create-new
+    /// open below will write wherever you pointed it.
     pub dest_path: PathBuf,
 }
 
@@ -269,7 +271,10 @@ async fn fetch_with(
         );
     }
 
-    let mut file = tokio::fs::File::create(&spec.dest_path)
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&spec.dest_path)
         .await
         .with_context(|| format!("creating {}", spec.dest_path.display()))?;
 
@@ -303,6 +308,7 @@ async fn fetch_with(
         if received - last_emit >= PROGRESS_STRIDE || received >= total {
             last_emit = received;
             emit(AgentCtlResponse::FetchProgress {
+                fetch_id: spec.fetch_id.clone(),
                 url: spec.url.clone(),
                 received,
                 total,
@@ -671,6 +677,7 @@ mod tests {
         let (addr, _) = serve_once(body.clone()).await;
         let dest = temp_file("ok");
         let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
             url: format!("http://127.0.0.1:{}/data.bin", addr.port()),
             dest_path: dest.clone(),
         };
@@ -768,6 +775,7 @@ mod tests {
 
         let dest = temp_file("redirected");
         let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
             url: format!("http://127.0.0.1:{}/start", hop.port()),
             dest_path: dest.clone(),
         };
@@ -800,6 +808,7 @@ mod tests {
             }
         });
         let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
             url: format!("http://127.0.0.1:{}/loop", addr.port()),
             dest_path: temp_file("loop"),
         };
@@ -817,6 +826,7 @@ mod tests {
         // Location must fail the same check_target_host the original passed.)
         let hop = serve_redirect_once("http://169.254.169.254/latest/meta-data".into()).await;
         let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
             url: format!("http://127.0.0.1:{}/start", hop.port()),
             dest_path: temp_file("ssrf-hop"),
         };
@@ -901,6 +911,7 @@ mod tests {
 
         let dest = temp_file("tls");
         let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
             url: format!("https://localhost:{}/enc.bin", addr.port()),
             dest_path: dest.clone(),
         };
@@ -918,6 +929,7 @@ mod tests {
         // The same server WITHOUT the injected trust is refused: the shipped
         // config does not know this CA.
         let spec2 = FetchSpec {
+            fetch_id: "fetch-test-2".into(),
             url: format!("https://localhost:{}/enc.bin", addr.port()),
             dest_path: temp_file("tls-untrusted"),
         };
@@ -969,6 +981,7 @@ mod tests {
             addr.port()
         );
         let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
             url: smuggled,
             dest_path: temp_file("crlf"),
         };
@@ -1016,6 +1029,7 @@ mod tests {
             "build-server",      // bare LAN name
         ] {
             let spec = FetchSpec {
+                fetch_id: "fetch-test".into(),
                 url: format!("http://{host}/latest/meta-data/"),
                 dest_path: temp_file("private"),
             };
@@ -1035,6 +1049,7 @@ mod tests {
         assert!(ip_is_private("127.0.0.1".parse().unwrap()));
         assert!(ip_is_private("::ffff:127.0.0.1".parse().unwrap()));
         let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
             // `localhost.` has a dot, so only the resolved address gives it
             // away.
             url: "http://localhost./x".to_string(),
@@ -1063,6 +1078,7 @@ mod tests {
         let (addr, _) = serve_once(body.clone()).await;
         let dest = temp_file("toobig");
         let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
             url: format!("http://127.0.0.1:{}/big.bin", addr.port()),
             dest_path: dest.clone(),
         };
@@ -1079,6 +1095,7 @@ mod tests {
         let (addr, _) = serve_once_declaring(body, Some(1024)).await;
         let dest = temp_file("liar");
         let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
             url: format!("http://127.0.0.1:{}/big.bin", addr.port()),
             dest_path: dest.clone(),
         };

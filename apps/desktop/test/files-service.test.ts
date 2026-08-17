@@ -12,8 +12,14 @@
 import { describe, expect, it } from "vitest";
 // Workspace-relative like files-service.ts: @suma/chunking is not in this
 // package's manifest, and the shared implementation must not be duplicated.
-import { hashChunk } from "../../../packages/chunking/src/index";
-import type { AgentCtlRequest, AgentCtlResponse, FileEntry } from "@suma/protocol";
+import { buildManifest, hashChunk } from "../../../packages/chunking/src/index";
+import type {
+  AgentCtlRequest,
+  AgentCtlResponse,
+  FileEntry,
+  VfsRequest,
+  VfsResponse,
+} from "@suma/protocol";
 import { FilesClient } from "../src/main/files/files-client";
 import { FilesService } from "../src/main/files/files-service";
 import type { FilesDevice, UploadProgress } from "../src/shared/ipc";
@@ -134,6 +140,7 @@ interface FakeAgent {
     ctl: (request: AgentCtlRequest) => Promise<AgentCtlResponse | null>;
     onCtlEvent: (listener: (event: AgentCtlResponse) => void) => () => void;
     connected: () => boolean;
+    vfs: (request: VfsRequest) => Promise<VfsResponse>;
   };
   emit: (event: AgentCtlResponse) => void;
   ctlRequests: AgentCtlRequest[];
@@ -141,7 +148,10 @@ interface FakeAgent {
 }
 
 function fakeAgent(
-  onCtl?: (request: AgentCtlRequest) => AgentCtlResponse | null | Promise<AgentCtlResponse | null>,
+  onCtl?: (
+    request: AgentCtlRequest,
+  ) => AgentCtlResponse | null | Promise<AgentCtlResponse | null>,
+  fileBytes?: Uint8Array,
 ): FakeAgent {
   const listeners = new Set<(event: AgentCtlResponse) => void>();
   const ctlRequests: AgentCtlRequest[] = [];
@@ -157,6 +167,26 @@ function fakeAgent(
         return () => listeners.delete(listener);
       },
       connected: () => connected,
+      vfs: async (request) => {
+        if (request.t === "vfs.read" && fileBytes !== undefined) {
+          const bytes = fileBytes.subarray(
+            request.offset,
+            request.offset + request.length,
+          );
+          return {
+            t: "vfs.data",
+            path: request.path,
+            offset: request.offset,
+            dataB64: Buffer.from(bytes).toString("base64"),
+            eof: request.offset + bytes.byteLength >= fileBytes.byteLength,
+          };
+        }
+        return {
+          t: "error",
+          code: "vfs_not_found",
+          message: "the fake agent has no file bytes",
+        };
+      },
     },
     emit: (event) => {
       for (const listener of listeners) listener(event);
@@ -169,12 +199,126 @@ function fakeAgent(
 }
 
 /** An agent that accepts every fetch — the happy default. */
-function acceptingAgent(): FakeAgent {
-  return fakeAgent((request) =>
-    request.t === "fetch.public"
-      ? { t: "fetch.started", url: request.url, path: request.destPath }
-      : null,
+function acceptingAgent(fileBytes?: Uint8Array): FakeAgent {
+  return fakeAgent(
+    (request) =>
+      request.t === "fetch.public"
+        ? {
+            t: "fetch.started",
+            fetchId: request.fetchId,
+            url: request.url,
+            path: request.destPath,
+          }
+        : null,
+    fileBytes,
   );
+}
+
+/** Stateful control-plane transfer routes for the fetch-service tests. */
+function transferRoutes(): Route[] {
+  const transfers = new Map<string, import("@suma/protocol").Transfer>();
+  let sequence = 0;
+  return [
+    {
+      match: "/progress",
+      respond: (req) => {
+        const id = req.url.split("/transfers/")[1]?.split("/")[0] ?? "";
+        const current = transfers.get(id);
+        if (current === undefined)
+          return new Response("missing", { status: 404 });
+        const report = req.body as {
+          state: import("@suma/protocol").Transfer["state"];
+          receivedBytes: number;
+          error?: string;
+        };
+        const updated = {
+          ...current,
+          state: report.state,
+          receivedBytes: report.receivedBytes,
+          error: report.error ?? null,
+          updatedAtMs: current.updatedAtMs + 1,
+        };
+        transfers.set(id, updated);
+        return json({ transfer: updated });
+      },
+    },
+    {
+      match: "/v1/files/transfers",
+      respond: (req) => {
+        if (req.method === "GET")
+          return json({ transfers: [...transfers.values()] });
+        const body = req.body as {
+          url: string;
+          destPath: string;
+          totalBytes?: number;
+        };
+        sequence += 1;
+        const id = `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`;
+        const transfer = {
+          id,
+          url: body.url,
+          destPath: body.destPath,
+          state: "queued" as const,
+          receivedBytes: 0,
+          totalBytes: body.totalBytes ?? 0,
+          originDeviceId: "dev_local",
+          error: null,
+          startedAtMs: sequence,
+          updatedAtMs: sequence,
+        };
+        transfers.set(id, transfer);
+        return json({ transfer });
+      },
+    },
+  ];
+}
+
+function fetchedFileRoutes(data: Uint8Array): Route[] {
+  const hash = hashChunk(data);
+  const file: FileEntry = {
+    id: "10000000-0000-4000-8000-000000000001",
+    path: "/Personal/Downloads/big.bin",
+    sizeBytes: data.byteLength,
+    fileHash: hash,
+    contentType: "application/octet-stream",
+    createdAtMs: 1,
+    updatedAtMs: 1,
+  };
+  return [
+    {
+      match: "/v1/files/manifest",
+      respond: () =>
+        json({
+          file,
+          missing: [{ hash, offset: 0, length: data.byteLength }],
+        }),
+    },
+    UPLOAD_URL_ROUTE,
+    {
+      match: "https://r2.test/",
+      respond: () => json({ ok: true }),
+    },
+    {
+      match: "/v1/files/complete",
+      respond: () => json({ file }),
+    },
+  ];
+}
+
+async function waitForTransferState(
+  service: FilesService,
+  id: string,
+  state: import("@suma/protocol").Transfer["state"],
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (
+      service.snapshot().transfers.find((transfer) => transfer.id === id)
+        ?.state === state
+    )
+      return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error(`transfer ${id} did not reach ${state}`);
 }
 
 function harness(options: HarnessOptions): Harness {
@@ -344,28 +488,58 @@ describe("agent-driven cloud fetch (fetch.public)", () => {
   };
 
   it("runs queued → fetching → progress → completed off agent events", async () => {
-    const agent = acceptingAgent();
-    const { service, changed } = harness({ routes: [], agent });
-    await expect(service.startCloudFetch(args)).resolves.toBe(true);
-    expect(agent.ctlRequests).toEqual([
-      { t: "fetch.public", url: args.url, destPath: args.destPath },
-    ]);
+    const data = new Uint8Array([1, 2, 3, 4]);
+    const agent = acceptingAgent(data);
+    const { service, changed, requests } = harness({
+      routes: [...transferRoutes(), ...fetchedFileRoutes(data)],
+      agent,
+    });
+    await expect(
+      service.startCloudFetch({ ...args, totalBytes: data.byteLength }),
+    ).resolves.toBe(true);
     let row = service.snapshot().transfers.find((t) => t.url === args.url);
     expect(row).toMatchObject({ state: "fetching", cancellable: false });
+    if (row === undefined) throw new Error("missing transfer row");
+    expect(agent.ctlRequests).toEqual([
+      {
+        t: "fetch.public",
+        fetchId: row.id,
+        url: args.url,
+        destPath: args.destPath,
+      },
+    ]);
 
-    agent.emit({ t: "fetch.progress", url: args.url, received: 5_000, total: 100_000_000 });
+    agent.emit({
+      t: "fetch.progress",
+      fetchId: row.id,
+      url: args.url,
+      received: 2,
+      total: data.byteLength,
+    });
     agent.emit({
       t: "fetch.done",
+      fetchId: row.id,
       url: args.url,
       path: args.destPath,
-      bytes: 100_000_000,
+      bytes: data.byteLength,
+      manifest: buildManifest(data),
     });
+    await waitForTransferState(service, row.id, "completed");
     row = service.snapshot().transfers.find((t) => t.url === args.url);
     expect(row).toMatchObject({
       state: "completed",
-      receivedBytes: 100_000_000,
+      receivedBytes: data.byteLength,
       cancellable: true,
     });
+    expect(
+      requests.some((request) => request.includes("/v1/files/manifest")),
+    ).toBe(true);
+    expect(
+      requests.some((request) => request.startsWith("PUT https://r2.test/")),
+    ).toBe(true);
+    expect(
+      requests.some((request) => request.includes("/v1/files/complete")),
+    ).toBe(true);
     // Completion nudges the Files surface at the destination directory.
     expect(changed.at(-1)).toEqual({ path: "/Personal/Downloads" });
   });
@@ -376,7 +550,7 @@ describe("agent-driven cloud fetch (fetch.public)", () => {
       code: "vfs_path_refused",
       message: "path escapes the Files root",
     }));
-    const { service } = harness({ routes: [], agent });
+    const { service } = harness({ routes: transferRoutes(), agent });
     await expect(service.startCloudFetch(args)).resolves.toBe(false);
     const row = service.snapshot().transfers.find((t) => t.url === args.url);
     expect(row).toMatchObject({ state: "failed" });
@@ -385,10 +559,15 @@ describe("agent-driven cloud fetch (fetch.public)", () => {
 
   it("fetch.failed events settle the row with the agent's reason", async () => {
     const agent = acceptingAgent();
-    const { service } = harness({ routes: [], agent });
+    const { service } = harness({ routes: transferRoutes(), agent });
     await service.startCloudFetch(args);
+    const started = service
+      .snapshot()
+      .transfers.find((transfer) => transfer.url === args.url);
+    if (started === undefined) throw new Error("missing transfer row");
     agent.emit({
       t: "fetch.failed",
+      fetchId: started.id,
       url: args.url,
       path: args.destPath,
       error: "fetch truncated: got 5 of 10 bytes",
@@ -406,6 +585,42 @@ describe("agent-driven cloud fetch (fetch.public)", () => {
     expect(service.cloudAvailable()).toBe(true);
     agent.setConnected(false);
     expect(service.cloudAvailable()).toBe(false);
+  });
+
+  it("correlates simultaneous fetches of the same URL by fetchId", async () => {
+    const agent = acceptingAgent();
+    const { service } = harness({ routes: transferRoutes(), agent });
+    await service.startCloudFetch({
+      ...args,
+      destPath: "/Personal/Downloads/a.bin",
+    });
+    await service.startCloudFetch({
+      ...args,
+      destPath: "/Personal/Downloads/b.bin",
+    });
+    const rows = service
+      .snapshot()
+      .transfers.filter((transfer) => transfer.url === args.url);
+    expect(rows).toHaveLength(2);
+    const [first, second] = rows;
+    if (first === undefined || second === undefined)
+      throw new Error("missing transfer rows");
+
+    agent.emit({
+      t: "fetch.failed",
+      fetchId: first.id,
+      url: args.url,
+      path: first.destPath,
+      error: "first failed",
+    });
+    expect(
+      service.snapshot().transfers.find((transfer) => transfer.id === first.id)
+        ?.state,
+    ).toBe("failed");
+    expect(
+      service.snapshot().transfers.find((transfer) => transfer.id === second.id)
+        ?.state,
+    ).toBe("fetching");
   });
 });
 

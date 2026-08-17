@@ -1263,6 +1263,7 @@ async function startServices(ctx: {
       ctl: (request) => link.ctl(request),
       onCtlEvent: (listener) => link.onCtlEvent(listener),
       connected: () => link.connected(),
+      vfs: (request) => link.vfs(request),
     },
     emitTransfers: (update) => emitFiles("transfers:updated", update),
     emitChanged: (payload) => emitFiles("files:changed", payload),

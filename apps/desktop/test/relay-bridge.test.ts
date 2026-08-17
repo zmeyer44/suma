@@ -94,6 +94,7 @@ interface Rig {
   root: string;
   bridge: HomeAgentBridge;
   client: RelayAgentClient;
+  clientSockets: FakeWs[];
 }
 
 async function rig(): Promise<Rig> {
@@ -118,11 +119,13 @@ async function rig(): Promise<Rig> {
   await settle();
   expect(registry.homeOnline(USER)).toBe(true);
 
+  const clientSockets: FakeWs[] = [];
   const client = new RelayAgentClient({
     controlUrl: "http://relay.test",
     token: async () => "away-token",
     wsFactory: () => {
       const ws = new FakeWs();
+      clientSockets.push(ws);
       attachClientWs(registry, ws);
       return ws as unknown as WebSocket;
     },
@@ -130,7 +133,7 @@ async function rig(): Promise<Rig> {
   cleanups.push(() => client.stop());
   await settle();
   expect(client.connected()).toBe(true);
-  return { registry, sim, root, bridge, client };
+  return { registry, sim, root, bridge, client, clientSockets };
 }
 
 /** Let async token reads, microtasks, and fake opens run. */
@@ -184,6 +187,54 @@ describe("relay bridge end-to-end", () => {
     });
   });
 
+  it("serializes ctl handling so a slow response cannot overtake the FIFO", async () => {
+    const { client, sim } = await rig();
+    const originalCtl = sim.ctl.bind(sim);
+    sim.ctl = async (request) => {
+      if (request.t === "ports.list") {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+      return originalCtl(request);
+    };
+
+    const [ports, listing] = await Promise.all([
+      client.ctl({ t: "ports.list" }),
+      client.ctl({ t: "pty.list" }),
+    ]);
+    expect(ports?.t).toBe("ports");
+    expect(listing?.t).toBe("pty.listing");
+  });
+
+  it("restores PTY subscriptions and replays the reconnect gap", async () => {
+    const { client, sim, clientSockets } = await rig();
+    await client.ctl({
+      t: "pty.spawn",
+      ptyId: "reconnect-shell",
+      cols: 80,
+      rows: 24,
+    });
+    let output = "";
+    const channel = client.openPty("reconnect-shell", (chunk) => {
+      output += chunk.toString("utf8");
+    });
+    cleanups.push(() => channel.close());
+    channel.write("printf 'before-marker\\n'\n");
+    await settle(10);
+    expect(output).toContain("before-marker");
+
+    clientSockets.at(-1)?.close(1006);
+    await settle();
+    const direct = sim.openPty("reconnect-shell", () => undefined);
+    direct.write("printf 'gap-marker\\n'\n");
+    await settle(10);
+    direct.close();
+
+    client.nudge();
+    await settle(20);
+    expect(clientSockets.length).toBeGreaterThanOrEqual(2);
+    expect(output).toContain("gap-marker");
+  });
+
   it("unsolicited events fan out to the away device (fetch lifecycle)", async () => {
     const { client } = await rig();
     await client.vfs({ t: "vfs.mkdir", path: "/Downloads" });
@@ -199,6 +250,7 @@ describe("relay bridge end-to-end", () => {
     // which is exactly the unsolicited path under test.
     const started = await client.ctl({
       t: "fetch.public",
+      fetchId: "relay-fetch-1",
       url: "http://127.0.0.1:1/x.bin",
       destPath: "/Downloads/x.bin",
     });

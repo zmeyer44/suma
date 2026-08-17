@@ -17,11 +17,16 @@
  * network access, so the check is a guardrail, not a boundary.
  */
 
-import { createWriteStream } from "node:fs";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import dns from "node:dns/promises";
 import net from "node:net";
+import path from "node:path";
 import type { AgentCtlResponse } from "@suma/protocol";
+import {
+  StreamingManifestBuilder,
+  type ChunkManifest,
+} from "../../../../../packages/chunking/src/index";
 
 /** Mirrors agent/src/fetch.rs — one fetch's disk-exhaustion guard. */
 export const SIM_MAX_FETCH_BYTES = 8 * 1024 * 1024 * 1024;
@@ -32,6 +37,7 @@ const PROGRESS_STRIDE = 64 * 1024;
 const MAX_REDIRECTS = 5;
 
 export interface SimFetchArgs {
+  fetchId: string;
   url: string;
   /** Absolute host path, ALREADY confined via LocalVfs.resolveNewFile. */
   destTarget: string;
@@ -50,29 +56,43 @@ export interface SimFetchArgs {
  * terminal fetch.done or fetch.failed. Never throws.
  */
 export async function simFetchPublic(args: SimFetchArgs): Promise<void> {
+  const stagingTarget = path.join(
+    path.dirname(args.destTarget),
+    `.suma-fetch-${randomUUID()}.partial`,
+  );
   const emitFailed = async (error: string): Promise<void> => {
-    await fs.rm(args.destTarget, { force: true }).catch(() => undefined);
+    await fs.rm(stagingTarget, { force: true }).catch(() => undefined);
     args.emit({
       t: "fetch.failed",
+      fetchId: args.fetchId,
       url: args.url,
       path: args.destWirePath,
       error,
     });
   };
   try {
-    const bytes = await run(args);
+    const { bytes, manifest } = await run(args, stagingTarget);
+    // A hard link publishes a fully written inode atomically and refuses an
+    // existing destination. Unlike rename(2), it cannot replace user data.
+    await fs.link(stagingTarget, args.destTarget);
+    await fs.rm(stagingTarget, { force: true }).catch(() => undefined);
     args.emit({
       t: "fetch.done",
+      fetchId: args.fetchId,
       url: args.url,
       path: args.destWirePath,
       bytes,
+      manifest,
     });
   } catch (err) {
     await emitFailed(err instanceof Error ? err.message : String(err));
   }
 }
 
-async function run(args: SimFetchArgs): Promise<number> {
+async function run(
+  args: SimFetchArgs,
+  stagingTarget: string,
+): Promise<{ bytes: number; manifest: ChunkManifest }> {
   const fetchImpl = args.fetchImpl ?? fetch;
   const maxBytes = args.maxBytes ?? SIM_MAX_FETCH_BYTES;
 
@@ -121,7 +141,8 @@ async function run(args: SimFetchArgs): Promise<number> {
     throw new Error("fetch failed: response carried no body");
   }
 
-  const file = createWriteStream(args.destTarget);
+  const file = await fs.open(stagingTarget, "wx");
+  const manifest = new StreamingManifestBuilder();
   let received = 0;
   let lastEmit = 0;
   try {
@@ -138,15 +159,18 @@ async function run(args: SimFetchArgs): Promise<number> {
           `fetch aborted: body exceeded the ${maxBytes} byte limit for one fetch`,
         );
       }
-      await new Promise<void>((resolve, reject) => {
-        file.write(Buffer.from(value), (err) =>
-          err ? reject(err) : resolve(),
-        );
-      });
+      let written = 0;
+      while (written < value.byteLength) {
+        const result = await file.write(value, written, value.byteLength - written);
+        if (result.bytesWritten === 0) throw new Error("fetch failed: destination stopped accepting bytes");
+        written += result.bytesWritten;
+      }
+      manifest.push(value);
       if (received - lastEmit >= PROGRESS_STRIDE || received >= total) {
         lastEmit = received;
         args.emit({
           t: "fetch.progress",
+          fetchId: args.fetchId,
           url: args.url,
           received,
           total,
@@ -154,13 +178,13 @@ async function run(args: SimFetchArgs): Promise<number> {
       }
     }
   } finally {
-    await new Promise<void>((resolve) => file.end(resolve));
+    await file.close();
   }
 
   if (received !== total) {
     throw new Error(`fetch truncated: got ${received} of ${total} bytes`);
   }
-  return received;
+  return { bytes: received, manifest: manifest.finish() };
 }
 
 /* ------------------------------ URL policy ------------------------------ */

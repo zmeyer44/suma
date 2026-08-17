@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentCtlResponse } from "@suma/protocol";
+import { buildManifest } from "../../../packages/chunking/src/index";
 import {
   checkTarget,
   ipIsPrivate,
@@ -69,6 +70,7 @@ describe("simFetchPublic", () => {
     const dest = path.join(tempDir(), "file.bin");
     const { emit, finished } = collector();
     await simFetchPublic({
+      fetchId: "fetch-1",
       url: url("/file.bin"),
       destTarget: dest,
       destWirePath: "/Downloads/file.bin",
@@ -79,9 +81,11 @@ describe("simFetchPublic", () => {
     const last = events.at(-1);
     expect(last).toEqual({
       t: "fetch.done",
+      fetchId: "fetch-1",
       url: url("/file.bin"),
       path: "/Downloads/file.bin",
       bytes: body.length,
+      manifest: buildManifest(body),
     });
     const progress = events.filter((e) => e.t === "fetch.progress");
     expect(progress.length).toBeGreaterThan(0);
@@ -108,6 +112,7 @@ describe("simFetchPublic", () => {
     const dest = path.join(tempDir(), "file.bin");
     const { emit, finished } = collector();
     await simFetchPublic({
+      fetchId: "fetch-2",
       url: hop.url("/start"),
       destTarget: dest,
       destWirePath: "/Downloads/file.bin",
@@ -119,6 +124,31 @@ describe("simFetchPublic", () => {
     expect((await fs.readFile(dest)).equals(body)).toBe(true);
   });
 
+  it("never deletes or overwrites a pre-existing destination", async () => {
+    const incoming = Buffer.from("new payload");
+    const existing = Buffer.from("keep me");
+    const { url } = await serve((_req, res) => {
+      res.writeHead(200, { "content-length": String(incoming.length) });
+      res.end(incoming);
+    });
+    const dest = path.join(tempDir(), "already-there.bin");
+    await fs.writeFile(dest, existing);
+    const collected = collector();
+    await simFetchPublic({
+      fetchId: "fetch-existing",
+      url: url("/replacement.bin"),
+      destTarget: dest,
+      destWirePath: "/Downloads/already-there.bin",
+      emit: collected.emit,
+      allowPrivate: true,
+    });
+    expect((await collected.finished).at(-1)).toMatchObject({
+      t: "fetch.failed",
+      fetchId: "fetch-existing",
+    });
+    expect(await fs.readFile(dest)).toEqual(existing);
+  });
+
   it("refuses endless redirects, missing Content-Length, and oversize bodies", async () => {
     const loop = await serve((_req, res) => {
       res.writeHead(302, { location: "/again" });
@@ -127,6 +157,7 @@ describe("simFetchPublic", () => {
     const dest1 = path.join(tempDir(), "a");
     const c1 = collector();
     await simFetchPublic({
+      fetchId: "fetch-3",
       url: loop.url("/loop"),
       destTarget: dest1,
       destWirePath: "/a",
@@ -145,6 +176,7 @@ describe("simFetchPublic", () => {
     });
     const c2 = collector();
     await simFetchPublic({
+      fetchId: "fetch-4",
       url: chunked.url("/x"),
       destTarget: path.join(tempDir(), "b"),
       destWirePath: "/b",
@@ -167,6 +199,7 @@ describe("simFetchPublic", () => {
     const dest3 = path.join(tempDir(), "c");
     const c3 = collector();
     await simFetchPublic({
+      fetchId: "fetch-5",
       url: big.url("/big"),
       destTarget: dest3,
       destWirePath: "/c",

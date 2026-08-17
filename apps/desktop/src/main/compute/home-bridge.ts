@@ -40,6 +40,8 @@ interface ConnState {
   /** ptyId → live channel into the sim, for teardown + input routing. */
   ptys: Map<string, PtyChannel>;
   unsubCtlEvents: () => void;
+  /** Serializes ctl requests — the away client's pending queue is FIFO. */
+  ctlTail: Promise<void>;
   /** Serializes this conn's vfs requests — order IS the correlation. */
   vfsTail: Promise<void>;
 }
@@ -177,6 +179,7 @@ export class HomeAgentBridge {
         unsubCtlEvents: this.options.sim.onCtlEvent((event) => {
           this.sendFrame(message.conn as string, "ctl", JSON.stringify(event));
         }),
+        ctlTail: Promise.resolve(),
         vfsTail: Promise.resolve(),
       });
     } else if (message.t === "close") {
@@ -201,7 +204,7 @@ export class HomeAgentBridge {
     }
     for (const frame of frames) {
       if (frame.channel === "ctl") {
-        void this.handleCtl(conn, frame.payload);
+        this.enqueueCtl(conn, frame.payload);
       } else if (frame.channel === "vfs") {
         this.enqueueVfs(conn, frame.payload);
       } else if (frame.channel.startsWith("pty/")) {
@@ -212,6 +215,17 @@ export class HomeAgentBridge {
   }
 
   /* ------------------------------ channels ------------------------------ */
+
+  private enqueueCtl(conn: string, payload: Buffer): void {
+    const state = this.conns.get(conn);
+    if (state === undefined) return;
+    state.ctlTail = state.ctlTail
+      .catch(() => undefined)
+      .then(async () => {
+        if (!this.conns.has(conn)) return;
+        await this.handleCtl(conn, payload);
+      });
+  }
 
   private async handleCtl(conn: string, payload: Buffer): Promise<void> {
     let request: AgentCtlRequest;

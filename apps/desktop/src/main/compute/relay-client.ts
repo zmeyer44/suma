@@ -80,7 +80,12 @@ export class RelayAgentClient implements AgentLink {
     resolve: (response: VfsResponse) => void;
     reject: (err: Error) => void;
   }> = [];
-  private readonly ptyListeners = new Map<string, Set<(data: Buffer) => void>>();
+  private readonly ptyListeners = new Map<
+    string,
+    Set<(data: Buffer) => void>
+  >();
+  /** Total bytes delivered per PTY, used to replay only a reconnect gap. */
+  private readonly ptyOffsets = new Map<string, number>();
   private readonly connectionListeners = new Set<(up: boolean) => void>();
   private readonly ctlEventListeners = new Set<(event: AgentCtlResponse) => void>();
 
@@ -105,6 +110,9 @@ export class RelayAgentClient implements AgentLink {
   async ctl(request: AgentCtlRequest): Promise<AgentCtlResponse | null> {
     const ws = this.requireUp();
     const expected = CTL_RESPONSE_TYPE[request.t];
+    if (request.t === "pty.attach") {
+      this.ptyOffsets.set(`pty/${request.ptyId}`, request.sinceByte ?? 0);
+    }
     ws.send(encodeFrame("ctl", JSON.stringify(request)));
     if (expected === undefined) return null;
     return new Promise<AgentCtlResponse>((resolve, reject) => {
@@ -132,6 +140,7 @@ export class RelayAgentClient implements AgentLink {
       this.ptyListeners.set(channel, listeners);
     }
     listeners.add(onData);
+    if (!this.ptyOffsets.has(channel)) this.ptyOffsets.set(channel, 0);
     // Announce with an empty frame — the bridge subscribes this conn to the
     // pty's output on it, exactly like the Rust agent's per-channel socket.
     if (this.up && this.ws !== null) {
@@ -147,6 +156,10 @@ export class RelayAgentClient implements AgentLink {
       // keeps pumping until this conn closes — bounded and known (plan R4).
       close: () => {
         listeners.delete(onData);
+        if (listeners.size === 0) {
+          this.ptyListeners.delete(channel);
+          this.ptyOffsets.delete(channel);
+        }
       },
     };
   }
@@ -218,7 +231,21 @@ export class RelayAgentClient implements AgentLink {
     ws.on("open", () => {
       if (this.ws !== ws) return;
       this.backoffMs = BACKOFF_START_MS;
+      // A relay connection id is new on every dial, so the home bridge has no
+      // PTY subscriptions for this socket generation. Reannounce retained
+      // listeners before asking for the scrollback gap.
+      for (const [channel, listeners] of this.ptyListeners) {
+        if (listeners.size > 0) ws.send(encodeFrame(channel, Buffer.alloc(0)));
+      }
       this.setUp(true);
+      for (const [channel, listeners] of this.ptyListeners) {
+        if (listeners.size === 0) continue;
+        const ptyId = channel.slice("pty/".length);
+        const sinceByte = this.ptyOffsets.get(channel) ?? 0;
+        void this.ctl({ t: "pty.attach", ptyId, sinceByte }).catch(
+          () => undefined,
+        );
+      }
     });
     ws.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
       if (this.ws !== ws || !isBinary) return;
@@ -268,6 +295,11 @@ export class RelayAgentClient implements AgentLink {
       } else if (frame.channel.startsWith("pty/")) {
         const listeners = this.ptyListeners.get(frame.channel);
         if (listeners !== undefined) {
+          this.ptyOffsets.set(
+            frame.channel,
+            (this.ptyOffsets.get(frame.channel) ?? 0) +
+              frame.payload.byteLength,
+          );
           for (const listener of listeners) listener(frame.payload);
         }
       }

@@ -80,6 +80,8 @@ interface SimPty {
   exitCode: number | null;
   cwd: string;
   scrollback: Buffer;
+  /** Lifetime output count; scrollback may retain only its bounded suffix. */
+  totalOutputBytes: number;
   /** Cooked-line buffer — pipe fallback only. */
   pendingLine: string;
   jobMode: boolean;
@@ -252,13 +254,20 @@ export class SimAgent implements AgentLink {
         }
         // Replay the retained scrollback through the pty channel — after this
         // response settles, so the caller can reset its display first.
-        const replay = Buffer.from(pty.scrollback);
+        const retainedFrom = Math.max(
+          0,
+          pty.totalOutputBytes - pty.scrollback.byteLength,
+        );
+        const requested = Math.max(request.sinceByte ?? 0, retainedFrom);
+        const replay = Buffer.from(
+          pty.scrollback.subarray(requested - retainedFrom),
+        );
         queueMicrotask(() => this.emitData(pty, replay));
         return {
           t: "pty.attached",
           ptyId: pty.ptyId,
           restore: isLive(pty) ? "resumed" : "reconstructed",
-          scrollbackBytes: replay.byteLength,
+          scrollbackBytes: pty.totalOutputBytes,
           cwd: pty.cwd,
         };
       }
@@ -335,12 +344,18 @@ export class SimAgent implements AgentLink {
           };
         }
         void simFetchPublic({
+          fetchId: request.fetchId,
           url: request.url,
           destTarget: resolved.target,
           destWirePath: resolved.path,
           emit: (event) => this.emitCtlEvent(event),
         });
-        return { t: "fetch.started", url: request.url, path: resolved.path };
+        return {
+          t: "fetch.started",
+          fetchId: request.fetchId,
+          url: request.url,
+          path: resolved.path,
+        };
       }
     }
   }
@@ -433,6 +448,7 @@ export class SimAgent implements AgentLink {
       exitCode: null,
       cwd: dir,
       scrollback: Buffer.alloc(0),
+      totalOutputBytes: 0,
       pendingLine: "",
       jobMode: false,
       listeners: new Set(),
@@ -566,6 +582,7 @@ export class SimAgent implements AgentLink {
   }
 
   private emitOutput(pty: SimPty, chunk: Buffer): void {
+    pty.totalOutputBytes += chunk.byteLength;
     pty.scrollback = Buffer.concat([pty.scrollback, chunk]);
     if (pty.scrollback.byteLength > SIM_SCROLLBACK_MAX_BYTES) {
       pty.scrollback = pty.scrollback.subarray(

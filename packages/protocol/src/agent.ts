@@ -194,6 +194,12 @@ const safeRequestUrl = z
 
 export const fetchPublicSchema = z.object({
   t: z.literal("fetch.public"),
+  /** Stable correlation id for this fetch (normally the Files transfer UUID). */
+  fetchId: z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[A-Za-z0-9_-]+$/),
   /** Public or presigned URL only — no credentials ever cross into the VM (§8.6). */
   url: safeRequestUrl,
   destPath: z.string().max(4096),
@@ -278,16 +284,28 @@ export const agentCtlResponseSchema = z.discriminatedUnion("t", [
    * `fetch.started` is the TERMINAL response to a `fetch.public` request —
    * the fetch itself runs as a background task on the agent. Everything
    * after it (`fetch.progress`, `fetch.done`, `fetch.failed`) arrives as an
-   * UNSOLICITED event, matched to the request by `url`.
+   * UNSOLICITED event, matched to the request by `fetchId`.
    *
    * FIFO invariant: the ctl client resolves its pending head on the expected
    * response type OR on any `error` frame — so an unsolicited event must
    * NEVER use `t: "error"`. Async failures are the typed `fetch.failed`.
    */
-  z.object({ t: z.literal("fetch.started"), url: z.string(), path: z.string() }),
-  z.object({ t: z.literal("fetch.progress"), url: z.string(), received: z.number(), total: z.number() }),
+  z.object({
+    t: z.literal("fetch.started"),
+    fetchId: z.string(),
+    url: z.string(),
+    path: z.string(),
+  }),
+  z.object({
+    t: z.literal("fetch.progress"),
+    fetchId: z.string(),
+    url: z.string(),
+    received: z.number(),
+    total: z.number(),
+  }),
   z.object({
     t: z.literal("fetch.done"),
+    fetchId: z.string(),
     url: z.string(),
     path: z.string(),
     bytes: z.number(),
@@ -295,7 +313,13 @@ export const agentCtlResponseSchema = z.discriminatedUnion("t", [
      *  the control plane can record content addresses without re-reading. */
     manifest: manifestSchema.optional(),
   }),
-  z.object({ t: z.literal("fetch.failed"), url: z.string(), path: z.string(), error: z.string() }),
+  z.object({
+    t: z.literal("fetch.failed"),
+    fetchId: z.string(),
+    url: z.string(),
+    path: z.string(),
+    error: z.string(),
+  }),
   /**
    * Unsolicited-only: something under the agent's Files root changed (a
    * shell wrote a file, a fetch landed). `paths` lists rooted wire paths

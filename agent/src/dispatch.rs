@@ -21,12 +21,35 @@ use crate::ports::{list_ports, PortSource};
 use crate::proto::{AgentCtlRequest, AgentCtlResponse};
 use crate::pty::{PtyManager, SpawnParams};
 use crate::vfs::VfsRoot;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Semaphore;
 
 /// Concurrent background fetches, agent-wide. Requests past the cap queue
 /// fairly on the semaphore rather than being refused — a third download is
 /// late, never lost.
 static FETCH_SEMAPHORE: Semaphore = Semaphore::const_new(2);
+static FETCH_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// A private sibling of the promised destination. The fetcher opens it with
+/// `create_new`; completion hard-links it into place, which is an atomic
+/// no-overwrite commit on every supported host filesystem.
+fn fetch_staging_path(target: &std::path::Path) -> std::path::PathBuf {
+    let sequence = FETCH_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    target.with_file_name(format!(
+        ".suma-fetch-{}-{nonce}-{sequence}.partial",
+        std::process::id()
+    ))
+}
+
+async fn commit_fetch(staging: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    let linked = tokio::fs::hard_link(staging, target).await;
+    let _ = tokio::fs::remove_file(staging).await;
+    linked
+}
 
 /// The connection's ctl event sender — how a handler (or a background task it
 /// spawned) puts an UNSOLICITED frame on the wire. Clonable so a spawned
@@ -97,16 +120,16 @@ pub fn pty_input(
     now_seconds: i64,
     pty_id: &str,
     data: &[u8],
-) -> Result<(), AgentCtlResponse> {
+) -> Result<(), Box<AgentCtlResponse>> {
     // I-2 enforcement point for the PTY channel. Nothing below this line runs
     // without a valid, in-window, machine-bound `pty.io` capability.
     if let Some(reason) = check_pty_io(claims, machine_id, now_seconds) {
-        return Err(error("capability_denied", reason));
+        return Err(Box::new(error("capability_denied", reason)));
     }
     state
         .ptys
         .write_input(pty_id, data)
-        .map_err(|e| error("pty_write_failed", e.to_string()))
+        .map_err(|e| Box::new(error("pty_write_failed", e.to_string())))
 }
 
 /// Handle one ctl request. Unsolicited events (`fetch.progress`,
@@ -190,7 +213,11 @@ pub async fn dispatch(
             Ok(ports) => AgentCtlResponse::Ports { ports },
             Err(e) => error("ports_list_failed", e.to_string()),
         }),
-        AgentCtlRequest::FetchPublic { url, dest_path } => {
+        AgentCtlRequest::FetchPublic {
+            fetch_id,
+            url,
+            dest_path,
+        } => {
             // `destPath` names a place in Suma Files (`/Downloads/big.zip`),
             // exactly as the control plane records it for a transfer, so it is
             // resolved against `~/cloud` with the traversal and symlink checks
@@ -203,9 +230,11 @@ pub async fn dispatch(
                 Ok(resolved) => resolved,
                 Err(reason) => return Some(error("vfs_path_refused", reason)),
             };
+            let staging = fetch_staging_path(&target);
             let spec = FetchSpec {
+                fetch_id: fetch_id.clone(),
                 url: url.clone(),
-                dest_path: target,
+                dest_path: staging.clone(),
             };
             // The fetch runs as a background task: an 8 GiB download must not
             // hold the state lock (it would freeze every connection's ctl and
@@ -222,24 +251,38 @@ pub async fn dispatch(
                     .expect("static semaphore is never closed");
                 let mut emit = |resp: AgentCtlResponse| events.send(resp);
                 match fetch_public(&spec, &mut emit).await {
-                    Ok(outcome) => events.send(AgentCtlResponse::FetchDone {
-                        url: spec.url.clone(),
-                        // The Files path the caller asked for, not the host
-                        // path it landed on: where `~/cloud` sits in the VM is
-                        // not the caller's business, and a Files path is what
-                        // a client can do something with.
-                        path: event_path,
-                        bytes: outcome.bytes,
-                        // The manifest rides along so the control plane can
-                        // record the file's chunks without a second round
-                        // trip (§8.6).
-                        manifest: Some(outcome.manifest),
-                    }),
+                    Ok(outcome) => match commit_fetch(&staging, &target).await {
+                        Ok(()) => {
+                            events.send(AgentCtlResponse::FetchDone {
+                                fetch_id: spec.fetch_id.clone(),
+                                url: spec.url.clone(),
+                                // The Files path the caller asked for, not the host
+                                // path it landed on: where `~/cloud` sits in the VM is
+                                // not the caller's business, and a Files path is what
+                                // a client can do something with.
+                                path: event_path,
+                                bytes: outcome.bytes,
+                                // The manifest rides along so the control plane can
+                                // record the file's chunks without a second round
+                                // trip (§8.6).
+                                manifest: Some(outcome.manifest),
+                            });
+                        }
+                        Err(e) => {
+                            events.send(AgentCtlResponse::FetchFailed {
+                                fetch_id: spec.fetch_id.clone(),
+                                url: spec.url.clone(),
+                                path: event_path,
+                                error: format!("committing fetched file: {e}"),
+                            });
+                        }
+                    },
                     Err(e) => {
-                        // No partials: a failed fetch leaves nothing where the
-                        // finished file was promised.
-                        let _ = tokio::fs::remove_file(&spec.dest_path).await;
+                        // Remove only this fetch's private staging name, never
+                        // the promised destination (which may predate us).
+                        let _ = tokio::fs::remove_file(&staging).await;
                         events.send(AgentCtlResponse::FetchFailed {
+                            fetch_id: spec.fetch_id.clone(),
                             url: spec.url.clone(),
                             path: event_path,
                             error: e.to_string(),
@@ -247,7 +290,11 @@ pub async fn dispatch(
                     }
                 }
             });
-            Some(AgentCtlResponse::FetchStarted { url, path })
+            Some(AgentCtlResponse::FetchStarted {
+                fetch_id,
+                url,
+                path,
+            })
         }
     }
 }
@@ -463,10 +510,13 @@ mod tests {
         /// refusal is the capability one and not an incidental failure.
         fn denied(st: &mut AgentState, c: &CapabilityClaims, mid: &str, now: i64) -> String {
             match pty_input(st, c, mid, now, "live-1", b"whoami\n") {
-                Err(AgentCtlResponse::Error { code, message }) => {
-                    assert_eq!(code, "capability_denied");
-                    message
-                }
+                Err(err) => match *err {
+                    AgentCtlResponse::Error { code, message } => {
+                        assert_eq!(code, "capability_denied");
+                        message
+                    }
+                    other => panic!("expected capability_denied, got {other:?}"),
+                },
                 other => panic!("expected capability_denied, got {other:?}"),
             }
         }
@@ -502,7 +552,10 @@ mod tests {
 
         // And a granted capability is still not a wildcard over the PTY table.
         match pty_input(&mut st, &c, "m-1", 1_100, "no-such-pty", b"x") {
-            Err(AgentCtlResponse::Error { code, .. }) => assert_eq!(code, "pty_write_failed"),
+            Err(err) => match *err {
+                AgentCtlResponse::Error { code, .. } => assert_eq!(code, "pty_write_failed"),
+                other => panic!("expected pty_write_failed, got {other:?}"),
+            },
             other => panic!("expected pty_write_failed, got {other:?}"),
         }
 
@@ -549,6 +602,7 @@ mod tests {
             "/".to_string(),
         ] {
             let req = AgentCtlRequest::FetchPublic {
+                fetch_id: "fetch-path-test".into(),
                 // Loopback, which the fetcher refuses before opening a socket:
                 // the path refusal is what this asserts, and a destination
                 // that slipped through would still touch no network.
@@ -577,6 +631,7 @@ mod tests {
             "m-1",
             1_100,
             AgentCtlRequest::FetchPublic {
+                fetch_id: "fetch-inside-test".into(),
                 url: "http://127.0.0.1:9/payload".into(),
                 dest_path: "/Downloads/big.zip".into(),
             },
@@ -597,6 +652,24 @@ mod tests {
 
         std::fs::remove_dir_all(&outside_dir).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fetch_commit_preserves_an_existing_destination() {
+        let dir = temp_dir("fetch-commit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let staging = dir.join(".partial");
+        let target = dir.join("result.bin");
+        std::fs::write(&staging, b"incoming").unwrap();
+        std::fs::write(&target, b"original").unwrap();
+
+        assert!(commit_fetch(&staging, &target).await.is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+        assert!(
+            !staging.exists(),
+            "only the private staging file is cleaned up"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

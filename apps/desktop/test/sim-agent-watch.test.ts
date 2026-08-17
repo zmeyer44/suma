@@ -112,11 +112,13 @@ describe("SimAgent fetch.public", () => {
     const done = eventsUntil(sim, (e) => e.t === "fetch.failed" || e.t === "fetch.done");
     const started = await sim.ctl({
       t: "fetch.public",
+      fetchId: "sim-fetch-1",
       url: `http://127.0.0.1:${port}/file.bin`,
       destPath: "/Downloads/file.bin",
     });
     expect(started).toEqual({
       t: "fetch.started",
+      fetchId: "sim-fetch-1",
       url: `http://127.0.0.1:${port}/file.bin`,
       path: "/Downloads/file.bin",
     });
@@ -134,6 +136,7 @@ describe("SimAgent fetch.public", () => {
 
     const escape = await sim.ctl({
       t: "fetch.public",
+      fetchId: "sim-fetch-2",
       url: "https://example.com/x",
       destPath: "/../outside.bin",
     });
@@ -141,6 +144,7 @@ describe("SimAgent fetch.public", () => {
 
     const orphan = await sim.ctl({
       t: "fetch.public",
+      fetchId: "sim-fetch-3",
       url: "https://example.com/x",
       destPath: "/missing/file.bin",
     });

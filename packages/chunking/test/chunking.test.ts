@@ -6,6 +6,7 @@ import {
   AVG_CHUNK_BYTES,
   MAX_CHUNK_BYTES,
   MIN_CHUNK_BYTES,
+  StreamingManifestBuilder,
   assembleFromChunks,
   buildManifest,
   chunkBuffer,
@@ -135,6 +136,14 @@ describe("manifests", { timeout: SLOW }, () => {
     // costs more than every chunking operation in this file combined.
     expect(rebuilt.length).toBe(data.length);
     expect(hashChunk(rebuilt)).toBe(hashChunk(data));
+  });
+
+  it("builds the identical manifest across arbitrary streaming boundaries", () => {
+    const builder = new StreamingManifestBuilder();
+    for (let offset = 0; offset < data.length; offset += 73_177) {
+      builder.push(data.subarray(offset, Math.min(data.length, offset + 73_177)));
+    }
+    expect(builder.finish()).toEqual(buildManifest(data));
   });
 
   it("refuses to assemble from a corrupted chunk", () => {

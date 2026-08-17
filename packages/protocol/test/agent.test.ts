@@ -72,9 +72,15 @@ describe("capability tokens (I-2: VM compromise is worthless beyond the VM)", ()
 describe("ctl fetch/watch wire shapes", () => {
   it("round-trips fetch.started, fetch.failed, and vfs.changed", () => {
     const samples = [
-      { t: "fetch.started", url: "https://cdn.example.com/a.bin", path: "/Downloads/a.bin" },
+      {
+        t: "fetch.started",
+        fetchId: "fetch-1",
+        url: "https://cdn.example.com/a.bin",
+        path: "/Downloads/a.bin",
+      },
       {
         t: "fetch.failed",
+        fetchId: "fetch-1",
         url: "https://cdn.example.com/a.bin",
         path: "/Downloads/a.bin",
         error: "fetch truncated: got 5 of 10 bytes",
@@ -90,6 +96,7 @@ describe("ctl fetch/watch wire shapes", () => {
   it("fetch.done carries the agent's manifest instead of stripping it", () => {
     const done = {
       t: "fetch.done",
+      fetchId: "fetch-1",
       url: "https://cdn.example.com/a.bin",
       path: "/Downloads/a.bin",
       bytes: 5,
@@ -131,7 +138,14 @@ describe("mux channels (Appendix C)", () => {
     expect(() => parseCtlRequest(JSON.stringify({ t: "nope" }))).toThrow();
     // Only public/presigned URLs — the shape refuses anything that isn't a URL.
     expect(() =>
-      parseCtlRequest(JSON.stringify({ t: "fetch.public", url: "not a url", destPath: "/x" })),
+      parseCtlRequest(
+        JSON.stringify({
+          t: "fetch.public",
+          fetchId: "fetch-1",
+          url: "not a url",
+          destPath: "/x",
+        }),
+      ),
     ).toThrow();
   });
 
@@ -142,12 +156,26 @@ describe("mux channels (Appendix C)", () => {
     // attacker-chosen header — or a second request entirely.
     const smuggle = "http://host/x HTTP/1.1\r\nCookie: stolen\r\n\r\nGET /admin";
     expect(() =>
-      parseCtlRequest(JSON.stringify({ t: "fetch.public", url: smuggle, destPath: "/x" })),
+      parseCtlRequest(
+        JSON.stringify({
+          t: "fetch.public",
+          fetchId: "fetch-1",
+          url: smuggle,
+          destPath: "/x",
+        }),
+      ),
     ).toThrow();
     // Percent-encoded CRLF is not an injection and stays allowed.
     const encoded = "https://example.com/a%0d%0ab";
     expect(
-      parseCtlRequest(JSON.stringify({ t: "fetch.public", url: encoded, destPath: "/x" })).t,
+      parseCtlRequest(
+        JSON.stringify({
+          t: "fetch.public",
+          fetchId: "fetch-1",
+          url: encoded,
+          destPath: "/x",
+        }),
+      ).t,
     ).toBe("fetch.public");
   });
 });

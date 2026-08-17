@@ -176,6 +176,61 @@ export function buildManifest(data: Uint8Array): ChunkManifest {
   };
 }
 
+/**
+ * Incremental twin of `buildManifest` for files too large to hold in memory.
+ * It retains at most one not-yet-decided chunk (plus the caller's current
+ * input), while producing exactly the same FastCDC boundaries and hashes as
+ * the buffer implementation.
+ */
+export class StreamingManifestBuilder {
+  private readonly fileHasher = blake3.create();
+  private pending = new Uint8Array(0);
+  private readonly chunks: Chunk[] = [];
+  private totalBytes = 0;
+  private chunkedBytes = 0;
+  private finished = false;
+
+  push(data: Uint8Array): void {
+    if (this.finished) throw new Error("manifest builder is already finished");
+    if (data.byteLength === 0) return;
+    this.fileHasher.update(data);
+    this.totalBytes += data.byteLength;
+    const joined = new Uint8Array(this.pending.byteLength + data.byteLength);
+    joined.set(this.pending, 0);
+    joined.set(data, this.pending.byteLength);
+    this.pending = joined;
+    this.cut(false);
+  }
+
+  finish(): ChunkManifest {
+    if (this.finished) throw new Error("manifest builder is already finished");
+    this.finished = true;
+    this.cut(true);
+    return {
+      fileHash: bytesToHex(this.fileHasher.digest()),
+      totalBytes: this.totalBytes,
+      chunks: this.chunks,
+    };
+  }
+
+  private cut(final: boolean): void {
+    while (
+      this.pending.byteLength > 0 &&
+      (final || this.pending.byteLength >= MAX_CHUNK_BYTES)
+    ) {
+      const end = nextBoundary(this.pending, 0);
+      const bytes = this.pending.subarray(0, end);
+      this.chunks.push({
+        hash: bytesToHex(blake3(bytes)),
+        offset: this.chunkedBytes,
+        length: bytes.byteLength,
+      });
+      this.chunkedBytes += bytes.byteLength;
+      this.pending = this.pending.subarray(end);
+    }
+  }
+}
+
 /** Reassemble a file from its manifest and a chunk source; verifies as it goes. */
 export function assembleFromChunks(
   manifest: ChunkManifest,

@@ -112,7 +112,11 @@ pub enum AgentCtlRequest {
     /// `VfsRoot::resolve_new_file`, which is where traversal and symlink
     /// escapes are refused — the checks below only bound the string.
     #[serde(rename = "fetch.public", rename_all = "camelCase")]
-    FetchPublic { url: String, dest_path: String },
+    FetchPublic {
+        fetch_id: String,
+        url: String,
+        dest_path: String,
+    },
 }
 
 impl AgentCtlRequest {
@@ -169,7 +173,19 @@ impl AgentCtlRequest {
                 Ok(())
             }
             AgentCtlRequest::PtyList | AgentCtlRequest::PortsList => Ok(()),
-            AgentCtlRequest::FetchPublic { url, dest_path } => {
+            AgentCtlRequest::FetchPublic {
+                fetch_id,
+                url,
+                dest_path,
+            } => {
+                if fetch_id.is_empty()
+                    || fetch_id.len() > 128
+                    || !fetch_id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+                {
+                    return Err("fetchId must be 1..=128 URL-safe characters".to_string());
+                }
                 if url.len() > 8192 || !url.contains("://") {
                     return Err("url must be a URL of at most 8192 chars".to_string());
                 }
@@ -225,22 +241,28 @@ pub enum AgentCtlResponse {
     /// Terminal response to `fetch.public`: the fetch now runs as a
     /// background task, and everything after this frame — `fetch.progress`,
     /// `fetch.done`, `fetch.failed` — arrives as an UNSOLICITED event
-    /// correlated by `url`.
+    /// correlated by `fetchId`.
     ///
     /// FIFO invariant: the desktop ctl client resolves its pending head on
     /// the expected response type OR on any `error` frame, so unsolicited
     /// events must NEVER use the `error` variant. Async fetch failures are
     /// the typed `fetch.failed`.
-    #[serde(rename = "fetch.started")]
-    FetchStarted { url: String, path: String },
-    #[serde(rename = "fetch.progress")]
+    #[serde(rename = "fetch.started", rename_all = "camelCase")]
+    FetchStarted {
+        fetch_id: String,
+        url: String,
+        path: String,
+    },
+    #[serde(rename = "fetch.progress", rename_all = "camelCase")]
     FetchProgress {
+        fetch_id: String,
         url: String,
         received: u64,
         total: u64,
     },
-    #[serde(rename = "fetch.done")]
+    #[serde(rename = "fetch.done", rename_all = "camelCase")]
     FetchDone {
+        fetch_id: String,
         url: String,
         path: String,
         bytes: u64,
@@ -257,8 +279,9 @@ pub enum AgentCtlResponse {
     },
     /// Unsolicited: a background fetch failed. Carries the same identifiers
     /// as `fetch.done` so a client can settle the matching row.
-    #[serde(rename = "fetch.failed")]
+    #[serde(rename = "fetch.failed", rename_all = "camelCase")]
     FetchFailed {
+        fetch_id: String,
         url: String,
         path: String,
         error: String,
@@ -356,12 +379,13 @@ mod tests {
         assert_eq!(ports, AgentCtlRequest::PortsList);
 
         let fetch: AgentCtlRequest = serde_json::from_str(
-            r#"{"t":"fetch.public","url":"https://example.com/data.tar.gz?sig=abc","destPath":"/home/u/data.tar.gz"}"#,
+            r#"{"t":"fetch.public","fetchId":"fetch-1","url":"https://example.com/data.tar.gz?sig=abc","destPath":"/home/u/data.tar.gz"}"#,
         )
         .unwrap();
         assert_eq!(
             fetch,
             AgentCtlRequest::FetchPublic {
+                fetch_id: "fetch-1".into(),
                 url: "https://example.com/data.tar.gz?sig=abc".into(),
                 dest_path: "/home/u/data.tar.gz".into()
             }
@@ -410,12 +434,13 @@ mod tests {
         assert_eq!(serde_json::to_value(ports).unwrap(), expected);
 
         let progress = AgentCtlResponse::FetchProgress {
+            fetch_id: "fetch-1".into(),
             url: "https://example.com/f".into(),
             received: 10,
             total: 100,
         };
         let expected: serde_json::Value = serde_json::from_str(
-            r#"{"t":"fetch.progress","url":"https://example.com/f","received":10,"total":100}"#,
+            r#"{"t":"fetch.progress","fetchId":"fetch-1","url":"https://example.com/f","received":10,"total":100}"#,
         )
         .unwrap();
         assert_eq!(serde_json::to_value(progress).unwrap(), expected);
@@ -426,22 +451,24 @@ mod tests {
     #[test]
     fn fetch_lifecycle_and_watch_frames_pin_the_ts_wire() {
         let started = AgentCtlResponse::FetchStarted {
+            fetch_id: "fetch-1".into(),
             url: "https://example.com/f".into(),
             path: "/Downloads/f".into(),
         };
         assert_eq!(
             serde_json::to_string(&started).unwrap(),
-            r#"{"t":"fetch.started","url":"https://example.com/f","path":"/Downloads/f"}"#
+            r#"{"t":"fetch.started","fetchId":"fetch-1","url":"https://example.com/f","path":"/Downloads/f"}"#
         );
 
         let failed = AgentCtlResponse::FetchFailed {
+            fetch_id: "fetch-1".into(),
             url: "https://example.com/f".into(),
             path: "/Downloads/f".into(),
             error: "fetch truncated: got 5 of 10 bytes".into(),
         };
         assert_eq!(
             serde_json::to_string(&failed).unwrap(),
-            r#"{"t":"fetch.failed","url":"https://example.com/f","path":"/Downloads/f","error":"fetch truncated: got 5 of 10 bytes"}"#
+            r#"{"t":"fetch.failed","fetchId":"fetch-1","url":"https://example.com/f","path":"/Downloads/f","error":"fetch truncated: got 5 of 10 bytes"}"#
         );
 
         let quiet = AgentCtlResponse::VfsChanged { paths: None };
@@ -470,6 +497,7 @@ mod tests {
     #[test]
     fn fetch_done_carries_the_manifest_without_breaking_the_phase_2_shape() {
         let bare = AgentCtlResponse::FetchDone {
+            fetch_id: "fetch-1".into(),
             url: "http://example.com/f".into(),
             path: "/home/u/f".into(),
             bytes: 3,
@@ -477,18 +505,19 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&bare).unwrap(),
-            r#"{"t":"fetch.done","url":"http://example.com/f","path":"/home/u/f","bytes":3}"#
+            r#"{"t":"fetch.done","fetchId":"fetch-1","url":"http://example.com/f","path":"/home/u/f","bytes":3}"#
         );
         // A TS-emitted frame with no manifest field still parses here.
         assert_eq!(
             serde_json::from_str::<AgentCtlResponse>(
-                r#"{"t":"fetch.done","url":"http://example.com/f","path":"/home/u/f","bytes":3}"#
+                r#"{"t":"fetch.done","fetchId":"fetch-1","url":"http://example.com/f","path":"/home/u/f","bytes":3}"#
             )
             .unwrap(),
             bare
         );
 
         let with_manifest = AgentCtlResponse::FetchDone {
+            fetch_id: "fetch-1".into(),
             url: "http://example.com/f".into(),
             path: "/home/u/f".into(),
             bytes: 3,
@@ -538,9 +567,10 @@ mod tests {
         let empty_id: AgentCtlRequest =
             serde_json::from_str(r#"{"t":"pty.attach","ptyId":""}"#).unwrap();
         assert!(empty_id.validate().is_err());
-        let bad_url: AgentCtlRequest =
-            serde_json::from_str(r#"{"t":"fetch.public","url":"not a url","destPath":"/tmp/f"}"#)
-                .unwrap();
+        let bad_url: AgentCtlRequest = serde_json::from_str(
+            r#"{"t":"fetch.public","fetchId":"fetch-1","url":"not a url","destPath":"/tmp/f"}"#,
+        )
+        .unwrap();
         assert!(bad_url.validate().is_err());
     }
 
@@ -549,7 +579,7 @@ mod tests {
     #[test]
     fn fetch_urls_carrying_control_characters_are_refused() {
         let injected: AgentCtlRequest = serde_json::from_str(
-            r#"{"t":"fetch.public","url":"http://example.com/a\r\nCookie: session=stolen\r\n\r\nGET /second HTTP/1.1\r\nHost: x\r\n\r\n","destPath":"/tmp/f"}"#,
+            r#"{"t":"fetch.public","fetchId":"fetch-1","url":"http://example.com/a\r\nCookie: session=stolen\r\n\r\nGET /second HTTP/1.1\r\nHost: x\r\n\r\n","destPath":"/tmp/f"}"#,
         )
         .unwrap();
         assert_eq!(
@@ -558,9 +588,9 @@ mod tests {
         );
 
         for raw in [
-            r#"{"t":"fetch.public","url":"http://example.com/a\nX: 1","destPath":"/tmp/f"}"#,
-            r#"{"t":"fetch.public","url":"http://example.com/a ","destPath":"/tmp/f"}"#,
-            r#"{"t":"fetch.public","url":"http://example.com/a","destPath":"/tmp/f\r\n"}"#,
+            r#"{"t":"fetch.public","fetchId":"fetch-1","url":"http://example.com/a\nX: 1","destPath":"/tmp/f"}"#,
+            r#"{"t":"fetch.public","fetchId":"fetch-1","url":"http://example.com/a ","destPath":"/tmp/f"}"#,
+            r#"{"t":"fetch.public","fetchId":"fetch-1","url":"http://example.com/a","destPath":"/tmp/f\r\n"}"#,
         ] {
             let req: AgentCtlRequest = serde_json::from_str(raw).unwrap();
             assert!(req.validate().is_err(), "{raw}");
@@ -568,7 +598,7 @@ mod tests {
 
         // Percent-encoded, which is not an injection, still validates.
         let encoded: AgentCtlRequest = serde_json::from_str(
-            r#"{"t":"fetch.public","url":"http://example.com/a%0d%0ab","destPath":"/tmp/f"}"#,
+            r#"{"t":"fetch.public","fetchId":"fetch-1","url":"http://example.com/a%0d%0ab","destPath":"/tmp/f"}"#,
         )
         .unwrap();
         assert!(encoded.validate().is_ok());
