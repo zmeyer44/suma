@@ -27,7 +27,7 @@ import type {
 } from "../shared/ipc";
 import { settingsUrl } from "../shared/internal-pages";
 import type { SavedItem } from "../shared/saves";
-import { applyDevDockIcon } from "./app-icon";
+import { applyDockIcon } from "./app-icon";
 import { AuditService } from "./audit-service";
 import { TtsService } from "./audio/tts-service";
 import { AuthService } from "./auth-service";
@@ -229,7 +229,11 @@ async function bootstrap(): Promise<void> {
 
   // Before the window: the dock slot appears the moment the app activates, and
   // setting the icon after that shows Electron's default for a beat first.
-  applyDevDockIcon(app, path.dirname(fileURLToPath(import.meta.url)));
+  applyDockIcon(
+    app,
+    path.dirname(fileURLToPath(import.meta.url)),
+    process.resourcesPath,
+  );
 
   installChromeCsp(session.defaultSession);
   // Saved-video playback: suma-video:// streams the media cache into the PIP

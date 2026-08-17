@@ -3,17 +3,10 @@
      transparent margin. Rasterized to icon.png/icon.icns by
      scripts/build-icons.mjs.
 
-     Full-bleed is deliberate. macOS 26 shapes a legacy .icns itself — it masks
-     the artwork to the system squircle and composites it onto its own backing
-     plate. Art that draws its own tile inside a transparent margin (what this
-     file used to do: 824px on a 1024px canvas, rx=20) comes out as a tile
-     inside the system plate, a visible grey ring around a smaller icon. Filling
-     the canvas edge to edge gives the mask nothing to inset.
-
-     The trade-off, since electron-builder.yml still allows macOS 14: 14 and 15
-     do NOT shape legacy icons, so there the dock shows this as a hard square.
-     Fixing both at once needs an Icon Composer `.icon` asset, which
-     electron-builder 26 cannot package without an afterPack hook.
+     Full-bleed is deliberate. macOS gives bundled icons an outer safe area,
+     but a runtime Dock image fills its slot. The running app installs the raw
+     PNG directly in the Dock so production has the same footprint as dev;
+     Finder and Spotlight continue to use the standards-compliant .icns.
 
      The mark stays 72/104 of the tile, so its size relative to the shaped
      footprint is unchanged from the old grid. -->

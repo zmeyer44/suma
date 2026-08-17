@@ -1,10 +1,8 @@
 /**
  * Regenerate the app icon rasters from `build/icon.svg`.
  *
- * NOT part of `pnpm build` — the outputs are committed, because a brand mark
- * changes about once a year and making every build (and every CI runner) carry
- * ImageMagick to reproduce a byte-identical PNG is a bad trade. Run this by
- * hand when `build/icon.svg` changes:
+ * NOT part of `pnpm build` — run this by hand when `build/icon.svg` changes to
+ * refresh the committed dev/production Dock raster and the local bundle icon:
  *
  *   node scripts/build-icons.mjs
  *
@@ -63,7 +61,9 @@ execFileSync("magick", [
   "-density", "600",
   svg,
   "-resize", "1024x1024",
-  png,
+  "-depth", "8",
+  "-strip",
+  `PNG24:${png}`,
 ]);
 
 rmSync(iconset, { recursive: true, force: true });
