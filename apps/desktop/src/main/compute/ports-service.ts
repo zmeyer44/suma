@@ -39,6 +39,8 @@ interface Forward {
 
 export class PortsService {
   private readonly forwards = new Map<number, Forward>();
+  private readonly pendingEnsures = new Map<number, Promise<boolean>>();
+  private readonly ensureMisses = new Map<number, number>();
   private latest: ListeningPort[] = [];
   private lastEmitted = "";
   private timer: NodeJS.Timeout | null = null;
@@ -85,6 +87,27 @@ export class PortsService {
     );
   }
 
+  /**
+   * Idempotently forward a VM port because the browser is navigating to
+   * localhost:<port>. Unlike setForward this never throws: navigation must
+   * fall through to Chromium's own connection error, not a forward refusal.
+   * Only ports the agent reports as listening are bound — an arbitrary web
+   * page fetching http://localhost:<n> must not be able to make Suma open
+   * local listeners for ports nothing in the machine serves.
+   */
+  async ensureForward(port: number): Promise<boolean> {
+    if (this.forwards.has(port)) return true;
+    // With the simulated agent localhost already IS the workload's host.
+    if (this.deps.link.kind === "simulated") return false;
+    const pending = this.pendingEnsures.get(port);
+    if (pending !== undefined) return pending;
+    const attempt = this.tryEnsure(port).finally(() =>
+      this.pendingEnsures.delete(port),
+    );
+    this.pendingEnsures.set(port, attempt);
+    return attempt;
+  }
+
   start(): void {
     if (this.timer !== null) return;
     void this.poll();
@@ -116,6 +139,39 @@ export class PortsService {
   /** The full port list, `loopback` flag included — never leaves main. */
   private states(): PortState[] {
     return presentPorts(this.latest, new Set(this.forwards.keys()));
+  }
+
+  private async tryEnsure(port: number): Promise<boolean> {
+    // A manual ports:forward toggle may have won while this was queued.
+    if (this.forwards.has(port)) return true;
+    const find = (): PortState | undefined =>
+      this.states().find((state) => state.port === port);
+    let state = find();
+    if (state === undefined) {
+      // The dev server may have started after the last 4s poll — refresh once
+      // per poll interval, so a page hammering an unserved localhost port
+      // cannot turn every asset request into a ports.list round trip.
+      const missedAt = this.ensureMisses.get(port);
+      if (missedAt !== undefined && Date.now() - missedAt < POLL_MS)
+        return false;
+      await this.poll();
+      state = find();
+      if (state === undefined) {
+        this.ensureMisses.set(port, Date.now());
+        return false;
+      }
+    }
+    this.ensureMisses.delete(port);
+    if (forwardRefusal(port, state) !== null) return false;
+    try {
+      this.forwards.set(port, await this.listen(port));
+    } catch {
+      // Most likely a genuinely local server already owns the port; it is
+      // exactly what the loopback navigation should reach, so let it win.
+      return false;
+    }
+    this.push(true);
+    return true;
   }
 
   private async poll(): Promise<void> {

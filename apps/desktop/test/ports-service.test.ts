@@ -110,3 +110,65 @@ describe("PortsService forward lifecycle", () => {
     expect(socket.destroyed).toBe(true);
   });
 });
+
+describe("PortsService.ensureForward (loopback navigation)", () => {
+  /** EchoLink whose agent reports a controllable listener list. */
+  class ReportingLink extends EchoLink {
+    ports: Array<{ port: number; process: string; loopback: boolean }> = [];
+    override async ctl(
+      _request: AgentCtlRequest,
+    ): Promise<AgentCtlResponse | null> {
+      return { t: "ports", ports: this.ports };
+    }
+  }
+
+  it("forwards a port the agent reports and round-trips traffic", async () => {
+    const link = new ReportingLink();
+    const service = new PortsService({ link, emit: () => undefined });
+    cleanups.push(() => service.stop());
+    const port = await freePort();
+    link.ports = [{ port, process: "node", loopback: true }];
+
+    // Concurrent asset requests during one navigation share a single attempt.
+    const results = await Promise.all([
+      service.ensureForward(port),
+      service.ensureForward(port),
+    ]);
+    expect(results).toEqual([true, true]);
+    expect(service.list().find((p) => p.port === port)?.forwarded).toBe(true);
+
+    const socket = await connect(port);
+    cleanups.push(() => socket.destroy());
+    const echoed = await new Promise<Buffer>((resolve) => {
+      socket.once("data", resolve);
+      socket.write(Buffer.from("ping"));
+    });
+    expect(echoed.toString("utf8")).toBe("ping");
+  });
+
+  it("refuses ports the agent does not report as listening", async () => {
+    const link = new ReportingLink();
+    const service = new PortsService({ link, emit: () => undefined });
+    cleanups.push(() => service.stop());
+    const port = await freePort();
+    expect(await service.ensureForward(port)).toBe(false);
+    // The port stays free — no listener was bound for an unserved port.
+    await service.setForward(port, true);
+    await service.setForward(port, false);
+  });
+
+  it("yields to a genuinely local server already on the port", async () => {
+    const link = new ReportingLink();
+    const service = new PortsService({ link, emit: () => undefined });
+    cleanups.push(() => service.stop());
+    const local = net.createServer();
+    const port = await new Promise<number>((resolve) =>
+      local.listen(0, "127.0.0.1", () =>
+        resolve((local.address() as net.AddressInfo).port),
+      ),
+    );
+    cleanups.push(() => local.close());
+    link.ports = [{ port, process: "node", loopback: true }];
+    expect(await service.ensureForward(port)).toBe(false);
+  });
+});

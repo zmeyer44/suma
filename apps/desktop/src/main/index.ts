@@ -548,6 +548,9 @@ async function startServices(ctx: {
   spaces.onSessionCreated((ses, spaceId) =>
     nativeRequestHeaders.attachTo(ses, spaceId),
   );
+  // Late-bound like notifyWorkspaceChanged: PortsService is constructed with
+  // the compute link far below, but loopback navigations can begin earlier.
+  let ensureLoopbackForward: ((port: number) => Promise<boolean>) | null = null;
   const gateway = new GatewayBackedService({
     getToken: () => auth.getToken(),
     gatewayUrl: process.env["SUMA_SESSION_GATEWAY_URL"] ?? null,
@@ -559,6 +562,8 @@ async function startServices(ctx: {
     },
     nativeFetchImpl: (ses, request) =>
       browserNativeFetch(ses, request, nativeRequestHeaders),
+    ensureLoopbackForward: (port) =>
+      ensureLoopbackForward?.(port) ?? Promise.resolve(false),
   });
   spaces.onSessionCreated((ses, spaceId) => gateway.attachTo(ses, spaceId));
 
@@ -1218,6 +1223,7 @@ async function startServices(ctx: {
     link,
     emit: (list) => emit("ports:updated", list),
   });
+  ensureLoopbackForward = (port) => ports.ensureForward(port);
   const egress = new EgressService({
     spaces,
     store,
