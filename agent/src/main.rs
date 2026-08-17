@@ -22,7 +22,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use suma_agent::caps::CapabilityClaims;
-use suma_agent::dispatch::{check_pty_io, dispatch, pty_input, AgentState, CtlEvents};
+use suma_agent::dispatch::{check_fwd, check_pty_io, dispatch, pty_input, AgentState, CtlEvents};
+use suma_agent::fwd::FwdSession;
 use suma_agent::jobs::JobRegistry;
 use suma_agent::mux::{parse_channel, read_frame, write_frame, Channel, Frame};
 use suma_agent::ports::LsofSource;
@@ -75,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
     // first ctl frame — pty/vfs-only clients never hear from it.
     let (watch_bus, _) = broadcast::channel::<AgentCtlResponse>(suma_agent::watch::WATCH_BUS_CAPACITY);
     tokio::spawn(suma_agent::watch::run(vfs_root.clone(), watch_bus.clone()));
+    tokio::spawn(run_exit_pump(Arc::clone(&state), watch_bus.clone()));
 
     let listen = std::env::var("SUMA_AGENT_LISTEN").unwrap_or_else(|_| "127.0.0.1:0".to_string());
     let listener = TcpListener::bind(&listen).await?;
@@ -149,11 +151,16 @@ async fn serve_connection(
     // per delivery so an expired claims window stops the stream.
     let mut watch_pump: Option<PumpHandle> = None;
 
+    // A port forward makes this connection dedicated to one stream: the
+    // first fwd frame dials the port, the rest are that stream's bytes, and
+    // connection teardown ends it (dropping the session aborts its pump).
+    let mut fwd: Option<(String, FwdSession)> = None;
+
     while let Some(frame) = read_frame(&mut reader).await? {
         match parse_channel(&frame.channel) {
             Some(Channel::Ctl) => {
                 if watch_pump.is_none() {
-                    watch_pump = Some(start_watch_pump(
+                    watch_pump = Some(start_event_pump(
                         &watch_bus,
                         ctl_events.clone(),
                         claims.clone(),
@@ -223,9 +230,54 @@ async fn serve_connection(
                 )
                 .await?;
             }
-            // fwd/log pumps are still Phase 3+ wiring; frames are dropped, not
-            // misrouted.
-            Some(Channel::Fwd(_)) | Some(Channel::Log) => {
+            Some(Channel::Fwd { port, .. }) => {
+                match &mut fwd {
+                    // Already forwarding: a mismatched channel string on a
+                    // dedicated connection is a protocol error — close it.
+                    Some((channel, session)) if *channel == frame.channel => {
+                        if frame.payload.is_empty() {
+                            // Empty after OPEN = the desktop closed the
+                            // stream. The connection is dedicated, so end it.
+                            return Ok(());
+                        }
+                        if session.write(&frame.payload).await.is_err() {
+                            return Ok(()); // upstream gone — tear down
+                        }
+                    }
+                    Some(_) => return Ok(()), // different fwd channel — protocol error
+                    None => {
+                        // First fwd frame: authorize, then dial. Any refusal
+                        // closes the connection — the desktop's socket pair
+                        // destroys on the disconnect, a prompt honest failure
+                        // (there is no error payload on a fwd stream).
+                        if let Some(reason) = check_fwd(&claims, &machine_id, now_seconds()) {
+                            tracing::debug!(%reason, "fwd denied");
+                            return Ok(());
+                        }
+                        match FwdSession::open(frame.channel.clone(), port, Arc::clone(&writer))
+                            .await
+                        {
+                            Ok(mut session) => {
+                                // Tolerate data-first (OPEN is normally empty,
+                                // but a client that sends bytes immediately is
+                                // fine): write a non-empty first payload.
+                                if !frame.payload.is_empty()
+                                    && session.write(&frame.payload).await.is_err()
+                                {
+                                    return Ok(());
+                                }
+                                fwd = Some((frame.channel.clone(), session));
+                            }
+                            Err(err) => {
+                                tracing::debug!(port, %err, "fwd dial failed");
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+            // The log channel is parsed but unwired on all transports.
+            Some(Channel::Log) => {
                 tracing::debug!(channel = %frame.channel, "channel not wired yet");
             }
             None => {
@@ -360,12 +412,13 @@ async fn start_pty_pump(
     })))
 }
 
-/// Forward watch-bus events onto this connection's ctl queue, re-checking
-/// `fs.read` per event — watching reveals filesystem metadata, so an expired
-/// or read-less claims set hears nothing. Lagged receivers skip ahead: watch
-/// events are collapsible ("something changed"), so missing three of them
-/// and seeing the fourth is the same answer.
-fn start_watch_pump(
+/// Forward shared-bus events onto this connection's ctl queue, re-checking
+/// the event's required capability per delivery (see `watch::event_capability`)
+/// — so an expired or under-scoped claims set hears nothing, and a `pty.io`
+/// connection gets `pty.exited` while an `fs.read`-only one gets `vfs.changed`.
+/// Lagged receivers skip ahead: `vfs.changed` is collapsible, and a missed
+/// `pty.exited` self-corrects on the next `pty.list`/attach.
+fn start_event_pump(
     bus: &broadcast::Sender<AgentCtlResponse>,
     events: CtlEvents,
     claims: CapabilityClaims,
@@ -376,13 +429,16 @@ fn start_watch_pump(
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    let allowed = suma_agent::caps::check_capability(
-                        &claims,
-                        &machine_id,
-                        suma_agent::caps::Capability::FsRead,
-                        now_seconds(),
-                    )
-                    .is_none();
+                    let allowed = match suma_agent::watch::event_capability(&event) {
+                        Some(cap) => suma_agent::caps::check_capability(
+                            &claims,
+                            &machine_id,
+                            cap,
+                            now_seconds(),
+                        )
+                        .is_none(),
+                        None => true,
+                    };
                     if allowed {
                         events.send(event);
                     }
@@ -392,6 +448,31 @@ fn start_watch_pump(
             }
         }
     }))
+}
+
+/// The PTY exit reaper: broadcast `pty.exited` for every shell that has
+/// exited since the last tick. Structured like `watch::run` — a 2 s poll
+/// that idles at zero subscribers (nothing to tell, nobody to tell) — because
+/// portable-pty offers no async exit signal, only `try_wait`.
+async fn run_exit_pump(
+    state: std::sync::Arc<Mutex<AgentState>>,
+    bus: broadcast::Sender<AgentCtlResponse>,
+) {
+    let mut interval = tokio::time::interval(suma_agent::watch::WATCH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        if bus.receiver_count() == 0 {
+            continue;
+        }
+        let exits = {
+            let mut st = state.lock().await;
+            st.ptys.collect_new_exits()
+        };
+        for (pty_id, code) in exits {
+            let _ = bus.send(AgentCtlResponse::PtyExited { pty_id, code });
+        }
+    }
 }
 
 /// Wall-clock seconds, the units capability windows are expressed in.

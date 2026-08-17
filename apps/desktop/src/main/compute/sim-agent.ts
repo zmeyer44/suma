@@ -120,6 +120,8 @@ export class SimAgent implements AgentLink {
   private readonly rootProvider: () => string;
   private readonly availabilityProvider: () => boolean;
   private localVfs: LocalVfs | null = null;
+  /** In-flight fetches by fetchId, for fetch.cancel. */
+  private readonly activeFetches = new Map<string, AbortController>();
   private watcher: FSWatcher | null = null;
   private watchedRoot: string | null = null;
   private readonly pendingWatchPaths = new Set<string>();
@@ -343,12 +345,22 @@ export class SimAgent implements AgentLink {
             message: resolved.refused,
           };
         }
+        const controller = new AbortController();
+        this.activeFetches.set(request.fetchId, controller);
+        const fetchId = request.fetchId;
         void simFetchPublic({
-          fetchId: request.fetchId,
+          fetchId,
           url: request.url,
           destTarget: resolved.target,
           destWirePath: resolved.path,
+          signal: controller.signal,
           emit: (event) => this.emitCtlEvent(event),
+        }).finally(() => {
+          // Only clear if this is still the same fetch (a re-used id after
+          // settle would have replaced the entry).
+          if (this.activeFetches.get(fetchId) === controller) {
+            this.activeFetches.delete(fetchId);
+          }
         });
         return {
           t: "fetch.started",
@@ -356,6 +368,12 @@ export class SimAgent implements AgentLink {
           url: request.url,
           path: resolved.path,
         };
+      }
+      case "fetch.cancel": {
+        // Fire-and-forget: abort the download if it's ours; the
+        // fetch.failed(cancelled) event confirms. Unknown ids are no-ops.
+        this.activeFetches.get(request.fetchId)?.abort();
+        return null;
       }
     }
   }

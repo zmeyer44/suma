@@ -14,6 +14,14 @@
  * `cloudFetchEligibility` cleared — public or presigned, no cookie, no
  * Authorization header, no client certificate, no userinfo. This service never
  * reads a cookie jar and never forwards a request header.
+ *
+ * Cancellation: `cancelTransfer` on an active agent fetch sends `fetch.cancel`
+ * to the computer AND moves the durable transfer to cancelled. A fetch that
+ * happens to COMPLETE just as it is cancelled leaves its file on the
+ * computer's disk but deliberately does NOT mirror it into Files — the
+ * `fetch.done` for an already-cancelled row is dropped. That is the accepted
+ * cost of a race with a terminal state; the artifact is still visible on the
+ * machine itself over vfs.
  */
 
 import { randomUUID } from "node:crypto";
@@ -22,6 +30,7 @@ import path from "node:path";
 import { clearInterval, clearTimeout, setInterval, setTimeout } from "node:timers";
 import {
   CLOUD_ROOT,
+  FETCH_CANCELLED_ERROR,
   fromBase64,
   normalizeVfsPath,
   type AgentCtlRequest,
@@ -152,6 +161,9 @@ export class FilesService {
    * slow progress request on the control plane. */
   private readonly agentTransferTails = new Map<string, Promise<void>>();
   private readonly lastAgentProgressPushMs = new Map<string, number>();
+  /** Agent fetches we asked to cancel — the eventual fetch.failed(sentinel)
+   *  for these settles as "cancelled", not "failed". */
+  private readonly pendingCancels = new Set<string>();
   private declined: CloudFetchDeclined | null = null;
   private timer: NodeJS.Timeout | null = null;
   private tick = 0;
@@ -391,8 +403,10 @@ export class FilesService {
   snapshot(): TransfersUpdate {
     const agentRows = [...this.agentTransfers.values()].map((transfer) => ({
       ...transfer,
-      // No agent-side cancel op exists yet — active rows say so honestly.
-      cancellable: !ACTIVE_STATES.has(transfer.state),
+      // Agent fetches are cancellable while active (fetch.cancel), except in
+      // the brief window where a cancel is already in flight.
+      cancellable:
+        !ACTIVE_STATES.has(transfer.state) || !this.pendingCancels.has(transfer.id),
     }));
     const localIds = new Set([
       ...agentRows.map((transfer) => transfer.id),
@@ -413,6 +427,27 @@ export class FilesService {
       this.transfers = await this.deps.client.listTransfers();
       // A control-plane transfer supersedes the local failure it replaced.
       for (const transfer of this.transfers) this.localFailures.delete(transfer.id);
+      // Another device may have cancelled a fetch WE are running: if its
+      // durable row came back cancelled while our agent row is still active,
+      // stop the fetch on the computer and settle locally — otherwise the
+      // agent keeps downloading and the eventual fetch.done is orphaned.
+      for (const transfer of this.transfers) {
+        if (transfer.state !== "cancelled") continue;
+        const local = this.agentTransfers.get(transfer.id);
+        if (
+          local !== undefined &&
+          ACTIVE_STATES.has(local.state) &&
+          !this.pendingCancels.has(transfer.id)
+        ) {
+          this.pendingCancels.add(transfer.id);
+          this.updateAgentRow(transfer.id, { state: "cancelled" });
+          this.enqueueAgentTask(transfer.id, async () => {
+            await this.deps.agent
+              .ctl({ t: "fetch.cancel", fetchId: transfer.id })
+              .catch(() => undefined);
+          });
+        }
+      }
     } catch (err) {
       if (!(err instanceof FilesUnavailableError)) throw err;
       // No Files API on this control plane — keep whatever we know locally.
@@ -428,14 +463,28 @@ export class FilesService {
     }
     const agentRow = this.agentTransfers.get(id);
     if (agentRow !== undefined) {
-      // Settled rows dismiss; an active fetch has no cancel op (the UI
-      // hides the button, but be safe against a stale renderer).
-      if (!ACTIVE_STATES.has(agentRow.state)) {
-        await this.agentTransferTails.get(id)?.catch(() => undefined);
-        this.agentTransfers.delete(id);
-        this.lastAgentProgressPushMs.delete(id);
-        this.push();
+      if (ACTIVE_STATES.has(agentRow.state)) {
+        // Active: cancel the fetch ON the computer, and move the durable row
+        // to cancelled via the /cancel route (NOT reportTransfer — its
+        // transition gates aren't built for it). The fetch.failed(sentinel)
+        // that follows settles the local row as "cancelled".
+        this.pendingCancels.add(id);
+        this.updateAgentRow(id, { state: "cancelled" });
+        try {
+          await this.deps.agent.ctl({ t: "fetch.cancel", fetchId: id });
+        } catch {
+          // Best effort — the agent may have already finished; the control
+          // row still moves to cancelled below.
+        }
+        await this.deps.client.cancelTransfer(id).catch(() => undefined);
+        return;
       }
+      // Settled: dismiss the local row.
+      await this.agentTransferTails.get(id)?.catch(() => undefined);
+      this.agentTransfers.delete(id);
+      this.lastAgentProgressPushMs.delete(id);
+      this.pendingCancels.delete(id);
+      this.push();
       return;
     }
     await this.deps.client.cancelTransfer(id);
@@ -571,7 +620,30 @@ export class FilesService {
     }
     const id = event.fetchId;
     const row = this.agentTransfers.get(id);
-    if (row === undefined || !ACTIVE_STATES.has(row.state)) return;
+    if (row === undefined) return;
+    // A cancelled fetch's terminal event: settle "cancelled", drop the
+    // matching /cancel report to the tail, and stop. (fetch.done after a
+    // cancel means the file exists on the computer but is deliberately NOT
+    // mirrored into Files — documented on the class.)
+    if (
+      this.pendingCancels.has(id) &&
+      (event.t === "fetch.failed" || event.t === "fetch.done")
+    ) {
+      this.pendingCancels.delete(id);
+      this.settleAgentRow(id, { state: "cancelled" });
+      return;
+    }
+    if (!ACTIVE_STATES.has(row.state)) return;
+    // A fetch.failed carrying the cancellation sentinel that raced ahead of
+    // our own cancelTransfer bookkeeping: still show it as cancelled.
+    if (event.t === "fetch.failed" && event.error === FETCH_CANCELLED_ERROR) {
+      this.pendingCancels.delete(id);
+      this.settleAgentRow(id, { state: "cancelled" });
+      this.enqueueAgentTask(id, async () => {
+        await this.deps.client.cancelTransfer(id).catch(() => undefined);
+      });
+      return;
+    }
     if (
       event.url !== row.url ||
       (event.t !== "fetch.progress" && event.path !== row.destPath)

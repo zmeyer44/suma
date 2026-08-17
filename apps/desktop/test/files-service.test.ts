@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 // Workspace-relative like files-service.ts: @suma/chunking is not in this
 // package's manifest, and the shared implementation must not be duplicated.
 import { buildManifest, hashChunk } from "../../../packages/chunking/src/index";
+import { FETCH_CANCELLED_ERROR } from "@suma/protocol";
 import type {
   AgentCtlRequest,
   AgentCtlResponse,
@@ -238,6 +239,18 @@ function transferRoutes(): Route[] {
           error: report.error ?? null,
           updatedAtMs: current.updatedAtMs + 1,
         };
+        transfers.set(id, updated);
+        return json({ transfer: updated });
+      },
+    },
+    {
+      match: "/cancel",
+      respond: (req) => {
+        const id = req.url.split("/transfers/")[1]?.split("/")[0] ?? "";
+        const current = transfers.get(id);
+        if (current === undefined)
+          return new Response("missing", { status: 404 });
+        const updated = { ...current, state: "cancelled" as const, updatedAtMs: current.updatedAtMs + 1 };
         transfers.set(id, updated);
         return json({ transfer: updated });
       },
@@ -498,7 +511,8 @@ describe("agent-driven cloud fetch (fetch.public)", () => {
       service.startCloudFetch({ ...args, totalBytes: data.byteLength }),
     ).resolves.toBe(true);
     let row = service.snapshot().transfers.find((t) => t.url === args.url);
-    expect(row).toMatchObject({ state: "fetching", cancellable: false });
+    // Active agent fetches are cancellable (fetch.cancel), not stranded.
+    expect(row).toMatchObject({ state: "fetching", cancellable: true });
     if (row === undefined) throw new Error("missing transfer row");
     expect(agent.ctlRequests).toEqual([
       {
@@ -577,6 +591,60 @@ describe("agent-driven cloud fetch (fetch.public)", () => {
     // A settled agent row can be dismissed locally.
     if (row !== undefined) await service.cancelTransfer(row.id);
     expect(service.snapshot().transfers.some((t) => t.url === args.url)).toBe(false);
+  });
+
+  it("cancelling an active fetch sends fetch.cancel and settles cancelled", async () => {
+    const agent = acceptingAgent();
+    const { service } = harness({ routes: transferRoutes(), agent });
+    await service.startCloudFetch(args);
+    const started = service.snapshot().transfers.find((t) => t.url === args.url);
+    if (started === undefined) throw new Error("missing transfer row");
+
+    await service.cancelTransfer(started.id);
+    // The agent was told to cancel by fetchId.
+    expect(agent.ctlRequests).toContainEqual({ t: "fetch.cancel", fetchId: started.id });
+    // The row settled cancelled, and stays cancelled when the sentinel arrives.
+    let row = service.snapshot().transfers.find((t) => t.id === started.id);
+    expect(row?.state).toBe("cancelled");
+    agent.emit({
+      t: "fetch.failed",
+      fetchId: started.id,
+      url: args.url,
+      path: args.destPath,
+      error: FETCH_CANCELLED_ERROR,
+    });
+    row = service.snapshot().transfers.find((t) => t.id === started.id);
+    expect(row?.state).toBe("cancelled");
+    // A fetch.done racing in after cancel is dropped, NOT mirrored.
+    agent.emit({
+      t: "fetch.done",
+      fetchId: started.id,
+      url: args.url,
+      path: args.destPath,
+      bytes: 10,
+      manifest: buildManifest(new Uint8Array(10)),
+    });
+    row = service.snapshot().transfers.find((t) => t.id === started.id);
+    expect(row?.state).toBe("cancelled");
+  });
+
+  it("settles cancelled when the sentinel races ahead of local bookkeeping", async () => {
+    const agent = acceptingAgent();
+    const { service } = harness({ routes: transferRoutes(), agent });
+    await service.startCloudFetch(args);
+    const started = service.snapshot().transfers.find((t) => t.url === args.url);
+    if (started === undefined) throw new Error("missing transfer row");
+    // The cancel event arrives before any cancelTransfer call (e.g. the user
+    // cancelled on another device and the agent already stopped).
+    agent.emit({
+      t: "fetch.failed",
+      fetchId: started.id,
+      url: args.url,
+      path: args.destPath,
+      error: FETCH_CANCELLED_ERROR,
+    });
+    const row = service.snapshot().transfers.find((t) => t.id === started.id);
+    expect(row?.state).toBe("cancelled");
   });
 
   it("cloudAvailable mirrors the agent link, not the control plane", () => {

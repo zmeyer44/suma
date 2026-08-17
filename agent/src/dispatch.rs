@@ -18,11 +18,13 @@ use crate::caps::{check_capability, required_capability, Capability, CapabilityC
 use crate::fetch::{fetch_public, FetchSpec};
 use crate::jobs::JobRegistry;
 use crate::ports::{list_ports, PortSource};
-use crate::proto::{AgentCtlRequest, AgentCtlResponse};
+use crate::proto::{AgentCtlRequest, AgentCtlResponse, FETCH_CANCELLED_ERROR};
 use crate::pty::{PtyManager, SpawnParams};
 use crate::vfs::VfsRoot;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::Semaphore;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{Notify, Semaphore};
 
 /// Concurrent background fetches, agent-wide. Requests past the cap queue
 /// fairly on the semaphore rather than being refused — a third download is
@@ -108,6 +110,18 @@ pub fn check_pty_io(
     now_seconds: i64,
 ) -> Option<String> {
     check_capability(claims, machine_id, Capability::PtyIo, now_seconds)
+}
+
+/// Authorize a `fwd/<port>` stream — dialing a loopback port inside this
+/// machine reaches whatever the user is running there, so it takes the same
+/// `ports.forward` capability the desktop's port UI already holds. Returns
+/// the refusal reason, or `None` when allowed.
+pub fn check_fwd(
+    claims: &CapabilityClaims,
+    machine_id: &str,
+    now_seconds: i64,
+) -> Option<String> {
+    check_capability(claims, machine_id, Capability::PortsForward, now_seconds)
 }
 
 /// Write one `pty/<id>` frame's payload to its PTY, after the capability
@@ -241,54 +255,75 @@ pub async fn dispatch(
             // pty input), and the caller gets `fetch.started` NOW — awaiting
             // `fetch.done` here would desync the client's ctl FIFO the moment
             // a later request was answered first. Completion and failure are
-            // unsolicited events, correlated by url.
+            // unsolicited events, correlated by fetchId.
+            let cancel = register_fetch(&fetch_id);
             let events = events.clone();
             let event_path = path.clone();
             tokio::spawn(async move {
-                let _permit = FETCH_SEMAPHORE
-                    .acquire()
-                    .await
-                    .expect("static semaphore is never closed");
                 let mut emit = |resp: AgentCtlResponse| events.send(resp);
-                match fetch_public(&spec, &mut emit).await {
-                    Ok(outcome) => match commit_fetch(&staging, &target).await {
-                        Ok(()) => {
-                            events.send(AgentCtlResponse::FetchDone {
-                                fetch_id: spec.fetch_id.clone(),
-                                url: spec.url.clone(),
-                                // The Files path the caller asked for, not the host
-                                // path it landed on: where `~/cloud` sits in the VM is
-                                // not the caller's business, and a Files path is what
-                                // a client can do something with.
-                                path: event_path,
-                                bytes: outcome.bytes,
-                                // The manifest rides along so the control plane can
-                                // record the file's chunks without a second round
-                                // trip (§8.6).
-                                manifest: Some(outcome.manifest),
-                            });
-                        }
+                // select! wraps BOTH the queue wait and the download, so a
+                // cancel lands while the fetch is still waiting on a permit
+                // as readily as mid-transfer.
+                let run = async {
+                    let _permit = FETCH_SEMAPHORE
+                        .acquire()
+                        .await
+                        .expect("static semaphore is never closed");
+                    fetch_public(&spec, &mut emit).await
+                };
+                tokio::select! {
+                    outcome = run => match outcome {
+                        Ok(outcome) => match commit_fetch(&staging, &target).await {
+                            Ok(()) => {
+                                events.send(AgentCtlResponse::FetchDone {
+                                    fetch_id: spec.fetch_id.clone(),
+                                    url: spec.url.clone(),
+                                    // The Files path the caller asked for, not the host
+                                    // path it landed on: where `~/cloud` sits in the VM is
+                                    // not the caller's business, and a Files path is what
+                                    // a client can do something with.
+                                    path: event_path,
+                                    bytes: outcome.bytes,
+                                    // The manifest rides along so the control plane can
+                                    // record the file's chunks without a second round
+                                    // trip (§8.6).
+                                    manifest: Some(outcome.manifest),
+                                });
+                            }
+                            Err(e) => {
+                                events.send(AgentCtlResponse::FetchFailed {
+                                    fetch_id: spec.fetch_id.clone(),
+                                    url: spec.url.clone(),
+                                    path: event_path,
+                                    error: format!("committing fetched file: {e}"),
+                                });
+                            }
+                        },
                         Err(e) => {
+                            // Remove only this fetch's private staging name, never
+                            // the promised destination (which may predate us).
+                            let _ = tokio::fs::remove_file(&staging).await;
                             events.send(AgentCtlResponse::FetchFailed {
                                 fetch_id: spec.fetch_id.clone(),
                                 url: spec.url.clone(),
                                 path: event_path,
-                                error: format!("committing fetched file: {e}"),
+                                error: e.to_string(),
                             });
                         }
                     },
-                    Err(e) => {
-                        // Remove only this fetch's private staging name, never
-                        // the promised destination (which may predate us).
+                    _ = cancel.notified() => {
+                        // The download future is dropped mid-await; only its
+                        // private staging name needs cleaning.
                         let _ = tokio::fs::remove_file(&staging).await;
                         events.send(AgentCtlResponse::FetchFailed {
                             fetch_id: spec.fetch_id.clone(),
                             url: spec.url.clone(),
                             path: event_path,
-                            error: e.to_string(),
+                            error: FETCH_CANCELLED_ERROR.to_string(),
                         });
                     }
                 }
+                unregister_fetch(&spec.fetch_id);
             });
             Some(AgentCtlResponse::FetchStarted {
                 fetch_id,
@@ -296,6 +331,49 @@ pub async fn dispatch(
                 path,
             })
         }
+        AgentCtlRequest::FetchCancel { fetch_id } => {
+            // Fire-and-forget, like pty.kill: no response frame. Unknown ids
+            // and double-cancels are silent no-ops — the caller learns the
+            // outcome from the fetch.failed(cancelled) event, or from the
+            // fetch having already settled.
+            cancel_fetch(&fetch_id);
+            None
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * Running-fetch registry (cancellation)
+ * ------------------------------------------------------------------ */
+
+/// fetchId → cancel signal for every in-flight (or queued) fetch. A std
+/// Mutex, never held across an await — entries are inserted before the task
+/// spawns and removed on any terminal outcome.
+static FETCHES: std::sync::Mutex<Option<HashMap<String, Arc<Notify>>>> =
+    std::sync::Mutex::new(None);
+
+fn register_fetch(fetch_id: &str) -> Arc<Notify> {
+    let cancel = Arc::new(Notify::new());
+    let mut fetches = FETCHES.lock().expect("fetch registry poisoned");
+    fetches
+        .get_or_insert_with(HashMap::new)
+        .insert(fetch_id.to_string(), Arc::clone(&cancel));
+    cancel
+}
+
+fn unregister_fetch(fetch_id: &str) {
+    let mut fetches = FETCHES.lock().expect("fetch registry poisoned");
+    if let Some(map) = fetches.as_mut() {
+        map.remove(fetch_id);
+    }
+}
+
+fn cancel_fetch(fetch_id: &str) {
+    let fetches = FETCHES.lock().expect("fetch registry poisoned");
+    if let Some(cancel) = fetches.as_ref().and_then(|map| map.get(fetch_id)) {
+        // notify_waiters would miss a task not yet parked on notified();
+        // notify_one leaves a permit, so the signal is never lost.
+        cancel.notify_one();
     }
 }
 
@@ -670,6 +748,30 @@ mod tests {
             "only the private staging file is cleaned up"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The cancel registry directly: `register_fetch` hands out a Notify,
+    /// `cancel_fetch` fires it (and survives arriving before the task parks —
+    /// notify_one leaves a permit), and unknown/removed ids are silent no-ops.
+    /// The full fetch→cancel→sentinel path over a real socket lives in the
+    /// desktop sim-fetch/relay tests, where a loopback target is permitted;
+    /// the shipped agent refuses loopback before a fetch could park.
+    #[tokio::test]
+    async fn cancel_registry_signals_once_and_ignores_unknowns() {
+        let cancel = register_fetch("f-1");
+        // Signal before the task parks: notify_one stores a permit, so the
+        // later notified() returns immediately.
+        cancel_fetch("f-1");
+        tokio::time::timeout(std::time::Duration::from_millis(200), cancel.notified())
+            .await
+            .expect("a pre-parked cancel is still delivered");
+
+        // Unknown id: no panic, no effect.
+        cancel_fetch("never-existed");
+        unregister_fetch("f-1");
+        // Double-unregister and post-unregister cancel are no-ops.
+        unregister_fetch("f-1");
+        cancel_fetch("f-1");
     }
 
     #[tokio::test]

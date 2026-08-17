@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CAPABILITIES,
   CTL_CAPABILITY,
+  FETCH_CANCELLED_ERROR,
   TERMINAL_CAPABILITIES,
   accruedCostUsd,
   checkCapability,
@@ -112,6 +113,24 @@ describe("ctl fetch/watch wire shapes", () => {
     const { manifest: _dropped, ...bare } = done;
     expect(parseCtlResponse(JSON.stringify(bare))).toEqual(bare);
   });
+
+  it("parses fetch.cancel and exposes the cancelled sentinel", () => {
+    const cancel = parseCtlRequest(
+      JSON.stringify({ t: "fetch.cancel", fetchId: "fetch-1" }),
+    );
+    expect(cancel).toEqual({ t: "fetch.cancel", fetchId: "fetch-1" });
+    // Same fetchId validation as fetch.public.
+    expect(() =>
+      parseCtlRequest(JSON.stringify({ t: "fetch.cancel", fetchId: "" })),
+    ).toThrow();
+    expect(() =>
+      parseCtlRequest(JSON.stringify({ t: "fetch.cancel", fetchId: "has spaces" })),
+    ).toThrow();
+    // Cancelling is scoped by the fetch grant.
+    expect(CTL_CAPABILITY["fetch.cancel"]).toBe("fetch.public");
+    // The sentinel a cancelled fetch reports.
+    expect(FETCH_CANCELLED_ERROR).toBe("cancelled by the user");
+  });
 });
 
 describe("mux channels (Appendix C)", () => {
@@ -121,10 +140,24 @@ describe("mux channels (Appendix C)", () => {
     expect(parseChannel("log")).toEqual({ kind: "log" });
     expect(parseChannel("pty/abc123")).toEqual({ kind: "pty", id: "abc123" });
     expect(parseChannel("fwd/3000")).toEqual({ kind: "fwd", port: 3000 });
+    // Stream-id form (the relay carries many forwards on one connection).
+    expect(parseChannel("fwd/3000/s-1")).toEqual({ kind: "fwd", port: 3000, id: "s-1" });
   });
 
   it("rejects malformed or out-of-range channels", () => {
-    for (const bad of ["", "nope", "pty/", "pty", "fwd/0", "fwd/70000", "fwd/abc", "fwd"]) {
+    for (const bad of [
+      "",
+      "nope",
+      "pty/",
+      "pty",
+      "fwd/0",
+      "fwd/70000",
+      "fwd/abc",
+      "fwd",
+      "fwd/3000/", // empty stream id
+      "fwd/80abc", // strict port — no parseInt truncation (matches Rust)
+      "fwd/80abc/s-1",
+    ]) {
       expect(parseChannel(bad), bad).toBeNull();
     }
   });

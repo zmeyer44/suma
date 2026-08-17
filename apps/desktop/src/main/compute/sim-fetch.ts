@@ -22,7 +22,7 @@ import fs from "node:fs/promises";
 import dns from "node:dns/promises";
 import net from "node:net";
 import path from "node:path";
-import type { AgentCtlResponse } from "@suma/protocol";
+import { FETCH_CANCELLED_ERROR, type AgentCtlResponse } from "@suma/protocol";
 import {
   StreamingManifestBuilder,
   type ChunkManifest,
@@ -44,6 +44,9 @@ export interface SimFetchArgs {
   /** The Files wire path the caller asked for — what events carry. */
   destWirePath: string;
   emit: (event: AgentCtlResponse) => void;
+  /** Abort mid-download (fetch.cancel) — undici honors it, and the read loop
+   *  re-checks it so a cancel between chunks lands promptly. */
+  signal?: AbortSignal;
   /** Test seams. */
   lookup?: (host: string) => Promise<Array<{ address: string }>>;
   fetchImpl?: typeof fetch;
@@ -85,7 +88,14 @@ export async function simFetchPublic(args: SimFetchArgs): Promise<void> {
       manifest,
     });
   } catch (err) {
-    await emitFailed(err instanceof Error ? err.message : String(err));
+    // undici raises an AbortError when args.signal fires mid-request; report
+    // it as the cancellation sentinel, not a raw abort message.
+    const aborted =
+      args.signal?.aborted === true ||
+      (err instanceof Error && err.name === "AbortError");
+    await emitFailed(
+      aborted ? FETCH_CANCELLED_ERROR : err instanceof Error ? err.message : String(err),
+    );
   }
 }
 
@@ -96,6 +106,8 @@ async function run(
   const fetchImpl = args.fetchImpl ?? fetch;
   const maxBytes = args.maxBytes ?? SIM_MAX_FETCH_BYTES;
 
+  const cancelled = (): boolean => args.signal?.aborted === true;
+
   let current = parseFetchUrl(args.url);
   let response: Response | null = null;
   for (let hop = 0; ; hop += 1) {
@@ -103,6 +115,7 @@ async function run(
     const answered = await fetchImpl(current.toString(), {
       redirect: "manual",
       headers: { "user-agent": "suma-agent-sim" },
+      signal: args.signal,
     });
     if ([301, 302, 303, 307, 308].includes(answered.status)) {
       // The body of a redirect is noise; release the connection.
@@ -150,6 +163,10 @@ async function run(
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      if (cancelled()) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(FETCH_CANCELLED_ERROR);
+      }
       received += value.byteLength;
       // Content-Length is the server's claim, not a promise (same rule as
       // the Rust fetcher): enforce the cap against bytes actually written.

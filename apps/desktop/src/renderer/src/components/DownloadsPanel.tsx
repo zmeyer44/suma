@@ -46,8 +46,8 @@ function TransferRow({ transfer }: { transfer: Transfer & { cancellable?: boolea
   const cancelTransfer = useSumaStore((s) => s.cancelTransfer);
   const active =
     transfer.state === "queued" || transfer.state === "fetching" || transfer.state === "storing";
-  // Agent-side fetches (on your computer) have no cancel op yet — the row
-  // says so rather than faking a button that would do nothing.
+  // Cancellable is true for active fetches; false only in the brief window
+  // where a cancel is already in flight (the button would be a no-op).
   const cancellable = transfer.cancellable !== false;
   const progress = downloadProgress(transfer.receivedBytes, transfer.totalBytes);
   const host = hostOf(transfer.url);
@@ -74,9 +74,7 @@ function TransferRow({ transfer }: { transfer: Transfer & { cancellable?: boolea
           ) : null}
         </span>
         {active && !cancellable ? (
-          <span className="shrink-0 text-[10.5px] text-faint">
-            Fetching on your computer
-          </span>
+          <span className="shrink-0 text-[10.5px] text-faint">Cancelling…</span>
         ) : active || transfer.state === "failed" ? (
           <Button
             size="sm"

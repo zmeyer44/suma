@@ -9,6 +9,7 @@
 import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import fs from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -290,5 +291,87 @@ describe("relay bridge end-to-end", () => {
     await expect(client.vfs({ t: "vfs.tree", path: "/" })).rejects.toThrow(
       /unreachable/,
     );
+  });
+
+  it("forwards a port from the away device to a loopback server on the home Mac", async () => {
+    const { client } = await rig();
+
+    // The "home dev server": an echo listener on 127.0.0.1 (the bridge dials
+    // it because it runs in the same process as the home SimAgent).
+    const homeServer = net.createServer((socket) => {
+      socket.on("data", (chunk: Buffer) => socket.write(chunk));
+    });
+    await new Promise<void>((resolve) => homeServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => homeServer.close());
+    const homePort = (homeServer.address() as net.AddressInfo).port;
+
+    // How PortsService produces sockets: a local listener whose accepted
+    // sockets go to link.forward. Connect a "browser" to it.
+    const localListener = net.createServer((socket) => client.forward(homePort, socket));
+    await new Promise<void>((resolve) => localListener.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => localListener.close());
+    const localPort = (localListener.address() as net.AddressInfo).port;
+
+    const browser = net.connect(localPort, "127.0.0.1");
+    cleanups.push(() => browser.destroy());
+    await new Promise<void>((resolve) => browser.once("connect", () => resolve()));
+
+    const echoed = await new Promise<Buffer>((resolve) => {
+      browser.once("data", resolve);
+      browser.write(Buffer.from("through the relay"));
+    });
+    expect(echoed.toString("utf8")).toBe("through the relay");
+
+    // Closing the browser side tears the stream down end to end.
+    browser.destroy();
+    await settle();
+  });
+
+  it("a forward to a dead port is refused (the local socket ends)", async () => {
+    const { client } = await rig();
+    // A port nothing listens on.
+    const probe = net.createServer();
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+    const deadPort = (probe.address() as net.AddressInfo).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+
+    const localListener = net.createServer((socket) => client.forward(deadPort, socket));
+    await new Promise<void>((resolve) => localListener.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => localListener.close());
+    const localPort = (localListener.address() as net.AddressInfo).port;
+
+    const browser = net.connect(localPort, "127.0.0.1");
+    cleanups.push(() => browser.destroy());
+    await new Promise<void>((resolve) => browser.once("connect", () => resolve()));
+    // The home bridge's dial fails → CLOSE frame → our local socket ends.
+    await new Promise<void>((resolve) => browser.once("close", () => resolve()));
+    expect(browser.destroyed).toBe(true);
+  });
+
+  it("a relay drop destroys live forward streams", async () => {
+    const { client, clientSockets } = await rig();
+    const homeServer = net.createServer((socket) => {
+      socket.on("data", (chunk: Buffer) => socket.write(chunk));
+    });
+    await new Promise<void>((resolve) => homeServer.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => homeServer.close());
+    const homePort = (homeServer.address() as net.AddressInfo).port;
+
+    const localListener = net.createServer((socket) => client.forward(homePort, socket));
+    await new Promise<void>((resolve) => localListener.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => localListener.close());
+    const localPort = (localListener.address() as net.AddressInfo).port;
+
+    const browser = net.connect(localPort, "127.0.0.1");
+    cleanups.push(() => browser.destroy());
+    await new Promise<void>((resolve) => browser.once("connect", () => resolve()));
+    await settle();
+
+    // Kill the relay WS: the client destroys every live forward socket.
+    const closed = new Promise<void>((resolve) => browser.once("close", () => resolve()));
+    clientSockets.at(-1)?.close(1006);
+    await settle();
+    await closed;
+    expect(browser.destroyed).toBe(true);
   });
 });

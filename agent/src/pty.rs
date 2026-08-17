@@ -244,6 +244,11 @@ pub struct AttachResult {
 pub struct PtyManager {
     base_dir: PathBuf,
     sessions: HashMap<String, PtySession>,
+    /// Exits reaped by `attach`/`list` that the exit pump has not yet
+    /// broadcast. Every reap site records the code here before removing the
+    /// session, so a shell that exits between poller ticks — and is reaped by
+    /// a `pty.list` in that window — still produces exactly one `pty.exited`.
+    exited_pending: Vec<(String, i32)>,
 }
 
 impl PtyManager {
@@ -251,7 +256,29 @@ impl PtyManager {
         PtyManager {
             base_dir: base_dir.into(),
             sessions: HashMap::new(),
+            exited_pending: Vec::new(),
         }
+    }
+
+    /// Exit codes to broadcast as `pty.exited`, drained once each. Called by
+    /// the exit pump: it detects freshly-exited live sessions itself AND
+    /// picks up exits that `attach`/`list` reaped since the last drain — so
+    /// each real exit is reported exactly once whichever site saw it first.
+    pub fn collect_new_exits(&mut self) -> Vec<(String, i32)> {
+        let mut newly: Vec<(String, i32)> = Vec::new();
+        let mut remove: Vec<String> = Vec::new();
+        for (id, session) in self.sessions.iter_mut() {
+            if let Ok(Some(status)) = session.child.try_wait() {
+                newly.push((id.clone(), status.exit_code() as i32));
+                remove.push(id.clone());
+            }
+        }
+        for id in &remove {
+            self.sessions.remove(id);
+        }
+        let mut exits = std::mem::take(&mut self.exited_pending);
+        exits.append(&mut newly);
+        exits
     }
 
     /// The persistence root, exposed for tests that plant persisted contexts.
@@ -447,10 +474,17 @@ impl PtyManager {
         Self::check_id(pty_id)?;
 
         let exited = match self.sessions.get_mut(pty_id) {
-            Some(session) => session.child.try_wait()?.is_some(),
-            None => false,
+            // Capture the exit code before reaping so the exit pump can still
+            // report it — otherwise an attach that reaps a just-exited session
+            // would swallow the pty.exited event.
+            Some(session) => match session.child.try_wait()? {
+                Some(status) => Some(status.exit_code() as i32),
+                None => None,
+            },
+            None => None,
         };
-        if exited {
+        if let Some(code) = exited {
+            self.exited_pending.push((pty_id.to_string(), code));
             self.sessions.remove(pty_id);
         }
 
@@ -491,7 +525,10 @@ impl PtyManager {
     pub fn list(&mut self) -> Vec<PtySessionEntry> {
         let mut exited: Vec<String> = Vec::new();
         for (id, session) in self.sessions.iter_mut() {
-            if matches!(session.child.try_wait(), Ok(Some(_))) {
+            if let Ok(Some(status)) = session.child.try_wait() {
+                // Record the code for the exit pump before reaping (see attach).
+                self.exited_pending
+                    .push((id.clone(), status.exit_code() as i32));
                 exited.push(id.clone());
             }
         }
@@ -802,6 +839,68 @@ mod tests {
         assert!(chunk.end_offset >= seen.len() as u64);
 
         mgr.kill("live-out", Some(PtySignal::Kill)).unwrap();
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn collect_new_exits_reports_each_exit_exactly_once() {
+        let base = test_dir("exits");
+        let mut mgr = PtyManager::new(&base);
+        mgr.spawn(SpawnParams {
+            pty_id: "gone".into(),
+            cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+            command: Some("true".into()), // exits promptly with code 0
+            cols: 80,
+            rows: 24,
+            env: None,
+        })
+        .unwrap();
+
+        // Poll until the exit is observed; the poller detects and reports it.
+        let mut exits = Vec::new();
+        for _ in 0..400 {
+            exits = mgr.collect_new_exits();
+            if !exits.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!exits.is_empty(), "exit never observed: {:?}", mgr.list());
+        assert_eq!(exits, vec![("gone".to_string(), 0)]);
+        // A second drain is empty — the exit was reported once, the session
+        // reaped, and nothing lingers.
+        assert!(mgr.collect_new_exits().is_empty());
+
+        // And a `list()` reap of an exit the poller has not seen still
+        // surfaces it on the next drain (the exited_pending handoff). `list()`
+        // reaps the LIVE session (dropping it from the live map) while its
+        // persisted context lingers on disk as a `live: false` entry — so the
+        // signal is "the entry went live:false", not "the entry vanished".
+        mgr.spawn(SpawnParams {
+            pty_id: "gone-2".into(),
+            cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+            command: Some("true".into()),
+            cols: 80,
+            rows: 24,
+            env: None,
+        })
+        .unwrap();
+        let mut reaped = false;
+        for _ in 0..400 {
+            if mgr
+                .list()
+                .iter()
+                .any(|e| e.pty_id == "gone-2" && !e.live)
+            {
+                reaped = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(reaped, "gone-2 never reaped by list()");
+        let after_list = mgr.collect_new_exits();
+        assert_eq!(after_list, vec![("gone-2".to_string(), 0)]);
+
         fs::remove_dir_all(&base).unwrap();
     }
 

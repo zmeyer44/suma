@@ -16,6 +16,7 @@ pub mod caps;
 pub mod chunker;
 pub mod dispatch;
 pub mod fetch;
+pub mod fwd;
 pub mod jobs;
 pub mod mux;
 pub mod ports;

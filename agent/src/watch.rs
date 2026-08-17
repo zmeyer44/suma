@@ -20,11 +20,28 @@ use std::time::Duration;
 
 use tokio::sync::broadcast;
 
+use crate::caps::Capability;
 use crate::proto::AgentCtlResponse;
 use crate::vfs::{
     VfsRoot, VFS_MAX_TREE_DEPTH, VFS_MAX_TREE_ENTRIES, VFS_TREE_SKIPPED_DIRS,
     VFS_TREE_SKIPPED_FILES,
 };
+
+/// The capability a connection must hold to be TOLD about an unsolicited
+/// event — the shared event bus carries more than one kind now, and each
+/// reveals different information: `vfs.changed` exposes filesystem metadata
+/// (`fs.read`), `pty.exited` exposes shell lifecycle (`pty.io`, what
+/// watching a shell's output already costs). The per-connection event pump
+/// re-checks this per delivery, so an expired window silences the stream.
+/// `None` means "no gate" — no current event is ungated, but a future
+/// broadcast-to-everyone event could be.
+pub fn event_capability(event: &AgentCtlResponse) -> Option<Capability> {
+    match event {
+        AgentCtlResponse::VfsChanged { .. } => Some(Capability::FsRead),
+        AgentCtlResponse::PtyExited { .. } => Some(Capability::PtyIo),
+        _ => None,
+    }
+}
 
 /// How often the root is re-scanned while anyone is subscribed.
 pub const WATCH_INTERVAL: Duration = Duration::from_secs(2);

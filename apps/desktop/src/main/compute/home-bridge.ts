@@ -23,12 +23,19 @@
  * user's own devices, and exactly what the home Mac itself has.
  */
 
+import net from "node:net";
 import path from "node:path";
 import os from "node:os";
 import { clearTimeout, setTimeout } from "node:timers";
-import { parseCtlRequest, parseVfsRequest, type AgentCtlRequest } from "@suma/protocol";
+import {
+  parseChannel,
+  parseCtlRequest,
+  parseVfsRequest,
+  type AgentCtlRequest,
+} from "@suma/protocol";
 import WebSocket from "ws";
 import { encodeFrame, FrameDecoder, type PtyChannel } from "./agent-client";
+import { forwardRefusal } from "./ports-state";
 import type { SimAgent } from "./sim-agent";
 
 const BACKOFF_START_MS = 1_000;
@@ -39,12 +46,18 @@ interface ConnState {
   decoder: FrameDecoder;
   /** ptyId → live channel into the sim, for teardown + input routing. */
   ptys: Map<string, PtyChannel>;
+  /** fwd channel string → the loopback socket it dials on the home Mac. */
+  fwds: Map<string, net.Socket>;
   unsubCtlEvents: () => void;
   /** Serializes ctl requests — the away client's pending queue is FIFO. */
   ctlTail: Promise<void>;
   /** Serializes this conn's vfs requests — order IS the correlation. */
   vfsTail: Promise<void>;
 }
+
+/** Per-conn forward-stream ceiling — a defensive cap on an away device
+ *  opening unbounded loopback dials on the home Mac. */
+const MAX_FWD_PER_CONN = 256;
 
 export interface HomeBridgeOptions {
   controlUrl: string;
@@ -174,6 +187,7 @@ export class HomeAgentBridge {
       this.conns.set(message.conn, {
         decoder: new FrameDecoder(),
         ptys: new Map(),
+        fwds: new Map(),
         // Per-conn event fan-out: pty.exited, vfs.changed, fetch.* — the
         // same events an in-process listener gets, isolated per client.
         unsubCtlEvents: this.options.sim.onCtlEvent((event) => {
@@ -209,8 +223,10 @@ export class HomeAgentBridge {
         this.enqueueVfs(conn, frame.payload);
       } else if (frame.channel.startsWith("pty/")) {
         this.handlePty(conn, frame.channel, frame.payload);
+      } else if (frame.channel.startsWith("fwd/")) {
+        this.handleFwd(conn, frame.channel, frame.payload);
       }
-      // fwd/log: unwired, dropped — mirroring the Rust agent.
+      // log: unwired, dropped — mirroring the Rust agent.
     }
   }
 
@@ -310,6 +326,54 @@ export class HomeAgentBridge {
     }
   }
 
+  /**
+   * A port-forward frame. OPEN (empty, unknown stream) dials `127.0.0.1:port`
+   * on THIS Mac; DATA is bytes; CLOSE (empty on a known stream) destroys it.
+   * The home Mac is the trust boundary: an away device must not reach
+   * reserved local ports (sumad's proxy), and cannot open unbounded dials.
+   */
+  private handleFwd(conn: string, channel: string, payload: Buffer): void {
+    const state = this.conns.get(conn);
+    if (state === undefined) return;
+    const existing = state.fwds.get(channel);
+    if (existing !== undefined) {
+      if (payload.byteLength === 0) {
+        // CLOSE from the away side: delete before destroy so the socket's
+        // own close handler does not echo a CLOSE back.
+        state.fwds.delete(channel);
+        existing.destroy();
+      } else {
+        existing.write(payload);
+      }
+      return;
+    }
+    if (payload.byteLength > 0) return; // DATA racing a close — drop
+    // OPEN. Parse the port; the relay grammar guarantees a stream id here.
+    const parsed = parseChannel(channel);
+    if (parsed === null || parsed.kind !== "fwd" || parsed.id === undefined) return;
+    const port = parsed.port as number;
+    // Refuse reserved local ports and enforce the per-conn cap: closing the
+    // stream (empty frame) is the away client's dial-refused signal.
+    if (forwardRefusal(port, undefined) !== null || state.fwds.size >= MAX_FWD_PER_CONN) {
+      this.sendFrame(conn, channel, Buffer.alloc(0));
+      return;
+    }
+    const socket = net.connect(port, "127.0.0.1");
+    // Map-first: Node buffers pre-connect writes, so DATA racing the dial is
+    // safe, and a close during connect still finds the entry to clean up.
+    state.fwds.set(channel, socket);
+    socket.on("data", (chunk: Buffer) => this.sendFrame(conn, channel, chunk));
+    const closeStream = (): void => {
+      // Doubles as the dial-refused path: connect errors surface as
+      // 'error' then 'close'.
+      if (state.fwds.delete(channel)) {
+        this.sendFrame(conn, channel, Buffer.alloc(0));
+      }
+    };
+    socket.on("close", closeStream);
+    socket.on("error", closeStream);
+  }
+
   /* ------------------------------ plumbing ------------------------------ */
 
   private sendFrame(conn: string, channel: string, payload: Uint8Array | string): void {
@@ -323,6 +387,7 @@ export class HomeAgentBridge {
     if (state === undefined) return;
     this.conns.delete(conn);
     for (const pty of state.ptys.values()) pty.close();
+    for (const socket of state.fwds.values()) socket.destroy();
     state.unsubCtlEvents();
   }
 }

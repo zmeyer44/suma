@@ -275,6 +275,11 @@ export class TcpAgentClient implements AgentLink {
   forward(port: number, local: Duplex): void {
     const channel = `fwd/${port}`;
     const socket = this.openChannel();
+    // Announce the stream with an empty OPEN frame so the agent dials the
+    // port immediately — a server-first protocol (or a refused dial) would
+    // otherwise wait for the browser's first bytes. One connection per
+    // forward, so the bare channel name is the stream identity here.
+    socket.write(encodeFrame(channel, Buffer.alloc(0)));
     const decoder = new FrameDecoder();
     socket.on("data", (chunk) => {
       let frames: AgentFrame[];

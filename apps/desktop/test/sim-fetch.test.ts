@@ -10,7 +10,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { AgentCtlResponse } from "@suma/protocol";
+import { FETCH_CANCELLED_ERROR, type AgentCtlResponse } from "@suma/protocol";
 import { buildManifest } from "../../../packages/chunking/src/index";
 import {
   checkTarget,
@@ -35,6 +35,30 @@ async function serve(
   handler: http.RequestListener,
 ): Promise<{ port: number; url: (p: string) => string }> {
   const server = http.createServer(handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  cleanups.push(() => server.close());
+  return { port, url: (p) => `http://127.0.0.1:${port}${p}` };
+}
+
+/** A server that announces a large Content-Length then trickles bytes, so a
+ *  fetch stays mid-transfer long enough to be cancelled. */
+async function serveSlow(): Promise<{ port: number; url: (p: string) => string }> {
+  const total = 10 * 1024 * 1024;
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-length": String(total) });
+    let sent = 0;
+    const chunk = Buffer.alloc(16 * 1024, 0x7a);
+    const timer = setInterval(() => {
+      if (res.writableEnded || sent >= total) {
+        clearInterval(timer);
+        return;
+      }
+      res.write(chunk);
+      sent += chunk.length;
+    }, 20);
+    res.on("close", () => clearInterval(timer));
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as { port: number }).port;
   cleanups.push(() => server.close());
@@ -212,6 +236,36 @@ describe("simFetchPublic", () => {
       error: expect.stringContaining("exceeds"),
     });
     await expect(fs.stat(dest3)).rejects.toThrow();
+  });
+
+  it("aborts mid-download, reports the cancelled sentinel, and cleans staging", async () => {
+    // A slow server: header first, then a trickle, so the abort lands
+    // between chunks rather than after completion.
+    const { url, port } = await serveSlow();
+    void port;
+    const dest = path.join(tempDir(), "cancelled.bin");
+    const controller = new AbortController();
+    const { emit, finished } = collector();
+    const running = simFetchPublic({
+      fetchId: "fetch-cancel",
+      url: url("/slow.bin"),
+      destTarget: dest,
+      destWirePath: "/Downloads/cancelled.bin",
+      emit,
+      signal: controller.signal,
+      allowPrivate: true,
+    });
+    // Let the transfer get going, then cancel.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    controller.abort();
+    await running;
+    const last = (await finished).at(-1);
+    expect(last).toMatchObject({ t: "fetch.failed", error: FETCH_CANCELLED_ERROR });
+    // No staging turd and no published destination.
+    await expect(fs.stat(dest)).rejects.toThrow();
+    const dir = path.dirname(dest);
+    const leftovers = (await fs.readdir(dir)).filter((n) => n.includes("suma-fetch"));
+    expect(leftovers).toEqual([]);
   });
 });
 

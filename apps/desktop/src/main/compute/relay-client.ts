@@ -22,6 +22,7 @@
  *         refresh either heals it or signs the account out.
  */
 
+import { randomUUID } from "node:crypto";
 import type { Duplex } from "node:stream";
 import { clearTimeout, setTimeout } from "node:timers";
 import {
@@ -86,6 +87,8 @@ export class RelayAgentClient implements AgentLink {
   >();
   /** Total bytes delivered per PTY, used to replay only a reconnect gap. */
   private readonly ptyOffsets = new Map<string, number>();
+  /** Live forward streams by full channel string (`fwd/<port>/<id>`). */
+  private readonly fwdSockets = new Map<string, Duplex>();
   private readonly connectionListeners = new Set<(up: boolean) => void>();
   private readonly ctlEventListeners = new Set<(event: AgentCtlResponse) => void>();
 
@@ -164,10 +167,30 @@ export class RelayAgentClient implements AgentLink {
     };
   }
 
-  forward(_port: number, socket: Duplex): void {
-    // fwd/<port> is not relayed in this phase — matching the Rust agent,
-    // where the channel is parsed but unwired. Honest failure over silence.
-    socket.destroy(new Error("port forwarding is not available over the relay yet"));
+  forward(port: number, local: Duplex): void {
+    if (this.stopped || !this.up || this.ws === null) {
+      local.destroy(new Error("your computer is unreachable right now — reconnecting"));
+      return;
+    }
+    // One WebSocket carries every forward stream, so each needs its own id
+    // in the channel name (`fwd/<port>/<streamId>`) — the home bridge demuxes
+    // by it. OPEN with an empty frame; the bridge dials the port.
+    const channel = `fwd/${port}/${randomUUID()}`;
+    this.fwdSockets.set(channel, local);
+    this.ws.send(encodeFrame(channel, Buffer.alloc(0)));
+    local.on("data", (chunk: Buffer) => {
+      if (this.up && this.ws !== null && chunk.length > 0) {
+        this.ws.send(encodeFrame(channel, chunk));
+      }
+    });
+    const closeLocal = (): void => {
+      // Delete BEFORE any CLOSE so an inbound close doesn't echo back.
+      if (this.fwdSockets.delete(channel) && this.up && this.ws !== null) {
+        this.ws.send(encodeFrame(channel, Buffer.alloc(0)));
+      }
+    };
+    local.on("close", closeLocal);
+    local.on("error", closeLocal);
   }
 
   /** homeOnline flipped true — skip the backoff and dial now. */
@@ -302,6 +325,17 @@ export class RelayAgentClient implements AgentLink {
           );
           for (const listener of listeners) listener(frame.payload);
         }
+      } else if (frame.channel.startsWith("fwd/")) {
+        const local = this.fwdSockets.get(frame.channel);
+        if (local === undefined) continue; // races a close — drop
+        if (frame.payload.byteLength === 0) {
+          // CLOSE from the home side: delete before destroy so our close
+          // handler does not echo a spurious CLOSE back.
+          this.fwdSockets.delete(frame.channel);
+          local.destroy();
+        } else {
+          local.write(frame.payload);
+        }
       }
       // Unknown channels: dropped, matching TcpAgentClient's per-socket rule.
     }
@@ -359,6 +393,11 @@ export class RelayAgentClient implements AgentLink {
   private failAll(err: Error): void {
     for (const pending of this.pendingCtl.splice(0)) pending.reject(err);
     for (const pending of this.pendingVfs.splice(0)) pending.reject(err);
+    // A forward stream cannot survive its carrier changing conn-ids: the
+    // relay assigns fresh ids per dial and the home bridge has no memory of
+    // the old stream. Destroy every live forward; the browser reconnects.
+    for (const socket of this.fwdSockets.values()) socket.destroy();
+    this.fwdSockets.clear();
   }
 
   private setUp(up: boolean): void {

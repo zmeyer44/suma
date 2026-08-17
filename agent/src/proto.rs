@@ -117,6 +117,29 @@ pub enum AgentCtlRequest {
         url: String,
         dest_path: String,
     },
+    /// Cancel a running (or queued) background fetch. Fire-and-forget, like
+    /// pty.kill: no response frame — confirmation is the `fetch.failed`
+    /// event carrying [`FETCH_CANCELLED_ERROR`]. Unknown ids and
+    /// double-cancels are silent no-ops.
+    #[serde(rename = "fetch.cancel", rename_all = "camelCase")]
+    FetchCancel { fetch_id: String },
+}
+
+/// The exact `fetch.failed.error` a cancelled fetch reports — mirror of
+/// `FETCH_CANCELLED_ERROR` in packages/protocol/src/agent.ts. The desktop
+/// matches on it to show "cancelled" rather than "failed".
+pub const FETCH_CANCELLED_ERROR: &str = "cancelled by the user";
+
+fn validate_fetch_id(fetch_id: &str) -> Result<(), String> {
+    if fetch_id.is_empty()
+        || fetch_id.len() > 128
+        || !fetch_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return Err("fetchId must be 1..=128 URL-safe characters".to_string());
+    }
+    Ok(())
 }
 
 impl AgentCtlRequest {
@@ -178,14 +201,7 @@ impl AgentCtlRequest {
                 url,
                 dest_path,
             } => {
-                if fetch_id.is_empty()
-                    || fetch_id.len() > 128
-                    || !fetch_id
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-                {
-                    return Err("fetchId must be 1..=128 URL-safe characters".to_string());
-                }
+                validate_fetch_id(fetch_id)?;
                 if url.len() > 8192 || !url.contains("://") {
                     return Err("url must be a URL of at most 8192 chars".to_string());
                 }
@@ -212,6 +228,7 @@ impl AgentCtlRequest {
                 }
                 Ok(())
             }
+            AgentCtlRequest::FetchCancel { fetch_id } => validate_fetch_id(fetch_id),
         }
     }
 }
@@ -390,6 +407,21 @@ mod tests {
                 dest_path: "/home/u/data.tar.gz".into()
             }
         );
+
+        let cancel: AgentCtlRequest =
+            serde_json::from_str(r#"{"t":"fetch.cancel","fetchId":"fetch-1"}"#).unwrap();
+        assert_eq!(
+            cancel,
+            AgentCtlRequest::FetchCancel {
+                fetch_id: "fetch-1".into()
+            }
+        );
+        assert!(cancel.validate().is_ok());
+        // Same fetchId bounds as fetch.public.
+        assert!(serde_json::from_str::<AgentCtlRequest>(r#"{"t":"fetch.cancel","fetchId":""}"#)
+            .unwrap()
+            .validate()
+            .is_err());
     }
 
     #[test]

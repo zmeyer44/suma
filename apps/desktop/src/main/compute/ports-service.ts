@@ -28,9 +28,17 @@ export interface PortsDeps {
   emit: (ports: PortForwardInfo[]) => void;
 }
 
+/** A live forward: its listener plus the sockets it has accepted, so
+ *  disabling the forward can sever connections in flight (server.close()
+ *  stops accepting but leaves piped sockets alive). Null server = a
+ *  simulated-agent marker forward (no listener). */
+interface Forward {
+  server: net.Server | null;
+  sockets: Set<net.Socket>;
+}
+
 export class PortsService {
-  /** Forwarded ports; the server is null for simulated-agent forwards. */
-  private readonly forwards = new Map<number, net.Server | null>();
+  private readonly forwards = new Map<number, Forward>();
   private latest: ListeningPort[] = [];
   private lastEmitted = "";
   private timer: NodeJS.Timeout | null = null;
@@ -58,13 +66,12 @@ export class PortsService {
       );
       if (refusal !== null) throw new Error(refusal);
       if (this.deps.link.kind === "simulated") {
-        this.forwards.set(port, null);
+        this.forwards.set(port, { server: null, sockets: new Set() });
       } else {
         this.forwards.set(port, await this.listen(port));
       }
     } else if (!enabled && active) {
-      this.forwards.get(port)?.close();
-      this.forwards.delete(port);
+      this.closeForward(port);
     }
     this.push(true);
     const info = this.list().find((p) => p.port === port);
@@ -90,11 +97,21 @@ export class PortsService {
       clearInterval(this.timer);
       this.timer = null;
     }
-    for (const server of this.forwards.values()) server?.close();
-    this.forwards.clear();
+    for (const port of [...this.forwards.keys()]) this.closeForward(port);
   }
 
   /* ------------------------------ internals ------------------------------ */
+
+  /** Stop accepting AND sever every live connection — `server.close()` alone
+   *  leaves already-piped sockets running, so a disabled forward would keep
+   *  proxying traffic until each side happened to close. */
+  private closeForward(port: number): void {
+    const forward = this.forwards.get(port);
+    if (forward === undefined) return;
+    this.forwards.delete(port);
+    forward.server?.close();
+    for (const socket of forward.sockets) socket.destroy();
+  }
 
   /** The full port list, `loopback` flag included — never leaves main. */
   private states(): PortState[] {
@@ -113,15 +130,23 @@ export class PortsService {
     this.push(false);
   }
 
-  private listen(port: number): Promise<net.Server> {
+  private listen(port: number): Promise<Forward> {
     return new Promise((resolve, reject) => {
-      const server = net.createServer((socket) => this.deps.link.forward(port, socket));
+      const forward: Forward = { server: null, sockets: new Set() };
+      const server = net.createServer((socket) => {
+        forward.sockets.add(socket);
+        socket.on("close", () => forward.sockets.delete(socket));
+        this.deps.link.forward(port, socket);
+      });
       server.once("error", (err) => {
         reject(
           new Error(`could not listen on localhost:${port} — ${err.message}. Is something already using it?`),
         );
       });
-      server.listen(port, "127.0.0.1", () => resolve(server));
+      server.listen(port, "127.0.0.1", () => {
+        forward.server = server;
+        resolve(forward);
+      });
     });
   }
 

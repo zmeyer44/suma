@@ -95,7 +95,16 @@ export function checkCapability(
 
 export type AgentChannelKind = "ctl" | "pty" | "fwd" | "vfs" | "log";
 
-/** Parse a mux channel name (`ctl`, `pty/<id>`, `fwd/<port>`, `vfs`, `log`). */
+/**
+ * Parse a mux channel name (`ctl`, `pty/<id>`, `fwd/<port>[/<streamId>]`,
+ * `vfs`, `log`).
+ *
+ * The fwd port is parsed STRICTLY (decimal digits only, whole segment) —
+ * matching the Rust parser, which always was strict. The optional streamId
+ * gives a forward stream identity on transports where one connection
+ * carries many streams (the relay); over per-connection TCP the bare form
+ * suffices because the connection IS the stream.
+ */
 export function parseChannel(
   name: string,
 ): { kind: AgentChannelKind; id?: string; port?: number } | null {
@@ -106,9 +115,16 @@ export function parseChannel(
   const rest = name.slice(slash + 1);
   if (head === "pty") return rest.length > 0 ? { kind: "pty", id: rest } : null;
   if (head === "fwd") {
-    const port = Number.parseInt(rest, 10);
+    const idSlash = rest.indexOf("/");
+    const portPart = idSlash < 0 ? rest : rest.slice(0, idSlash);
+    const streamId = idSlash < 0 ? undefined : rest.slice(idSlash + 1);
+    if (!/^\d+$/.test(portPart)) return null;
+    const port = Number.parseInt(portPart, 10);
     if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
-    return { kind: "fwd", port };
+    if (streamId !== undefined && streamId.length === 0) return null;
+    return streamId === undefined
+      ? { kind: "fwd", port }
+      : { kind: "fwd", port, id: streamId };
   }
   return null;
 }
@@ -205,6 +221,28 @@ export const fetchPublicSchema = z.object({
   destPath: z.string().max(4096),
 });
 
+/**
+ * Cancel a running (or queued) background fetch. Fire-and-forget, like
+ * pty.kill: there is no response frame — confirmation is the existing
+ * `fetch.failed` event carrying [`FETCH_CANCELLED_ERROR`]. Unknown ids and
+ * double-cancels are silent no-ops.
+ */
+export const fetchCancelSchema = z.object({
+  t: z.literal("fetch.cancel"),
+  fetchId: z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[A-Za-z0-9_-]+$/),
+});
+
+/**
+ * The exact `fetch.failed.error` string a cancelled fetch reports — every
+ * implementation (Rust agent, SimAgent) emits this verbatim, and the
+ * desktop matches on it to show "cancelled" rather than "failed".
+ */
+export const FETCH_CANCELLED_ERROR = "cancelled by the user";
+
 export const agentCtlRequestSchema = z.discriminatedUnion("t", [
   ptySpawnSchema,
   ptyResizeSchema,
@@ -214,6 +252,7 @@ export const agentCtlRequestSchema = z.discriminatedUnion("t", [
   ptyListSchema,
   portsListSchema,
   fetchPublicSchema,
+  fetchCancelSchema,
 ]);
 export type AgentCtlRequest = z.infer<typeof agentCtlRequestSchema>;
 
@@ -229,6 +268,8 @@ export const CTL_CAPABILITY: Readonly<Record<AgentCtlRequest["t"], Capability>> 
   "job.set": "pty.spawn",
   "ports.list": "ports.list",
   "fetch.public": "fetch.public",
+  // Cancelling is scoped by the same grant that starts a fetch.
+  "fetch.cancel": "fetch.public",
 };
 
 export type PtyRestoreKind = "resumed" | "reconstructed";

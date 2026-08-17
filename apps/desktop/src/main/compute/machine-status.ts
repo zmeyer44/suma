@@ -107,9 +107,8 @@ export function localHomeMachineStatus(): MachineStatus {
   };
 }
 
-/** Local compute belongs to another enrolled Mac; no relay exists yet. */
-/** Local compute mode, seen from a device that is NOT the home Mac. The
- *  relay makes the home Mac reachable — `homeOnline` says whether it is. */
+/** Local compute mode, seen from a device that is NOT the home Mac. That Mac
+ *  is reached over the relay — `homeOnline` says whether it is currently up. */
 export function localAwayMachineStatus(homeOnline: boolean): MachineStatus {
   return {
     machineId: null,
