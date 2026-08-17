@@ -38,8 +38,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
 
-    let machine_id =
-        std::env::var("SUMA_MACHINE_ID").unwrap_or_else(|_| "dev-machine".to_string());
+    let machine_id = std::env::var("SUMA_MACHINE_ID").unwrap_or_else(|_| "dev-machine".to_string());
 
     // Dev stand-in for token delivery: claims come from the environment and
     // are never verified — see the module docs for what that does and does not
@@ -74,7 +73,8 @@ async fn main() -> anyhow::Result<()> {
     // The Files-root watcher: one process-wide bus, scans only while some
     // connection is subscribed (watch.rs). Connections subscribe on their
     // first ctl frame — pty/vfs-only clients never hear from it.
-    let (watch_bus, _) = broadcast::channel::<AgentCtlResponse>(suma_agent::watch::WATCH_BUS_CAPACITY);
+    let (watch_bus, _) =
+        broadcast::channel::<AgentCtlResponse>(suma_agent::watch::WATCH_BUS_CAPACITY);
     tokio::spawn(suma_agent::watch::run(vfs_root.clone(), watch_bus.clone()));
     tokio::spawn(run_exit_pump(Arc::clone(&state), watch_bus.clone()));
 

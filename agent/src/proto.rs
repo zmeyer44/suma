@@ -418,10 +418,12 @@ mod tests {
         );
         assert!(cancel.validate().is_ok());
         // Same fetchId bounds as fetch.public.
-        assert!(serde_json::from_str::<AgentCtlRequest>(r#"{"t":"fetch.cancel","fetchId":""}"#)
-            .unwrap()
-            .validate()
-            .is_err());
+        assert!(
+            serde_json::from_str::<AgentCtlRequest>(r#"{"t":"fetch.cancel","fetchId":""}"#)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]

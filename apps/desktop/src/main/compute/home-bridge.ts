@@ -75,6 +75,10 @@ export class HomeAgentBridge {
   private backoffMs = BACKOFF_START_MS;
   private retryTimer: NodeJS.Timeout | null = null;
   private readonly conns = new Map<string, ConnState>();
+  /** Forward sockets whose destination rejected more bytes for now. Pausing
+   * the shared relay bounds buffering; it resumes only after every blocked
+   * stream drains or closes. */
+  private readonly fwdBackpressure = new Set<string>();
 
   constructor(private readonly options: HomeBridgeOptions) {}
 
@@ -120,7 +124,8 @@ export class HomeAgentBridge {
     const url = `${this.options.controlUrl.replace(/^http/, "ws")}/v1/relay/home`;
     const factory =
       this.options.wsFactory ??
-      ((wsUrl: string, headers: Record<string, string>) => new WebSocket(wsUrl, { headers }));
+      ((wsUrl: string, headers: Record<string, string>) =>
+        new WebSocket(wsUrl, { headers }));
     let ws: WebSocket;
     try {
       ws = factory(url, { authorization: `Bearer ${token}` });
@@ -296,7 +301,9 @@ export class HomeAgentBridge {
       if (!this.conns.has(conn)) return;
       let response;
       try {
-        response = await this.options.sim.vfs(parseVfsRequest(payload.toString("utf8")));
+        response = await this.options.sim.vfs(
+          parseVfsRequest(payload.toString("utf8")),
+        );
       } catch (err) {
         response = {
           t: "error" as const,
@@ -343,18 +350,24 @@ export class HomeAgentBridge {
         state.fwds.delete(channel);
         existing.destroy();
       } else {
-        existing.write(payload);
+        if (!existing.write(payload)) {
+          this.holdRelayForFwd(conn, channel, existing);
+        }
       }
       return;
     }
     if (payload.byteLength > 0) return; // DATA racing a close — drop
     // OPEN. Parse the port; the relay grammar guarantees a stream id here.
     const parsed = parseChannel(channel);
-    if (parsed === null || parsed.kind !== "fwd" || parsed.id === undefined) return;
+    if (parsed === null || parsed.kind !== "fwd" || parsed.id === undefined)
+      return;
     const port = parsed.port as number;
     // Refuse reserved local ports and enforce the per-conn cap: closing the
     // stream (empty frame) is the away client's dial-refused signal.
-    if (forwardRefusal(port, undefined) !== null || state.fwds.size >= MAX_FWD_PER_CONN) {
+    if (
+      forwardRefusal(port, undefined) !== null ||
+      state.fwds.size >= MAX_FWD_PER_CONN
+    ) {
       this.sendFrame(conn, channel, Buffer.alloc(0));
       return;
     }
@@ -362,13 +375,29 @@ export class HomeAgentBridge {
     // Map-first: Node buffers pre-connect writes, so DATA racing the dial is
     // safe, and a close during connect still finds the entry to clean up.
     state.fwds.set(channel, socket);
-    socket.on("data", (chunk: Buffer) => this.sendFrame(conn, channel, chunk));
+    socket.on("data", (chunk: Buffer) => {
+      // A WebSocket send has no stream-style return value. Serialize one TCP
+      // chunk at a time and resume only when ws confirms it was flushed, so a
+      // fast loopback server cannot fill Electron's heap behind a slow relay.
+      socket.pause();
+      this.sendFrame(conn, channel, chunk, (err) => {
+        if (
+          err !== undefined ||
+          this.conns.get(conn)?.fwds.get(channel) !== socket
+        ) {
+          socket.destroy(err);
+          return;
+        }
+        socket.resume();
+      });
+    });
     const closeStream = (): void => {
       // Doubles as the dial-refused path: connect errors surface as
       // 'error' then 'close'.
       if (state.fwds.delete(channel)) {
         this.sendFrame(conn, channel, Buffer.alloc(0));
       }
+      this.releaseRelayForFwd(conn, channel);
     };
     socket.on("close", closeStream);
     socket.on("error", closeStream);
@@ -376,10 +405,45 @@ export class HomeAgentBridge {
 
   /* ------------------------------ plumbing ------------------------------ */
 
-  private sendFrame(conn: string, channel: string, payload: Uint8Array | string): void {
+  private sendFrame(
+    conn: string,
+    channel: string,
+    payload: Uint8Array | string,
+    onFlushed?: (err?: Error) => void,
+  ): void {
     const ws = this.ws;
-    if (ws === null || !this.conns.has(conn)) return;
-    ws.send(Buffer.concat([Buffer.from(conn, "ascii"), encodeFrame(channel, payload)]));
+    if (ws === null || !this.conns.has(conn)) {
+      onFlushed?.(new Error("relay connection is unavailable"));
+      return;
+    }
+    try {
+      ws.send(
+        Buffer.concat([
+          Buffer.from(conn, "ascii"),
+          encodeFrame(channel, payload),
+        ]),
+        onFlushed,
+      );
+    } catch (err) {
+      onFlushed?.(err instanceof Error ? err : new Error(String(err)));
+    }
+  }
+
+  private holdRelayForFwd(
+    conn: string,
+    channel: string,
+    socket: net.Socket,
+  ): void {
+    const key = `${conn}\0${channel}`;
+    if (this.fwdBackpressure.has(key)) return;
+    this.fwdBackpressure.add(key);
+    this.ws?.pause();
+    socket.once("drain", () => this.releaseRelayForFwd(conn, channel));
+  }
+
+  private releaseRelayForFwd(conn: string, channel: string): void {
+    if (!this.fwdBackpressure.delete(`${conn}\0${channel}`)) return;
+    if (this.fwdBackpressure.size === 0) this.ws?.resume();
   }
 
   private teardownConn(conn: string): void {
@@ -387,7 +451,10 @@ export class HomeAgentBridge {
     if (state === undefined) return;
     this.conns.delete(conn);
     for (const pty of state.ptys.values()) pty.close();
-    for (const socket of state.fwds.values()) socket.destroy();
+    for (const [channel, socket] of state.fwds) {
+      this.releaseRelayForFwd(conn, channel);
+      socket.destroy();
+    }
     state.unsubCtlEvents();
   }
 }

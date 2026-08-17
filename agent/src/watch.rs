@@ -102,7 +102,12 @@ pub fn scan_digest(root: &Path) -> [u8; 32] {
         };
         let mut names: Vec<(String, PathBuf)> = read
             .filter_map(|entry| entry.ok())
-            .map(|entry| (entry.file_name().to_string_lossy().into_owned(), entry.path()))
+            .map(|entry| {
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    entry.path(),
+                )
+            })
             .collect();
         names.sort_by(|a, b| a.0.cmp(&b.0));
         for (name, path) in names {
@@ -122,7 +127,7 @@ pub fn scan_digest(root: &Path) -> [u8; 32] {
                 entries += 1;
                 hasher.update(name.as_bytes());
                 hasher.update(b"/d");
-                if depth + 1 <= VFS_MAX_TREE_DEPTH {
+                if depth < VFS_MAX_TREE_DEPTH {
                     stack.push((path, depth + 1));
                 }
             } else if file_type.is_file() {
@@ -276,7 +281,10 @@ mod tests {
                 Err(other) => panic!("{other:?}"),
             }
         };
-        assert!(matches!(event, AgentCtlResponse::VfsChanged { paths: None }));
+        assert!(matches!(
+            event,
+            AgentCtlResponse::VfsChanged { paths: None }
+        ));
 
         task.abort();
         std::fs::remove_dir_all(&root_dir).unwrap();

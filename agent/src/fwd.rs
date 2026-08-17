@@ -108,7 +108,6 @@ impl FwdSession {
 mod tests {
     use super::*;
     use crate::mux::read_frame;
-    use tokio::io::AsyncReadExt as _;
     use tokio::net::TcpListener;
 
     /// A loopback echo server; returns its port and a handle that stays alive
@@ -167,8 +166,9 @@ mod tests {
         // shuts our write half, which the desktop side reads as EOF.
         let _ = read_frame(&mut desktop_side).await.unwrap();
         echo.abort();
-        drop(session); // closes upstream_write → server's read returns 0
-        // A shutdown propagates as read → 0 on the paired duplex end.
+        // Closes upstream_write → server's read returns 0. A shutdown then
+        // propagates as read → 0 on the paired duplex end.
+        drop(session);
         let mut trailing = Vec::new();
         let _ = desktop_side.read_to_end(&mut trailing).await;
     }

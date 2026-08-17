@@ -345,6 +345,13 @@ export class SimAgent implements AgentLink {
             message: resolved.refused,
           };
         }
+        if (this.activeFetches.has(request.fetchId)) {
+          return {
+            t: "error",
+            code: "fetch_exists",
+            message: `fetch ${request.fetchId} is already active`,
+          };
+        }
         const controller = new AbortController();
         this.activeFetches.set(request.fetchId, controller);
         const fetchId = request.fetchId;

@@ -37,7 +37,7 @@ interface StubRequest {
 interface Route {
   /** Substring of the URL this route answers; first match wins. */
   match: string;
-  respond: (req: StubRequest) => Response;
+  respond: (req: StubRequest) => Response | Promise<Response>;
 }
 
 function json(body: unknown): Response {
@@ -81,11 +81,12 @@ function objectStoreRoute(store: ReadonlyMap<string, Uint8Array>): Route {
     match: "https://r2.test/",
     respond: (req) => {
       const bytes = store.get(req.url.slice(req.url.lastIndexOf("/") + 1));
-      return bytes === undefined ? new Response("missing", { status: 404 }) : bytesResponse(bytes);
+      return bytes === undefined
+        ? new Response("missing", { status: 404 })
+        : bytesResponse(bytes);
     },
   };
 }
-
 
 /** `GET /v1/files/manifest?path=` — the chunk list a stored file is made of. */
 function manifestRoute(manifest: unknown): Route {
@@ -216,9 +217,10 @@ function acceptingAgent(fileBytes?: Uint8Array): FakeAgent {
 }
 
 /** Stateful control-plane transfer routes for the fetch-service tests. */
-function transferRoutes(): Route[] {
+function transferRoutes(options?: { failCancelAttempts?: number }): Route[] {
   const transfers = new Map<string, import("@suma/protocol").Transfer>();
   let sequence = 0;
+  let cancelAttempts = 0;
   return [
     {
       match: "/progress",
@@ -246,11 +248,22 @@ function transferRoutes(): Route[] {
     {
       match: "/cancel",
       respond: (req) => {
+        cancelAttempts += 1;
+        if (cancelAttempts <= (options?.failCancelAttempts ?? 0)) {
+          return new Response(
+            JSON.stringify({ error: "temporarily unavailable" }),
+            { status: 503, headers: { "content-type": "application/json" } },
+          );
+        }
         const id = req.url.split("/transfers/")[1]?.split("/")[0] ?? "";
         const current = transfers.get(id);
         if (current === undefined)
           return new Response("missing", { status: 404 });
-        const updated = { ...current, state: "cancelled" as const, updatedAtMs: current.updatedAtMs + 1 };
+        const updated = {
+          ...current,
+          state: "cancelled" as const,
+          updatedAtMs: current.updatedAtMs + 1,
+        };
         transfers.set(id, updated);
         return json({ transfer: updated });
       },
@@ -346,7 +359,8 @@ function harness(options: HarnessOptions): Harness {
     const raw = init?.body;
     const body: unknown = typeof raw === "string" ? JSON.parse(raw) : null;
     for (const route of options.routes) {
-      if (url.includes(route.match)) return Promise.resolve(route.respond({ url, method, body }));
+      if (url.includes(route.match))
+        return Promise.resolve(route.respond({ url, method, body }));
     }
     return Promise.resolve(new Response("no stub route", { status: 404 }));
   };
@@ -420,7 +434,9 @@ describe("read and download (§8.6)", () => {
 
   it("refuses a path that escapes the root", async () => {
     const { service } = harness({ routes: [] });
-    await expect(service.read("../../etc/passwd", 16)).rejects.toThrow(/invalid file path/);
+    await expect(service.read("../../etc/passwd", 16)).rejects.toThrow(
+      /invalid file path/,
+    );
   });
 });
 
@@ -466,7 +482,8 @@ describe("context (§8.6 transfers list)", () => {
       "endToEndEncrypted",
       "thisDeviceId",
     ]);
-    for (const device of context.devices) expect(Object.keys(device).sort()).toEqual(["id", "name"]);
+    for (const device of context.devices)
+      expect(Object.keys(device).sort()).toEqual(["id", "name"]);
   });
 
   it("falls back to the local device id while unenrolled", async () => {
@@ -587,22 +604,32 @@ describe("agent-driven cloud fetch (fetch.public)", () => {
       error: "fetch truncated: got 5 of 10 bytes",
     });
     const row = service.snapshot().transfers.find((t) => t.url === args.url);
-    expect(row).toMatchObject({ state: "failed", error: "fetch truncated: got 5 of 10 bytes" });
+    expect(row).toMatchObject({
+      state: "failed",
+      error: "fetch truncated: got 5 of 10 bytes",
+    });
     // A settled agent row can be dismissed locally.
     if (row !== undefined) await service.cancelTransfer(row.id);
-    expect(service.snapshot().transfers.some((t) => t.url === args.url)).toBe(false);
+    expect(service.snapshot().transfers.some((t) => t.url === args.url)).toBe(
+      false,
+    );
   });
 
   it("cancelling an active fetch sends fetch.cancel and settles cancelled", async () => {
     const agent = acceptingAgent();
     const { service } = harness({ routes: transferRoutes(), agent });
     await service.startCloudFetch(args);
-    const started = service.snapshot().transfers.find((t) => t.url === args.url);
+    const started = service
+      .snapshot()
+      .transfers.find((t) => t.url === args.url);
     if (started === undefined) throw new Error("missing transfer row");
 
     await service.cancelTransfer(started.id);
     // The agent was told to cancel by fetchId.
-    expect(agent.ctlRequests).toContainEqual({ t: "fetch.cancel", fetchId: started.id });
+    expect(agent.ctlRequests).toContainEqual({
+      t: "fetch.cancel",
+      fetchId: started.id,
+    });
     // The row settled cancelled, and stays cancelled when the sentinel arrives.
     let row = service.snapshot().transfers.find((t) => t.id === started.id);
     expect(row?.state).toBe("cancelled");
@@ -628,11 +655,139 @@ describe("agent-driven cloud fetch (fetch.public)", () => {
     expect(row?.state).toBe("cancelled");
   });
 
+  it("carries a queued cancellation across the temporary transfer id", async () => {
+    let releaseCreate: (() => void) | undefined;
+    const createGate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    const durableId = "00000000-0000-4000-8000-000000000099";
+    const durable = {
+      id: durableId,
+      url: args.url,
+      destPath: args.destPath,
+      state: "queued" as const,
+      receivedBytes: 0,
+      totalBytes: args.totalBytes,
+      originDeviceId: "dev_local",
+      error: null,
+      startedAtMs: 1,
+      updatedAtMs: 1,
+    };
+    const routes: Route[] = [
+      {
+        match: "/cancel",
+        respond: () => json({ transfer: { ...durable, state: "cancelled" } }),
+      },
+      {
+        match: "/v1/files/transfers",
+        respond: async () => {
+          await createGate;
+          return json({ transfer: durable });
+        },
+      },
+    ];
+    const agent = acceptingAgent();
+    const { service, requests } = harness({ routes, agent });
+    const starting = service.startCloudFetch(args);
+    const placeholder = service
+      .snapshot()
+      .transfers.find((t) => t.url === args.url);
+    if (placeholder === undefined)
+      throw new Error("missing queued placeholder");
+
+    await service.cancelTransfer(placeholder.id);
+    releaseCreate?.();
+    await expect(starting).resolves.toBe(false);
+
+    expect(agent.ctlRequests).not.toContainEqual(
+      expect.objectContaining({ t: "fetch.public" }),
+    );
+    expect(
+      requests.some((request) => request.includes(`${durableId}/cancel`)),
+    ).toBe(true);
+    expect(
+      service.snapshot().transfers.find((t) => t.id === durableId)?.state,
+    ).toBe("cancelled");
+  });
+
+  it("stops queued Files storage when a storing transfer is cancelled", async () => {
+    const data = new Uint8Array([1, 2, 3, 4]);
+    const agent = acceptingAgent(data);
+    const { service, requests } = harness({
+      routes: [...transferRoutes(), ...fetchedFileRoutes(data)],
+      agent,
+    });
+    await service.startCloudFetch({ ...args, totalBytes: data.byteLength });
+    const started = service
+      .snapshot()
+      .transfers.find((t) => t.url === args.url);
+    if (started === undefined) throw new Error("missing transfer row");
+
+    agent.emit({
+      t: "fetch.done",
+      fetchId: started.id,
+      url: args.url,
+      path: args.destPath,
+      bytes: data.byteLength,
+      manifest: buildManifest(data),
+    });
+    expect(
+      service.snapshot().transfers.find((t) => t.id === started.id)?.state,
+    ).toBe("storing");
+    await service.cancelTransfer(started.id);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(
+      service.snapshot().transfers.find((t) => t.id === started.id)?.state,
+    ).toBe("cancelled");
+    expect(
+      requests.some((request) => request.startsWith("PUT https://r2.test/")),
+    ).toBe(false);
+    expect(
+      requests.some((request) => request.includes("/v1/files/complete")),
+    ).toBe(false);
+  });
+
+  it("retries a durable cancellation after the control plane recovers", async () => {
+    const agent = acceptingAgent();
+    const { service, requests } = harness({
+      routes: transferRoutes({ failCancelAttempts: 1 }),
+      agent,
+    });
+    await service.startCloudFetch(args);
+    const started = service
+      .snapshot()
+      .transfers.find((t) => t.url === args.url);
+    if (started === undefined) throw new Error("missing transfer row");
+
+    await expect(service.cancelTransfer(started.id)).rejects.toThrow(
+      /temporarily unavailable/,
+    );
+    expect(
+      requests.filter((request) => request.includes("/cancel")),
+    ).toHaveLength(1);
+    await service.refreshTransfers();
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (requests.filter((request) => request.includes("/cancel")).length >= 2)
+        break;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(
+      requests.filter((request) => request.includes("/cancel")),
+    ).toHaveLength(2);
+    await service.refreshTransfers();
+    expect(
+      service.snapshot().transfers.find((t) => t.id === started.id)?.state,
+    ).toBe("cancelled");
+  });
+
   it("settles cancelled when the sentinel races ahead of local bookkeeping", async () => {
     const agent = acceptingAgent();
     const { service } = harness({ routes: transferRoutes(), agent });
     await service.startCloudFetch(args);
-    const started = service.snapshot().transfers.find((t) => t.url === args.url);
+    const started = service
+      .snapshot()
+      .transfers.find((t) => t.url === args.url);
     if (started === undefined) throw new Error("missing transfer row");
     // The cancel event arrives before any cancelTransfer call (e.g. the user
     // cancelled on another device and the agent already stopped).
@@ -715,14 +870,28 @@ describe("upload progress", () => {
     uploadUrlRoute: Route = UPLOAD_URL_ROUTE,
   ): Route[] {
     return [
-      { match: "/v1/files/complete", respond: () => json({ file: stored, complete: true }) },
+      {
+        match: "/v1/files/complete",
+        respond: () => json({ file: stored, complete: true }),
+      },
       uploadUrlRoute,
-      { match: "https://r2.test/", respond: () => new Response("", { status: 200 }) },
+      {
+        match: "https://r2.test/",
+        respond: () => new Response("", { status: 200 }),
+      },
       {
         match: "/v1/files/manifest",
         respond: (req) => {
           const manifest = (
-            req.body as { manifest?: { chunks?: Array<{ hash: string; offset: number; length: number }> } } | null
+            req.body as {
+              manifest?: {
+                chunks?: Array<{
+                  hash: string;
+                  offset: number;
+                  length: number;
+                }>;
+              };
+            } | null
           )?.manifest;
           const chunks = manifest?.chunks ?? [];
           const needed = new Set(missing(chunks.map((chunk) => chunk.hash)));
@@ -737,15 +906,26 @@ describe("upload progress", () => {
   }
 
   it("reports hashing, then bytes, then completion — correlated by upload id", async () => {
-    const { service, progress, changed } = harness({ routes: uploadRoutes((hashes) => hashes) });
-    await service.upload({ path: "/n/a.bin", contentType: null, data, uploadId: "up_1" });
+    const { service, progress, changed } = harness({
+      routes: uploadRoutes((hashes) => hashes),
+    });
+    await service.upload({
+      path: "/n/a.bin",
+      contentType: null,
+      data,
+      uploadId: "up_1",
+    });
     expect(progress.map((item) => [item.state, item.sentBytes])).toEqual([
       ["hashing", 0],
       ["uploading", 0],
       ["uploading", 4],
       ["completed", 4],
     ]);
-    expect(progress.every((item) => item.uploadId === "up_1" && item.totalBytes === 4)).toBe(true);
+    expect(
+      progress.every(
+        (item) => item.uploadId === "up_1" && item.totalBytes === 4,
+      ),
+    ).toBe(true);
     expect(progress[0]?.path).toBe("/n/a.bin");
     expect(changed).toEqual([{ path: "/n" }]);
   });
@@ -753,8 +933,15 @@ describe("upload progress", () => {
   it("counts deduplicated chunks as progress the user never waits for", async () => {
     // The store already holds every chunk: nothing is uploaded, and the meter
     // still reaches 100% instead of sitting at zero (§7 dedup).
-    const { service, progress, requests } = harness({ routes: uploadRoutes(() => []) });
-    await service.upload({ path: "/n/a.bin", contentType: null, data, uploadId: "up_2" });
+    const { service, progress, requests } = harness({
+      routes: uploadRoutes(() => []),
+    });
+    await service.upload({
+      path: "/n/a.bin",
+      contentType: null,
+      data,
+      uploadId: "up_2",
+    });
     expect(progress.map((item) => [item.state, item.sentBytes])).toEqual([
       ["hashing", 0],
       ["uploading", 4],
@@ -767,15 +954,22 @@ describe("upload progress", () => {
     // `alreadyStored` is the control plane saying the bytes are already there:
     // there is nothing to PUT, and the meter must still reach 100%.
     const { service, progress, requests } = harness({
-      routes: uploadRoutes(
-        (hashes) => hashes,
-        {
-          match: "/upload-url",
-          respond: (req) => json({ hash: chunkHashIn(req.url), alreadyStored: true, sizeBytes: 4 }),
-        },
-      ),
+      routes: uploadRoutes((hashes) => hashes, {
+        match: "/upload-url",
+        respond: (req) =>
+          json({
+            hash: chunkHashIn(req.url),
+            alreadyStored: true,
+            sizeBytes: 4,
+          }),
+      }),
     });
-    await service.upload({ path: "/n/a.bin", contentType: null, data, uploadId: "up_4" });
+    await service.upload({
+      path: "/n/a.bin",
+      contentType: null,
+      data,
+      uploadId: "up_4",
+    });
     expect(progress.map((item) => [item.state, item.sentBytes])).toEqual([
       ["hashing", 0],
       ["uploading", 0],
@@ -790,12 +984,20 @@ describe("upload progress", () => {
       routes: [
         {
           match: "/v1/files",
-          respond: () => new Response(JSON.stringify({ error: "over quota" }), { status: 413 }),
+          respond: () =>
+            new Response(JSON.stringify({ error: "over quota" }), {
+              status: 413,
+            }),
         },
       ],
     });
     await expect(
-      service.upload({ path: "/n/a.bin", contentType: null, data, uploadId: "up_3" }),
+      service.upload({
+        path: "/n/a.bin",
+        contentType: null,
+        data,
+        uploadId: "up_3",
+      }),
     ).rejects.toThrow();
     expect(progress.map((item) => item.state)).toEqual(["hashing", "failed"]);
     expect(progress[1]?.error).toMatch(/quota/i);

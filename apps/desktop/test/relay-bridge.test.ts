@@ -28,10 +28,13 @@ class FakeWs extends EventEmitter {
   onSend: ((data: Buffer | string, binary: boolean) => void) | null = null;
   closedWith: number | null = null;
 
-  send(data: string | Uint8Array): void {
+  send(data: string | Uint8Array, callback?: (err?: Error) => void): void {
     if (typeof data === "string") this.onSend?.(data, false);
     else this.onSend?.(Buffer.from(data), true);
+    queueMicrotask(() => callback?.());
   }
+  pause(): void {}
+  resume(): void {}
   close(code?: number): void {
     if (this.closedWith !== null) return;
     this.closedWith = code ?? 1000;
@@ -59,10 +62,11 @@ function tempRoot(): string {
 function attachHomeWs(registry: RelayRegistry, ws: FakeWs): void {
   const socket: RelaySocket = {
     send: (data) => {
-      if (typeof data === "string") ws.emit("message", Buffer.from(data), false);
+      if (typeof data === "string")
+        ws.emit("message", Buffer.from(data), false);
       else ws.emit("message", Buffer.from(data), true);
     },
-    close: (code, reason) => ws.close(code),
+    close: (code, _reason) => ws.close(code),
   };
   registry.attachHome(USER, socket);
   ws.onSend = (data, binary) => {
@@ -153,7 +157,11 @@ describe("relay bridge end-to-end", () => {
       path: "/from-away.txt",
       dataB64: Buffer.from("hello from away").toString("base64"),
     });
-    expect(wrote).toEqual({ t: "vfs.wrote", path: "/from-away.txt", sizeBytes: 15 });
+    expect(wrote).toEqual({
+      t: "vfs.wrote",
+      path: "/from-away.txt",
+      sizeBytes: 15,
+    });
     expect(await fs.readFile(path.join(root, "from-away.txt"), "utf8")).toBe(
       "hello from away",
     );
@@ -181,7 +189,8 @@ describe("relay bridge end-to-end", () => {
     expect(spawned).toEqual({ t: "pty.spawned", ptyId: "away-shell" });
 
     const listing = await client.ctl({ t: "pty.list" });
-    if (listing?.t !== "pty.listing") throw new Error(`wrong answer ${listing?.t}`);
+    if (listing?.t !== "pty.listing")
+      throw new Error(`wrong answer ${listing?.t}`);
     expect(listing.sessions[0]).toMatchObject({
       ptyId: "away-shell",
       cwd: path.join(root, "Personal"),
@@ -301,20 +310,28 @@ describe("relay bridge end-to-end", () => {
     const homeServer = net.createServer((socket) => {
       socket.on("data", (chunk: Buffer) => socket.write(chunk));
     });
-    await new Promise<void>((resolve) => homeServer.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) =>
+      homeServer.listen(0, "127.0.0.1", resolve),
+    );
     cleanups.push(() => homeServer.close());
     const homePort = (homeServer.address() as net.AddressInfo).port;
 
     // How PortsService produces sockets: a local listener whose accepted
     // sockets go to link.forward. Connect a "browser" to it.
-    const localListener = net.createServer((socket) => client.forward(homePort, socket));
-    await new Promise<void>((resolve) => localListener.listen(0, "127.0.0.1", resolve));
+    const localListener = net.createServer((socket) =>
+      client.forward(homePort, socket),
+    );
+    await new Promise<void>((resolve) =>
+      localListener.listen(0, "127.0.0.1", resolve),
+    );
     cleanups.push(() => localListener.close());
     const localPort = (localListener.address() as net.AddressInfo).port;
 
     const browser = net.connect(localPort, "127.0.0.1");
     cleanups.push(() => browser.destroy());
-    await new Promise<void>((resolve) => browser.once("connect", () => resolve()));
+    await new Promise<void>((resolve) =>
+      browser.once("connect", () => resolve()),
+    );
 
     const echoed = await new Promise<Buffer>((resolve) => {
       browser.once("data", resolve);
@@ -335,16 +352,24 @@ describe("relay bridge end-to-end", () => {
     const deadPort = (probe.address() as net.AddressInfo).port;
     await new Promise<void>((resolve) => probe.close(() => resolve()));
 
-    const localListener = net.createServer((socket) => client.forward(deadPort, socket));
-    await new Promise<void>((resolve) => localListener.listen(0, "127.0.0.1", resolve));
+    const localListener = net.createServer((socket) =>
+      client.forward(deadPort, socket),
+    );
+    await new Promise<void>((resolve) =>
+      localListener.listen(0, "127.0.0.1", resolve),
+    );
     cleanups.push(() => localListener.close());
     const localPort = (localListener.address() as net.AddressInfo).port;
 
     const browser = net.connect(localPort, "127.0.0.1");
     cleanups.push(() => browser.destroy());
-    await new Promise<void>((resolve) => browser.once("connect", () => resolve()));
+    await new Promise<void>((resolve) =>
+      browser.once("connect", () => resolve()),
+    );
     // The home bridge's dial fails → CLOSE frame → our local socket ends.
-    await new Promise<void>((resolve) => browser.once("close", () => resolve()));
+    await new Promise<void>((resolve) =>
+      browser.once("close", () => resolve()),
+    );
     expect(browser.destroyed).toBe(true);
   });
 
@@ -353,22 +378,32 @@ describe("relay bridge end-to-end", () => {
     const homeServer = net.createServer((socket) => {
       socket.on("data", (chunk: Buffer) => socket.write(chunk));
     });
-    await new Promise<void>((resolve) => homeServer.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) =>
+      homeServer.listen(0, "127.0.0.1", resolve),
+    );
     cleanups.push(() => homeServer.close());
     const homePort = (homeServer.address() as net.AddressInfo).port;
 
-    const localListener = net.createServer((socket) => client.forward(homePort, socket));
-    await new Promise<void>((resolve) => localListener.listen(0, "127.0.0.1", resolve));
+    const localListener = net.createServer((socket) =>
+      client.forward(homePort, socket),
+    );
+    await new Promise<void>((resolve) =>
+      localListener.listen(0, "127.0.0.1", resolve),
+    );
     cleanups.push(() => localListener.close());
     const localPort = (localListener.address() as net.AddressInfo).port;
 
     const browser = net.connect(localPort, "127.0.0.1");
     cleanups.push(() => browser.destroy());
-    await new Promise<void>((resolve) => browser.once("connect", () => resolve()));
+    await new Promise<void>((resolve) =>
+      browser.once("connect", () => resolve()),
+    );
     await settle();
 
     // Kill the relay WS: the client destroys every live forward socket.
-    const closed = new Promise<void>((resolve) => browser.once("close", () => resolve()));
+    const closed = new Promise<void>((resolve) =>
+      browser.once("close", () => resolve()),
+    );
     clientSockets.at(-1)?.close(1006);
     await settle();
     await closed;

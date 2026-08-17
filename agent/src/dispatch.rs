@@ -21,8 +21,8 @@ use crate::ports::{list_ports, PortSource};
 use crate::proto::{AgentCtlRequest, AgentCtlResponse, FETCH_CANCELLED_ERROR};
 use crate::pty::{PtyManager, SpawnParams};
 use crate::vfs::VfsRoot;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Notify, Semaphore};
 
@@ -116,11 +116,7 @@ pub fn check_pty_io(
 /// machine reaches whatever the user is running there, so it takes the same
 /// `ports.forward` capability the desktop's port UI already holds. Returns
 /// the refusal reason, or `None` when allowed.
-pub fn check_fwd(
-    claims: &CapabilityClaims,
-    machine_id: &str,
-    now_seconds: i64,
-) -> Option<String> {
+pub fn check_fwd(claims: &CapabilityClaims, machine_id: &str, now_seconds: i64) -> Option<String> {
     check_capability(claims, machine_id, Capability::PortsForward, now_seconds)
 }
 
@@ -256,7 +252,12 @@ pub async fn dispatch(
             // `fetch.done` here would desync the client's ctl FIFO the moment
             // a later request was answered first. Completion and failure are
             // unsolicited events, correlated by fetchId.
-            let cancel = register_fetch(&fetch_id);
+            let Some(cancel) = register_fetch(&fetch_id) else {
+                return Some(error(
+                    "fetch_exists",
+                    format!("fetch {fetch_id} is already active"),
+                ));
+            };
             let events = events.clone();
             let event_path = path.clone();
             tokio::spawn(async move {
@@ -323,7 +324,7 @@ pub async fn dispatch(
                         });
                     }
                 }
-                unregister_fetch(&spec.fetch_id);
+                unregister_fetch(&spec.fetch_id, &cancel);
             });
             Some(AgentCtlResponse::FetchStarted {
                 fetch_id,
@@ -352,19 +353,26 @@ pub async fn dispatch(
 static FETCHES: std::sync::Mutex<Option<HashMap<String, Arc<Notify>>>> =
     std::sync::Mutex::new(None);
 
-fn register_fetch(fetch_id: &str) -> Arc<Notify> {
+fn register_fetch(fetch_id: &str) -> Option<Arc<Notify>> {
     let cancel = Arc::new(Notify::new());
     let mut fetches = FETCHES.lock().expect("fetch registry poisoned");
-    fetches
-        .get_or_insert_with(HashMap::new)
-        .insert(fetch_id.to_string(), Arc::clone(&cancel));
-    cancel
+    let map = fetches.get_or_insert_with(HashMap::new);
+    if map.contains_key(fetch_id) {
+        return None;
+    }
+    map.insert(fetch_id.to_string(), Arc::clone(&cancel));
+    Some(cancel)
 }
 
-fn unregister_fetch(fetch_id: &str) {
+fn unregister_fetch(fetch_id: &str, cancel: &Arc<Notify>) {
     let mut fetches = FETCHES.lock().expect("fetch registry poisoned");
     if let Some(map) = fetches.as_mut() {
-        map.remove(fetch_id);
+        if map
+            .get(fetch_id)
+            .is_some_and(|registered| Arc::ptr_eq(registered, cancel))
+        {
+            map.remove(fetch_id);
+        }
     }
 }
 
@@ -418,7 +426,10 @@ mod tests {
 
     /// A CtlEvents whose receiver the test can drain; `no_events()` keeps the
     /// receiver alive so an unexpected send is observable rather than lost.
-    fn events() -> (CtlEvents, tokio::sync::mpsc::UnboundedReceiver<AgentCtlResponse>) {
+    fn events() -> (
+        CtlEvents,
+        tokio::sync::mpsc::UnboundedReceiver<AgentCtlResponse>,
+    ) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         (CtlEvents(tx), rx)
     }
@@ -546,7 +557,9 @@ mod tests {
         let denied = dispatch(&mut st, &weak, "m-1", 1_100, list, &no_events())
             .await
             .unwrap();
-        assert!(matches!(denied, AgentCtlResponse::Error { ref code, .. } if code == "capability_denied"));
+        assert!(
+            matches!(denied, AgentCtlResponse::Error { ref code, .. } if code == "capability_denied")
+        );
     }
 
     #[tokio::test]
@@ -758,7 +771,11 @@ mod tests {
     /// the shipped agent refuses loopback before a fetch could park.
     #[tokio::test]
     async fn cancel_registry_signals_once_and_ignores_unknowns() {
-        let cancel = register_fetch("f-1");
+        let cancel = register_fetch("f-1").expect("first registration succeeds");
+        assert!(
+            register_fetch("f-1").is_none(),
+            "duplicate active id refused"
+        );
         // Signal before the task parks: notify_one stores a permit, so the
         // later notified() returns immediately.
         cancel_fetch("f-1");
@@ -768,9 +785,9 @@ mod tests {
 
         // Unknown id: no panic, no effect.
         cancel_fetch("never-existed");
-        unregister_fetch("f-1");
+        unregister_fetch("f-1", &cancel);
         // Double-unregister and post-unregister cancel are no-ops.
-        unregister_fetch("f-1");
+        unregister_fetch("f-1", &cancel);
         cancel_fetch("f-1");
     }
 

@@ -477,10 +477,10 @@ impl PtyManager {
             // Capture the exit code before reaping so the exit pump can still
             // report it — otherwise an attach that reaps a just-exited session
             // would swallow the pty.exited event.
-            Some(session) => match session.child.try_wait()? {
-                Some(status) => Some(status.exit_code() as i32),
-                None => None,
-            },
+            Some(session) => session
+                .child
+                .try_wait()?
+                .map(|status| status.exit_code() as i32),
             None => None,
         };
         if let Some(code) = exited {
@@ -887,11 +887,7 @@ mod tests {
         .unwrap();
         let mut reaped = false;
         for _ in 0..400 {
-            if mgr
-                .list()
-                .iter()
-                .any(|e| e.pty_id == "gone-2" && !e.live)
-            {
+            if mgr.list().iter().any(|e| e.pty_id == "gone-2" && !e.live) {
                 reaped = true;
                 break;
             }

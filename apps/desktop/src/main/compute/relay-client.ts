@@ -89,8 +89,13 @@ export class RelayAgentClient implements AgentLink {
   private readonly ptyOffsets = new Map<string, number>();
   /** Live forward streams by full channel string (`fwd/<port>/<id>`). */
   private readonly fwdSockets = new Map<string, Duplex>();
+  /** Forward destinations currently applying backpressure. The relay socket
+   * is shared, so it remains paused until every blocked stream drains. */
+  private readonly fwdBackpressure = new Set<string>();
   private readonly connectionListeners = new Set<(up: boolean) => void>();
-  private readonly ctlEventListeners = new Set<(event: AgentCtlResponse) => void>();
+  private readonly ctlEventListeners = new Set<
+    (event: AgentCtlResponse) => void
+  >();
 
   constructor(private readonly options: RelayClientOptions) {
     void this.connect();
@@ -169,7 +174,9 @@ export class RelayAgentClient implements AgentLink {
 
   forward(port: number, local: Duplex): void {
     if (this.stopped || !this.up || this.ws === null) {
-      local.destroy(new Error("your computer is unreachable right now — reconnecting"));
+      local.destroy(
+        new Error("your computer is unreachable right now — reconnecting"),
+      );
       return;
     }
     // One WebSocket carries every forward stream, so each needs its own id
@@ -180,11 +187,31 @@ export class RelayAgentClient implements AgentLink {
     this.ws.send(encodeFrame(channel, Buffer.alloc(0)));
     local.on("data", (chunk: Buffer) => {
       if (this.up && this.ws !== null && chunk.length > 0) {
-        this.ws.send(encodeFrame(channel, chunk));
+        const ws = this.ws;
+        // Serialize one local chunk at a time through ws.send's completion
+        // callback. Without pausing, a browser can enqueue unbounded framed
+        // bytes while the relay uplink is slower.
+        local.pause();
+        try {
+          ws.send(encodeFrame(channel, chunk), (err) => {
+            if (
+              err !== undefined ||
+              this.ws !== ws ||
+              this.fwdSockets.get(channel) !== local
+            ) {
+              local.destroy(err);
+              return;
+            }
+            local.resume();
+          });
+        } catch (err) {
+          local.destroy(err instanceof Error ? err : new Error(String(err)));
+        }
       }
     });
     const closeLocal = (): void => {
       // Delete BEFORE any CLOSE so an inbound close doesn't echo back.
+      this.releaseRelayForFwd(channel);
       if (this.fwdSockets.delete(channel) && this.up && this.ws !== null) {
         this.ws.send(encodeFrame(channel, Buffer.alloc(0)));
       }
@@ -241,7 +268,8 @@ export class RelayAgentClient implements AgentLink {
     const url = `${this.options.controlUrl.replace(/^http/, "ws")}/v1/relay/agent`;
     const factory =
       this.options.wsFactory ??
-      ((wsUrl: string, headers: Record<string, string>) => new WebSocket(wsUrl, { headers }));
+      ((wsUrl: string, headers: Record<string, string>) =>
+        new WebSocket(wsUrl, { headers }));
     let ws: WebSocket;
     try {
       ws = factory(url, { authorization: `Bearer ${token}` });
@@ -279,7 +307,9 @@ export class RelayAgentClient implements AgentLink {
       if (this.ws === ws) {
         this.ws = null;
         this.scheduleReconnect(
-          res.statusCode === 401 || res.statusCode === 403 || res.statusCode === 409
+          res.statusCode === 401 ||
+            res.statusCode === 403 ||
+            res.statusCode === 409
             ? REJECTED_RETRY_MS
             : this.nextBackoff(),
         );
@@ -297,7 +327,9 @@ export class RelayAgentClient implements AgentLink {
       this.failAll(new Error("relay connection lost"));
       if (this.stopped) return;
       this.scheduleReconnect(
-        code === CLOSE_HOME_OFFLINE ? HOME_OFFLINE_RETRY_MS : this.nextBackoff(),
+        code === CLOSE_HOME_OFFLINE
+          ? HOME_OFFLINE_RETRY_MS
+          : this.nextBackoff(),
       );
     });
   }
@@ -332,9 +364,12 @@ export class RelayAgentClient implements AgentLink {
           // CLOSE from the home side: delete before destroy so our close
           // handler does not echo a spurious CLOSE back.
           this.fwdSockets.delete(frame.channel);
+          this.releaseRelayForFwd(frame.channel);
           local.destroy();
         } else {
-          local.write(frame.payload);
+          if (!local.write(frame.payload)) {
+            this.holdRelayForFwd(frame.channel, local);
+          }
         }
       }
       // Unknown channels: dropped, matching TcpAgentClient's per-socket rule.
@@ -398,6 +433,19 @@ export class RelayAgentClient implements AgentLink {
     // the old stream. Destroy every live forward; the browser reconnects.
     for (const socket of this.fwdSockets.values()) socket.destroy();
     this.fwdSockets.clear();
+    this.fwdBackpressure.clear();
+  }
+
+  private holdRelayForFwd(channel: string, local: Duplex): void {
+    if (this.fwdBackpressure.has(channel)) return;
+    this.fwdBackpressure.add(channel);
+    this.ws?.pause();
+    local.once("drain", () => this.releaseRelayForFwd(channel));
+  }
+
+  private releaseRelayForFwd(channel: string): void {
+    if (!this.fwdBackpressure.delete(channel)) return;
+    if (this.fwdBackpressure.size === 0) this.ws?.resume();
   }
 
   private setUp(up: boolean): void {
