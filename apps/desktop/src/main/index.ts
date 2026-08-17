@@ -951,13 +951,9 @@ async function startServices(ctx: {
   const sim =
     agentUrl === null
       ? new SimAgent({
-          // Provider, not a value: choosing "This Mac" mid-onboarding moves
-          // the root to ~/Suma without a restart.
-          root: () =>
-            resolveSimRoot(
-              app.isPackaged,
-              device.enrollment().computeMode ?? null,
-            ),
+          // Provider, not a value: choosing "This Mac" mid-onboarding keeps
+          // the root at ~/Suma without a restart.
+          root: () => resolveSimRoot(),
           available: () =>
             device.enrollment().computeMode !== "local" ||
             localComputerRole === "home",
@@ -1039,7 +1035,7 @@ async function startServices(ctx: {
       localComputerRole === "home"
     ) {
       const dir = path.join(
-        resolveSimRoot(app.isPackaged, device.enrollment().computeMode ?? null),
+        resolveSimRoot(),
         spaceFs.folderFor(spaceId),
         SPACE_DOWNLOADS_DIR,
       );
@@ -1209,10 +1205,7 @@ async function startServices(ctx: {
       return link.kind === "remote"
         ? `${link.vfsRootLabel()}/${folder}`
         : path.join(
-            resolveSimRoot(
-              app.isPackaged,
-              device.enrollment().computeMode ?? null,
-            ),
+            resolveSimRoot(),
             folder,
           );
     },

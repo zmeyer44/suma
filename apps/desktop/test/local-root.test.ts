@@ -13,21 +13,24 @@ afterEach(() => {
 describe("resolveSimRoot", () => {
   it("SUMA_WORKSPACE_ROOT wins over everything", () => {
     process.env["SUMA_WORKSPACE_ROOT"] = "/tmp/override";
-    expect(resolveSimRoot(true, "local")).toBe("/tmp/override");
-    expect(resolveSimRoot(false, null)).toBe("/tmp/override");
+    expect(resolveSimRoot()).toBe("/tmp/override");
   });
 
-  it("local mode roots at ~/Suma, packaged or not", () => {
+  it("resolves a relative SUMA_WORKSPACE_ROOT to an absolute path", () => {
+    process.env["SUMA_WORKSPACE_ROOT"] = "some/rel";
+    expect(resolveSimRoot()).toBe(path.resolve("some/rel"));
+  });
+
+  it("roots at ~/Suma everywhere with no override — dev included, never the repo cwd", () => {
     delete process.env["SUMA_WORKSPACE_ROOT"];
     const suma = path.join(os.homedir(), "Suma");
-    expect(resolveSimRoot(true, "local")).toBe(suma);
-    expect(resolveSimRoot(false, "local")).toBe(suma);
+    expect(resolveSimRoot()).toBe(suma);
+    // Regression guard: a dev run used to sit in process.cwd().
+    expect(resolveSimRoot()).not.toBe(process.cwd());
   });
 
-  it("dev runs sit in the project; packaged unknown-mode falls to ~/Suma, never bare homedir", () => {
-    delete process.env["SUMA_WORKSPACE_ROOT"];
-    expect(resolveSimRoot(false, null)).toBe(process.cwd());
-    expect(resolveSimRoot(true, null)).toBe(path.join(os.homedir(), "Suma"));
-    expect(resolveSimRoot(true, "cloud")).toBe(path.join(os.homedir(), "Suma"));
+  it("treats an empty override as unset", () => {
+    process.env["SUMA_WORKSPACE_ROOT"] = "";
+    expect(resolveSimRoot()).toBe(path.join(os.homedir(), "Suma"));
   });
 });

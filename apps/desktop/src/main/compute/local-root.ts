@@ -7,13 +7,11 @@
  * Downloads/. Never the bare home directory: remote devices (and a
  * compromised renderer) reach whatever this root reaches.
  *
- * Precedence:
- *   1. SUMA_WORKSPACE_ROOT — the dev escape hatch, always wins.
- *   2. Local mode          — ~/Suma.
- *   3. Dev run             — the project being worked on (cwd), which is
- *                            what a developer expects the IDE to show.
- *   4. Packaged, no mode   — ~/Suma still: pre-onboarding there is nothing
- *                            to show, and homedir would overshare.
+ * The root is ~/Suma everywhere — dev and packaged, cloud and local — so the
+ * embedded terminal and the file explorer always open on the same coherent
+ * "virtual computer" folder rather than, in a dev run, the repo you launched
+ * from. A developer who wants a different root (the project being worked on,
+ * a throwaway dir) sets SUMA_WORKSPACE_ROOT, which always wins.
  */
 
 import os from "node:os";
@@ -22,10 +20,8 @@ import process from "node:process";
 
 export type ComputeMode = "cloud" | "local";
 
-export function resolveSimRoot(isPackaged: boolean, mode?: ComputeMode | null): string {
+export function resolveSimRoot(): string {
   const override = process.env["SUMA_WORKSPACE_ROOT"];
   if (override !== undefined && override.length > 0) return path.resolve(override);
-  if (mode === "local") return path.join(os.homedir(), "Suma");
-  if (!isPackaged) return process.cwd();
   return path.join(os.homedir(), "Suma");
 }
