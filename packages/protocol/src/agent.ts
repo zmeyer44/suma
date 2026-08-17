@@ -12,6 +12,7 @@
  */
 
 import { z } from "zod";
+import { manifestSchema } from "./files.js";
 
 /* ------------------------------------------------------------------ *
  * Capability tokens (I-2)
@@ -273,8 +274,35 @@ export const agentCtlResponseSchema = z.discriminatedUnion("t", [
       z.object({ port: z.number().int(), process: z.string(), loopback: z.boolean() }),
     ),
   }),
+  /**
+   * `fetch.started` is the TERMINAL response to a `fetch.public` request —
+   * the fetch itself runs as a background task on the agent. Everything
+   * after it (`fetch.progress`, `fetch.done`, `fetch.failed`) arrives as an
+   * UNSOLICITED event, matched to the request by `url`.
+   *
+   * FIFO invariant: the ctl client resolves its pending head on the expected
+   * response type OR on any `error` frame — so an unsolicited event must
+   * NEVER use `t: "error"`. Async failures are the typed `fetch.failed`.
+   */
+  z.object({ t: z.literal("fetch.started"), url: z.string(), path: z.string() }),
   z.object({ t: z.literal("fetch.progress"), url: z.string(), received: z.number(), total: z.number() }),
-  z.object({ t: z.literal("fetch.done"), url: z.string(), path: z.string(), bytes: z.number() }),
+  z.object({
+    t: z.literal("fetch.done"),
+    url: z.string(),
+    path: z.string(),
+    bytes: z.number(),
+    /** Chunk manifest of the fetched file (§8.6) — the agent computes it so
+     *  the control plane can record content addresses without re-reading. */
+    manifest: manifestSchema.optional(),
+  }),
+  z.object({ t: z.literal("fetch.failed"), url: z.string(), path: z.string(), error: z.string() }),
+  /**
+   * Unsolicited-only: something under the agent's Files root changed (a
+   * shell wrote a file, a fetch landed). `paths` lists rooted wire paths
+   * when the emitter knows them and they are few; absent means "something
+   * changed — re-list". Never a response to any request.
+   */
+  z.object({ t: z.literal("vfs.changed"), paths: z.array(z.string()).optional() }),
   z.object({ t: z.literal("error"), code: z.string(), message: z.string() }),
 ]);
 export type AgentCtlResponse = z.infer<typeof agentCtlResponseSchema>;

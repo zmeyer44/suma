@@ -50,12 +50,33 @@ export class SwitchableAgentLink implements AgentLink {
    * by SUMA_AGENT_URL or already targeting this URL.
    */
   setTarget(url: string): void {
+    // Guard before constructing: a TcpAgentClient dials in its constructor,
+    // and a pinned link must cause no connection attempt at all.
     if (this.pinned || url === this.targetUrl) return;
+    this.setLink(new TcpAgentClient(url), url);
+  }
+
+  /**
+   * Install a caller-built link (idempotent per key — reuse the key to keep
+   * the current link). `stopPrevious: false` PARKS the outgoing link instead
+   * of stopping it — required when swapping away from the shared SimAgent,
+   * which owns live home-Mac ptys and must survive the swap.
+   */
+  setLink(
+    link: AgentLink,
+    key: string,
+    options: { stopPrevious?: boolean } = {},
+  ): void {
+    if (this.pinned || key === this.targetUrl) {
+      // A link built for a refused swap must not leak its transport.
+      if (link !== this.inner) link.stop();
+      return;
+    }
     const previous = this.inner;
     for (const unsub of this.innerUnsubs.splice(0)) unsub();
-    previous.stop();
-    this.targetUrl = url;
-    this.inner = new TcpAgentClient(url);
+    if (options.stopPrevious !== false && previous !== link) previous.stop();
+    this.targetUrl = key;
+    this.inner = link;
     this.wireInner();
     // The swap itself is a connectivity event: the new transport starts
     // down and announces itself when the socket opens.

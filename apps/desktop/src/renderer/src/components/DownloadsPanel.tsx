@@ -42,10 +42,13 @@ const TRANSFER_LABELS: Readonly<Record<Transfer["state"], string>> = {
   cancelled: "Cancelled",
 };
 
-function TransferRow({ transfer }: { transfer: Transfer }) {
+function TransferRow({ transfer }: { transfer: Transfer & { cancellable?: boolean } }) {
   const cancelTransfer = useSumaStore((s) => s.cancelTransfer);
   const active =
     transfer.state === "queued" || transfer.state === "fetching" || transfer.state === "storing";
+  // Agent-side fetches (on your computer) have no cancel op yet — the row
+  // says so rather than faking a button that would do nothing.
+  const cancellable = transfer.cancellable !== false;
   const progress = downloadProgress(transfer.receivedBytes, transfer.totalBytes);
   const host = hostOf(transfer.url);
 
@@ -70,7 +73,11 @@ function TransferRow({ transfer }: { transfer: Transfer }) {
             </span>
           ) : null}
         </span>
-        {active || transfer.state === "failed" ? (
+        {active && !cancellable ? (
+          <span className="shrink-0 text-[10.5px] text-faint">
+            Fetching on your computer
+          </span>
+        ) : active || transfer.state === "failed" ? (
           <Button
             size="sm"
             variant={transfer.state === "failed" ? "secondary" : "danger"}

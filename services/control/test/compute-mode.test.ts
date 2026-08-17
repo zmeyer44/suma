@@ -107,6 +107,7 @@ describe("home-machine recording at enroll", () => {
       machine: null,
       events: [],
       homeDeviceId: first.device.id,
+      homeOnline: false,
     });
     expect(body.homeDeviceId).not.toBe(second.device.id);
     void user;

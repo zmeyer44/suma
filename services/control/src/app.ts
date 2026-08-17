@@ -626,6 +626,10 @@ export function createApp(
   // Vended inference (src/inference.ts). Default CLOSED (no upstream key);
   // deployed entrypoints pass inferenceOptionsFromEnv.
   inferenceOptions: InferenceOptions = INFERENCE_DISABLED,
+  // Home-machine relay presence (src/relay.ts) — lets /v1/machine tell an
+  // away device whether the home Mac's socket is up. Absent (tests,
+  // embedded) ⇒ reported offline, which is the honest unknown.
+  relayPresence?: { homeOnline(userId: string): boolean },
 ): Hono<AuthEnv> {
   const app = new Hono<AuthEnv>();
 
@@ -1668,6 +1672,7 @@ export function createApp(
           machine: null,
           events: [],
           homeDeviceId: user.homeDeviceId,
+          homeOnline: relayPresence?.homeOnline(userId) ?? false,
         });
       }
       return c.json({ error: "not_found" }, 404);

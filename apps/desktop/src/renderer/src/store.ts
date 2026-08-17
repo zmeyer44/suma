@@ -32,6 +32,7 @@ import {
   storeIdeLayout,
   type IdePanel,
 } from "./lib/ide";
+import { throttleTrailing } from "./lib/throttle";
 import {
   clampSavesWidth,
   getStoredSavesOpen,
@@ -692,6 +693,12 @@ function persistIdeLayout(s: SumaState): void {
   });
 }
 
+/** At most one explorer refetch per second, with the trailing signal kept —
+ *  file-change events burst, and the LAST one must still refresh the tree. */
+const throttledTreeRefresh = throttleTrailing(() => {
+  void useSumaStore.getState().refreshWorkspaceTree();
+}, 1_000);
+
 export const useSumaStore = create<SumaState>()((set, get) => {
   /** Every invoke error surfaces as a non-blocking toast; callers get undefined. */
   async function call<C extends InvokeChannel>(
@@ -1118,6 +1125,14 @@ export const useSumaStore = create<SumaState>()((set, get) => {
           ({ source, connected, activeSpaceId }) =>
             transitionIdeWorkspace(source, activeSpaceId, connected, true),
         ),
+        // Files changed on the SAME machine (shell write, fetch landing,
+        // editor save) — refetch the tree, throttled: signals burst, the
+        // refetch is idempotent, and the trailing call keeps the last one.
+        // Gated on "the IDE page has been visited" (tree already fetched);
+        // refreshWorkspaceTree's workspaceRevision guard drops stale races.
+        window.suma.on("workspace:filesChanged", () => {
+          if (get().workspaceTree !== null) throttledTreeRefresh();
+        }),
         // terminal:data streams straight to the TerminalPanel — the byte
         // stream never routes through the store.
         window.suma.on("terminal:updated", (terminals) => set({ terminals })),
@@ -2115,6 +2130,9 @@ export const useSumaStore = create<SumaState>()((set, get) => {
 
     saveIdeFile: async (path, contents) => {
       const result = await call("workspace:writeFile", { path, contents });
+      // A save that created a new file should appear in the tree without
+      // waiting on the machine's watcher cadence.
+      if (result !== undefined) throttledTreeRefresh();
       return result !== undefined;
     },
 

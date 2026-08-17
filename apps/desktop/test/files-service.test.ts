@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest";
 // Workspace-relative like files-service.ts: @suma/chunking is not in this
 // package's manifest, and the shared implementation must not be duplicated.
 import { hashChunk } from "../../../packages/chunking/src/index";
-import type { FileEntry } from "@suma/protocol";
+import type { AgentCtlRequest, AgentCtlResponse, FileEntry } from "@suma/protocol";
 import { FilesClient } from "../src/main/files/files-client";
 import { FilesService } from "../src/main/files/files-service";
 import type { FilesDevice, UploadProgress } from "../src/shared/ipc";
@@ -125,6 +125,56 @@ interface HarnessOptions {
   routes: Route[];
   devices?: () => Promise<FilesDevice[]>;
   identity?: { cloudDeviceId: string | null; name: string | null };
+  agent?: FakeAgent;
+}
+
+/** Scriptable stand-in for the agent link's ctl surface. */
+interface FakeAgent {
+  dep: {
+    ctl: (request: AgentCtlRequest) => Promise<AgentCtlResponse | null>;
+    onCtlEvent: (listener: (event: AgentCtlResponse) => void) => () => void;
+    connected: () => boolean;
+  };
+  emit: (event: AgentCtlResponse) => void;
+  ctlRequests: AgentCtlRequest[];
+  setConnected: (up: boolean) => void;
+}
+
+function fakeAgent(
+  onCtl?: (request: AgentCtlRequest) => AgentCtlResponse | null | Promise<AgentCtlResponse | null>,
+): FakeAgent {
+  const listeners = new Set<(event: AgentCtlResponse) => void>();
+  const ctlRequests: AgentCtlRequest[] = [];
+  let connected = true;
+  return {
+    dep: {
+      ctl: async (request) => {
+        ctlRequests.push(request);
+        return (await onCtl?.(request)) ?? null;
+      },
+      onCtlEvent: (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      connected: () => connected,
+    },
+    emit: (event) => {
+      for (const listener of listeners) listener(event);
+    },
+    ctlRequests,
+    setConnected: (up) => {
+      connected = up;
+    },
+  };
+}
+
+/** An agent that accepts every fetch — the happy default. */
+function acceptingAgent(): FakeAgent {
+  return fakeAgent((request) =>
+    request.t === "fetch.public"
+      ? { t: "fetch.started", url: request.url, path: request.destPath }
+      : null,
+  );
 }
 
 function harness(options: HarnessOptions): Harness {
@@ -150,6 +200,7 @@ function harness(options: HarnessOptions): Harness {
       token: () => Promise.resolve("tok_dev"),
       fetchImpl,
     }),
+    agent: (options.agent ?? acceptingAgent()).dep,
     emitTransfers: () => undefined,
     emitChanged: (payload) => changed.push(payload),
     emitUploadProgress: (item) => progress.push(item),
@@ -283,6 +334,80 @@ describe("context (§8.6 transfers list)", () => {
 /* ------------------------------------------------------------------ *
  * upload progress
  * ------------------------------------------------------------------ */
+
+describe("agent-driven cloud fetch (fetch.public)", () => {
+  const args = {
+    url: "https://cdn.example.com/big.bin",
+    filename: "big.bin",
+    destPath: "/Personal/Downloads/big.bin",
+    totalBytes: 100_000_000,
+  };
+
+  it("runs queued → fetching → progress → completed off agent events", async () => {
+    const agent = acceptingAgent();
+    const { service, changed } = harness({ routes: [], agent });
+    await expect(service.startCloudFetch(args)).resolves.toBe(true);
+    expect(agent.ctlRequests).toEqual([
+      { t: "fetch.public", url: args.url, destPath: args.destPath },
+    ]);
+    let row = service.snapshot().transfers.find((t) => t.url === args.url);
+    expect(row).toMatchObject({ state: "fetching", cancellable: false });
+
+    agent.emit({ t: "fetch.progress", url: args.url, received: 5_000, total: 100_000_000 });
+    agent.emit({
+      t: "fetch.done",
+      url: args.url,
+      path: args.destPath,
+      bytes: 100_000_000,
+    });
+    row = service.snapshot().transfers.find((t) => t.url === args.url);
+    expect(row).toMatchObject({
+      state: "completed",
+      receivedBytes: 100_000_000,
+      cancellable: true,
+    });
+    // Completion nudges the Files surface at the destination directory.
+    expect(changed.at(-1)).toEqual({ path: "/Personal/Downloads" });
+  });
+
+  it("an agent error settles the row failed and keeps the local download", async () => {
+    const agent = fakeAgent(() => ({
+      t: "error",
+      code: "vfs_path_refused",
+      message: "path escapes the Files root",
+    }));
+    const { service } = harness({ routes: [], agent });
+    await expect(service.startCloudFetch(args)).resolves.toBe(false);
+    const row = service.snapshot().transfers.find((t) => t.url === args.url);
+    expect(row).toMatchObject({ state: "failed" });
+    expect(row?.error).toContain("path escapes");
+  });
+
+  it("fetch.failed events settle the row with the agent's reason", async () => {
+    const agent = acceptingAgent();
+    const { service } = harness({ routes: [], agent });
+    await service.startCloudFetch(args);
+    agent.emit({
+      t: "fetch.failed",
+      url: args.url,
+      path: args.destPath,
+      error: "fetch truncated: got 5 of 10 bytes",
+    });
+    const row = service.snapshot().transfers.find((t) => t.url === args.url);
+    expect(row).toMatchObject({ state: "failed", error: "fetch truncated: got 5 of 10 bytes" });
+    // A settled agent row can be dismissed locally.
+    if (row !== undefined) await service.cancelTransfer(row.id);
+    expect(service.snapshot().transfers.some((t) => t.url === args.url)).toBe(false);
+  });
+
+  it("cloudAvailable mirrors the agent link, not the control plane", () => {
+    const agent = acceptingAgent();
+    const { service } = harness({ routes: [], agent });
+    expect(service.cloudAvailable()).toBe(true);
+    agent.setConnected(false);
+    expect(service.cloudAvailable()).toBe(false);
+  });
+});
 
 describe("upload progress", () => {
   const data = new Uint8Array([1, 2, 3, 4]);

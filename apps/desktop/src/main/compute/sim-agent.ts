@@ -23,10 +23,11 @@ import {
   spawn,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { clearTimeout, setTimeout } from "node:timers";
 import type { Duplex } from "node:stream";
 import type {
   AgentCtlRequest,
@@ -39,6 +40,10 @@ import type { IPty } from "node-pty";
 import type { AgentLink, PtyChannel } from "./agent-client";
 import { LocalVfs } from "./local-vfs";
 import { parseLsofListeners } from "./ports-state";
+import { simFetchPublic } from "./sim-fetch";
+
+/** Trailing debounce on watch events — burst writes become one signal. */
+const WATCH_DEBOUNCE_MS = 300;
 
 type NodePtyModule = typeof import("node-pty");
 
@@ -113,6 +118,11 @@ export class SimAgent implements AgentLink {
   private readonly rootProvider: () => string;
   private readonly availabilityProvider: () => boolean;
   private localVfs: LocalVfs | null = null;
+  private watcher: FSWatcher | null = null;
+  private watchedRoot: string | null = null;
+  private readonly pendingWatchPaths = new Set<string>();
+  private watchSawUnnamed = false;
+  private watchTimer: NodeJS.Timeout | null = null;
 
   constructor(options: SimAgentOptions = {}) {
     this.rootProvider = options.root ?? defaultSimRoot;
@@ -140,7 +150,68 @@ export class SimAgent implements AgentLink {
     } catch {
       // Surfaces as an honest vfs/spawn error below instead of a crash here.
     }
+    this.ensureWatcher(root);
     return root;
+  }
+
+  /**
+   * Watch the current root for changes and emit debounced `vfs.changed`
+   * events — the local twin of the agent's watch.rs, but event-driven:
+   * fs.watch(recursive) works on macOS and names the paths. Re-armed when
+   * the root provider moves (mode change), silently off when fs.watch
+   * itself fails (rare; the explorer still has manual/save refresh).
+   */
+  private ensureWatcher(root: string): void {
+    if (this.stopped || this.watchedRoot === root) return;
+    this.watcher?.close();
+    this.watcher = null;
+    this.watchedRoot = root;
+    try {
+      const watcher = fsWatch(root, { recursive: true }, (_event, filename) => {
+        if (typeof filename === "string" && filename.length > 0) {
+          this.pendingWatchPaths.add(`/${filename}`);
+        } else {
+          this.watchSawUnnamed = true;
+        }
+        this.armWatchTimer();
+      });
+      watcher.on("error", () => {
+        watcher.close();
+        if (this.watcher === watcher) {
+          this.watcher = null;
+          this.watchedRoot = null; // retried on the next currentRoot()
+        }
+      });
+      this.watcher = watcher;
+    } catch {
+      this.watcher = null; // watch unavailable — refresh paths still work
+    }
+  }
+
+  private armWatchTimer(): void {
+    if (this.watchTimer !== null) clearTimeout(this.watchTimer);
+    this.watchTimer = setTimeout(() => {
+      this.watchTimer = null;
+      const paths = [...this.pendingWatchPaths];
+      const unnamed = this.watchSawUnnamed;
+      this.pendingWatchPaths.clear();
+      this.watchSawUnnamed = false;
+      if (paths.length === 0 && !unnamed) return;
+      // >20 distinct paths (or any unnamed event): say only "something
+      // changed" — the client re-lists either way, and the smaller frame
+      // wins (same rule as the Rust watcher, which never names paths).
+      this.emitCtlEvent(
+        paths.length > 0 && paths.length <= 20 && !unnamed
+          ? { t: "vfs.changed", paths }
+          : { t: "vfs.changed" },
+      );
+    }, WATCH_DEBOUNCE_MS);
+    // A pending flush must not keep the process alive.
+    this.watchTimer.unref?.();
+  }
+
+  private emitCtlEvent(event: AgentCtlResponse): void {
+    for (const listener of this.ctlEventListeners) listener(event);
   }
 
   private vfsFor(root: string): LocalVfs {
@@ -249,12 +320,28 @@ export class SimAgent implements AgentLink {
         };
       case "ports.list":
         return { t: "ports", ports: await this.listPorts() };
-      case "fetch.public":
-        return {
-          t: "error",
-          code: "unsupported",
-          message: "cloud fetch is not part of the local simulator",
-        };
+      case "fetch.public": {
+        // Same contract as the Rust agent post-pump: `fetch.started` is the
+        // terminal response, the download runs detached, and everything
+        // after arrives as unsolicited ctl events correlated by url.
+        const resolved = await this.vfsFor(this.currentRoot()).resolveNewFile(
+          request.destPath,
+        );
+        if ("refused" in resolved) {
+          return {
+            t: "error",
+            code: "vfs_path_refused",
+            message: resolved.refused,
+          };
+        }
+        void simFetchPublic({
+          url: request.url,
+          destTarget: resolved.target,
+          destWirePath: resolved.path,
+          emit: (event) => this.emitCtlEvent(event),
+        });
+        return { t: "fetch.started", url: request.url, path: resolved.path };
+      }
     }
   }
 
@@ -296,6 +383,12 @@ export class SimAgent implements AgentLink {
 
   stop(): void {
     this.stopped = true;
+    this.watcher?.close();
+    this.watcher = null;
+    if (this.watchTimer !== null) {
+      clearTimeout(this.watchTimer);
+      this.watchTimer = null;
+    }
     for (const pty of this.ptys.values()) {
       try {
         pty.tty?.kill("SIGTERM");

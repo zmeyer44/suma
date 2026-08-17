@@ -222,6 +222,17 @@ pub enum AgentCtlResponse {
     JobAck { pty_id: String, enabled: bool },
     #[serde(rename = "ports")]
     Ports { ports: Vec<ListeningPort> },
+    /// Terminal response to `fetch.public`: the fetch now runs as a
+    /// background task, and everything after this frame — `fetch.progress`,
+    /// `fetch.done`, `fetch.failed` — arrives as an UNSOLICITED event
+    /// correlated by `url`.
+    ///
+    /// FIFO invariant: the desktop ctl client resolves its pending head on
+    /// the expected response type OR on any `error` frame, so unsolicited
+    /// events must NEVER use the `error` variant. Async fetch failures are
+    /// the typed `fetch.failed`.
+    #[serde(rename = "fetch.started")]
+    FetchStarted { url: String, path: String },
     #[serde(rename = "fetch.progress")]
     FetchProgress {
         url: String,
@@ -243,6 +254,23 @@ pub enum AgentCtlResponse {
         /// changes for a reader that predates it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         manifest: Option<crate::chunker::Manifest>,
+    },
+    /// Unsolicited: a background fetch failed. Carries the same identifiers
+    /// as `fetch.done` so a client can settle the matching row.
+    #[serde(rename = "fetch.failed")]
+    FetchFailed {
+        url: String,
+        path: String,
+        error: String,
+    },
+    /// Unsolicited-only: something under the Files root changed (a shell
+    /// wrote a file, a fetch landed). `paths` lists rooted wire paths when
+    /// the emitter knows them and they are few; absent means "something
+    /// changed — re-list". Never a response to any request.
+    #[serde(rename = "vfs.changed")]
+    VfsChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        paths: Option<Vec<String>>,
     },
     #[serde(rename = "error")]
     Error { code: String, message: String },
@@ -391,6 +419,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(serde_json::to_value(progress).unwrap(), expected);
+    }
+
+    /// The async-fetch and watch frames pin to the exact strings
+    /// `agentCtlResponseSchema` parses.
+    #[test]
+    fn fetch_lifecycle_and_watch_frames_pin_the_ts_wire() {
+        let started = AgentCtlResponse::FetchStarted {
+            url: "https://example.com/f".into(),
+            path: "/Downloads/f".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&started).unwrap(),
+            r#"{"t":"fetch.started","url":"https://example.com/f","path":"/Downloads/f"}"#
+        );
+
+        let failed = AgentCtlResponse::FetchFailed {
+            url: "https://example.com/f".into(),
+            path: "/Downloads/f".into(),
+            error: "fetch truncated: got 5 of 10 bytes".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&failed).unwrap(),
+            r#"{"t":"fetch.failed","url":"https://example.com/f","path":"/Downloads/f","error":"fetch truncated: got 5 of 10 bytes"}"#
+        );
+
+        let quiet = AgentCtlResponse::VfsChanged { paths: None };
+        assert_eq!(
+            serde_json::to_string(&quiet).unwrap(),
+            r#"{"t":"vfs.changed"}"#
+        );
+        let listed = AgentCtlResponse::VfsChanged {
+            paths: Some(vec!["/notes/a.txt".into(), "/empty/".into()]),
+        };
+        assert_eq!(
+            serde_json::to_string(&listed).unwrap(),
+            r#"{"t":"vfs.changed","paths":["/notes/a.txt","/empty/"]}"#
+        );
+        // And the TS-emitted forms parse back.
+        assert_eq!(
+            serde_json::from_str::<AgentCtlResponse>(r#"{"t":"vfs.changed"}"#).unwrap(),
+            quiet
+        );
     }
 
     /// `fetch.done` still serializes to the exact TS shape when there is no

@@ -426,12 +426,15 @@ export class ControlClient {
     events: ControlMachineEvent[];
     /** Local mode: the one enrolled device that owns the computer seat. */
     homeDeviceId?: string | null;
+    /** Local mode: whether the home Mac's relay socket is up right now. */
+    homeOnline?: boolean;
   }> {
     return this.request<{
       mode?: "cloud" | "local";
       machine: ControlMachine | null;
       events: ControlMachineEvent[];
       homeDeviceId?: string | null;
+      homeOnline?: boolean;
     }>("GET", "/v1/machine");
   }
 
@@ -619,6 +622,11 @@ export class ControlClient {
     const headers: Record<string, string> = {
       "content-type": "application/json",
     };
+    // Captured so the 401 branch can tell "THIS token was rejected" from a
+    // stale response racing a fresh signup/enroll: a request sent tokenless
+    // (or with a token that was since replaced) must never invalidate the
+    // token the account holds NOW.
+    const sentToken = this.token;
     if (this.token !== null) headers["authorization"] = `Bearer ${this.token}`;
     let res: Response;
     try {
@@ -634,6 +642,13 @@ export class ControlClient {
     }
     if (missingOk && res.status === 404) return null;
     if (res.status === 401) {
+      if (sentToken !== this.token) {
+        // The token changed while this request was in flight (a signup or
+        // enroll just landed) — the CURRENT token was never judged, and
+        // nuking it here was a real bug: a stale 401 racing a fresh signup
+        // logged the new account straight back out. Fail the call only.
+        throw new Error(`control: unauthorized (${method} ${path})`);
+      }
       // A rejected token is not the same as a revoked device. The scheduled
       // pre-expiry refresh cannot cover a token the server stops accepting
       // early — key rotation, a clock skew, or one that lapsed while the app

@@ -75,6 +75,30 @@ export class LocalVfs {
     return this.root;
   }
 
+  /**
+   * Resolve a path a file is about to be CREATED at, for a caller outside
+   * the vfs channel (the sim's fetch.public) — a port of
+   * `VfsRoot::resolve_new_file`: the usual confinement plus the two refusals
+   * a destination has that a path in general does not (the root is a
+   * directory; a missing parent is vfs.mkdir's job).
+   */
+  async resolveNewFile(
+    destPath: string,
+  ): Promise<{ path: string; target: string } | { refused: string }> {
+    const resolved = await this.resolve(destPath);
+    if (typeof resolved === "string") return { refused: resolved };
+    const [wire, target] = resolved;
+    if (wire === "/") {
+      return { refused: "the Files root is a directory, not a destination" };
+    }
+    if (!(await isDirectory(path.dirname(target)))) {
+      return {
+        refused: `${wire}: parent directory does not exist (use vfs.mkdir first)`,
+      };
+    }
+    return { path: wire, target };
+  }
+
   /** Answer one vfs request; failures are the `error` variant, never a throw. */
   async handle(request: VfsRequest): Promise<VfsResponse> {
     try {

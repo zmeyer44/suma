@@ -14,8 +14,27 @@ anyhow = { workspace = true }
 blake3 = "=1.5.5"
 libc = "0.2"
 portable-pty = "0.8"
+# TLS for fetch.public (§8.6): ring provider, never aws-lc-rs — the latter
+# needs cmake and a newer MSRV. Versions are pinned exactly because newer
+# releases pull edition-2024 deps the workspace's Rust 1.79 cannot parse
+# (same discipline as the blake3 pin above). rustls 0.23.22 is the last line
+# before the 0.23.23 MSRV bump to 1.71→edition drift; walk pins back, never
+# forward, on a failed `cargo check`.
+rustls = { version = "=0.23.22", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "=0.26.1", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "=0.26.8"
+# Transitive pin: zeroize 1.9 is edition 2024; 1.8.x is the last 1.79-parseable line.
+zeroize = "=1.8.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# Loopback TLS test certificates only; never ships.
+rcgen = "=0.13.2"
+# test-util: paused-clock tests for the watch interval; never ships.
+tokio = { workspace = true, features = ["test-util"] }
+# Transitive pin for rcgen: time 0.3.37+ pulls time-core 0.1.9 (edition 2024).
+time = "=0.3.36"

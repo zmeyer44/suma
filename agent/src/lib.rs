@@ -22,3 +22,4 @@ pub mod ports;
 pub mod proto;
 pub mod pty;
 pub mod vfs;
+pub mod watch;

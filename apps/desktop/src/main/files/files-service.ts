@@ -19,8 +19,15 @@
 import { randomUUID } from "node:crypto";
 import { stat as statFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { clearInterval, setInterval } from "node:timers";
-import { CLOUD_ROOT, normalizeVfsPath, type FileEntry, type Transfer } from "@suma/protocol";
+import { clearInterval, clearTimeout, setInterval, setTimeout } from "node:timers";
+import {
+  CLOUD_ROOT,
+  normalizeVfsPath,
+  type AgentCtlRequest,
+  type AgentCtlResponse,
+  type FileEntry,
+  type Transfer,
+} from "@suma/protocol";
 import {
   assembleFromChunks,
   buildManifest,
@@ -66,10 +73,48 @@ const V1_END_TO_END_ENCRYPTED = false;
 const POLL_MS = 4_000;
 const IDLE_REFRESH_TICKS = 8;
 
+/** How long to wait for `fetch.started` before treating the agent as too
+ *  old to run background fetches (it would answer fetch.done-first, later). */
+const FETCH_START_TIMEOUT_MS = 10_000;
+
+/** Progress events arrive per 64 KiB; the renderer needs far less. */
+const AGENT_PROGRESS_PUSH_MS = 500;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`no answer within ${ms} ms`)),
+      ms,
+    );
+    timer.unref?.();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      },
+    );
+  });
+}
+
 const ACTIVE_STATES: ReadonlySet<Transfer["state"]> = new Set(["queued", "fetching", "storing"]);
 
 export interface FilesDeps {
   client: FilesClient;
+  /**
+   * The machine behind the terminal/IDE — where an eligible public download
+   * actually fetches (§8.6, via `fetch.public`). The VM in cloud mode, the
+   * SimAgent/home Mac in local mode. Progress and completion arrive as
+   * unsolicited ctl events, correlated by url.
+   */
+  agent: {
+    ctl: (request: AgentCtlRequest) => Promise<AgentCtlResponse | null>;
+    onCtlEvent: (listener: (event: AgentCtlResponse) => void) => () => void;
+    connected: () => boolean;
+  };
   /** Push to the chrome renderer AND the suma://files page. */
   emitTransfers: (update: TransfersUpdate) => void;
   emitChanged: (payload: { path: string }) => void;
@@ -96,11 +141,23 @@ export class FilesService {
   /** Transfers that never reached the control plane — kept so a failed cloud
    *  fetch is visible instead of vanishing after the local download stopped. */
   private readonly localFailures = new Map<string, Transfer>();
+  /** Agent-side fetches (`fetch.public`), keyed by synthesized id. These
+   *  live only on this device — the control plane never hears about them
+   *  (honest v1 tradeoff; the FILE is still visible everywhere via vfs). */
+  private readonly agentTransfers = new Map<string, Transfer>();
+  /** url → agentTransfers id, for correlating unsolicited fetch events. */
+  private readonly agentTransferByUrl = new Map<string, string>();
+  private lastAgentProgressPushMs = 0;
   private declined: CloudFetchDeclined | null = null;
   private timer: NodeJS.Timeout | null = null;
   private tick = 0;
+  private readonly unsubAgentEvents: () => void;
 
-  constructor(private readonly deps: FilesDeps) {}
+  constructor(private readonly deps: FilesDeps) {
+    this.unsubAgentEvents = deps.agent.onCtlEvent((event) => {
+      this.onAgentEvent(event);
+    });
+  }
 
   /* -------------------------------- browse ------------------------------- */
 
@@ -328,9 +385,16 @@ export class FilesService {
   /* ------------------------------ transfers ------------------------------ */
 
   snapshot(): TransfersUpdate {
-    const merged = [...this.localFailures.values(), ...this.transfers].sort(
-      (a, b) => b.startedAtMs - a.startedAtMs,
-    );
+    const agentRows = [...this.agentTransfers.values()].map((transfer) => ({
+      ...transfer,
+      // No agent-side cancel op exists yet — active rows say so honestly.
+      cancellable: !ACTIVE_STATES.has(transfer.state),
+    }));
+    const merged = [
+      ...agentRows,
+      ...this.localFailures.values(),
+      ...this.transfers,
+    ].sort((a, b) => b.startedAtMs - a.startedAtMs);
     return { transfers: merged, declined: this.declined };
   }
 
@@ -354,22 +418,34 @@ export class FilesService {
       this.push();
       return;
     }
+    const agentRow = this.agentTransfers.get(id);
+    if (agentRow !== undefined) {
+      // Settled rows dismiss; an active fetch has no cancel op (the UI
+      // hides the button, but be safe against a stale renderer).
+      if (!ACTIVE_STATES.has(agentRow.state)) {
+        this.agentTransfers.delete(id);
+        this.agentTransferByUrl.delete(agentRow.url);
+        this.push();
+      }
+      return;
+    }
     await this.deps.client.cancelTransfer(id);
     await this.refreshTransfers();
   }
 
-  /** True when a cloud fetch could be created right now (§8.6 routing input). */
+  /** True when a cloud fetch could be created right now (§8.6 routing input)
+   *  — the AGENT is what fetches now, so its link is the availability. */
   cloudAvailable(): boolean {
-    return this.deps.client.configured();
+    return this.deps.agent.connected();
   }
 
   /**
-   * Hand an ELIGIBLE download to the cloud fetcher.
+   * Hand an ELIGIBLE download to the account's computer via `fetch.public`.
    *
-   * Returns true only when the control plane has accepted the transfer — the
-   * caller keeps its local download running until then, and abandons it only
-   * on a true. A failure is still visible either way: it becomes a failed
-   * transfer rather than a silent no-op.
+   * Returns true only when the agent answered `fetch.started` — the caller
+   * keeps its local download running until then, and abandons it only on a
+   * true. A failure is still visible either way: it becomes a failed
+   * transfer row rather than a silent no-op.
    */
   async startCloudFetch(args: {
     url: string;
@@ -378,30 +454,92 @@ export class FilesService {
     totalBytes: number;
   }): Promise<boolean> {
     const now = (this.deps.now ?? Date.now)();
-    try {
-      const transfer = await this.deps.client.createTransfer(args.url, args.destPath);
-      this.transfers = [transfer, ...this.transfers.filter((t) => t.id !== transfer.id)];
-      this.push();
-      await this.refreshTransfers();
-      return true;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const id = `local-${randomUUID()}`;
-      this.localFailures.set(id, {
-        id,
-        url: args.url,
-        destPath: args.destPath,
+    const id = `agent-${randomUUID()}`;
+    const row: Transfer = {
+      id,
+      url: args.url,
+      destPath: args.destPath,
+      state: "queued",
+      receivedBytes: 0,
+      totalBytes: Math.max(0, args.totalBytes),
+      originDeviceId: this.deps.deviceId,
+      error: null,
+      startedAtMs: now,
+      updatedAtMs: now,
+    };
+    this.agentTransfers.set(id, row);
+    this.agentTransferByUrl.set(args.url, id);
+    this.push();
+
+    const fail = (message: string): false => {
+      this.settleAgentRow(id, {
         state: "failed",
-        receivedBytes: 0,
-        totalBytes: Math.max(0, args.totalBytes),
-        originDeviceId: this.deps.deviceId,
-        error: `Couldn't start the cloud download — ${message}`.slice(0, 500),
-        startedAtMs: now,
-        updatedAtMs: now,
+        error: `Couldn't start the fetch — ${message}`.slice(0, 500),
       });
-      this.push();
       return false;
+    };
+    let response: AgentCtlResponse | null;
+    try {
+      // The timeout is the version-skew guard: an old agent runs the fetch
+      // INSIDE dispatch and answers fetch.done first, which would leave this
+      // promise waiting forever. Ten seconds without fetch.started ⇒ treat
+      // as unsupported and keep the local download.
+      response = await withTimeout(
+        this.deps.agent.ctl({ t: "fetch.public", url: args.url, destPath: args.destPath }),
+        FETCH_START_TIMEOUT_MS,
+      );
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err));
     }
+    if (response === null) return fail("the agent gave no answer");
+    if (response.t === "error") return fail(response.message);
+    if (response.t !== "fetch.started") return fail(`unexpected answer ${response.t}`);
+    this.updateAgentRow(id, { state: "fetching" });
+    return true;
+  }
+
+  /** Fold one unsolicited agent event into the matching transfer row. */
+  private onAgentEvent(event: AgentCtlResponse): void {
+    if (
+      event.t !== "fetch.progress" &&
+      event.t !== "fetch.done" &&
+      event.t !== "fetch.failed"
+    ) {
+      return;
+    }
+    const id = this.agentTransferByUrl.get(event.url);
+    if (id === undefined) return; // some other device's fetch, or long-settled
+    if (event.t === "fetch.progress") {
+      const row = this.agentTransfers.get(id);
+      if (row === undefined || !ACTIVE_STATES.has(row.state)) return;
+      row.receivedBytes = event.received;
+      row.totalBytes = event.total;
+      row.updatedAtMs = (this.deps.now ?? Date.now)();
+      const nowMs = (this.deps.now ?? Date.now)();
+      if (nowMs - this.lastAgentProgressPushMs >= AGENT_PROGRESS_PUSH_MS) {
+        this.lastAgentProgressPushMs = nowMs;
+        this.push();
+      }
+      return;
+    }
+    if (event.t === "fetch.done") {
+      this.settleAgentRow(id, { state: "completed", receivedBytes: event.bytes });
+      // The file just appeared on the shared FS — nudge the Files page too.
+      this.deps.emitChanged({ path: dirname(event.path) });
+      return;
+    }
+    this.settleAgentRow(id, { state: "failed", error: event.error.slice(0, 500) });
+  }
+
+  private updateAgentRow(id: string, patch: Partial<Transfer>): void {
+    const row = this.agentTransfers.get(id);
+    if (row === undefined) return;
+    Object.assign(row, patch, { updatedAtMs: (this.deps.now ?? Date.now)() });
+    this.push();
+  }
+
+  private settleAgentRow(id: string, patch: Partial<Transfer>): void {
+    this.updateAgentRow(id, patch);
   }
 
   /** Record why a download stayed on this Mac (§8.6) and surface it. */
@@ -426,6 +564,7 @@ export class FilesService {
   }
 
   stop(): void {
+    this.unsubAgentEvents();
     if (this.timer === null) return;
     clearInterval(this.timer);
     this.timer = null;

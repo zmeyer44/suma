@@ -108,13 +108,16 @@ export function localHomeMachineStatus(): MachineStatus {
 }
 
 /** Local compute belongs to another enrolled Mac; no relay exists yet. */
-export function localAwayMachineStatus(): MachineStatus {
+/** Local compute mode, seen from a device that is NOT the home Mac. The
+ *  relay makes the home Mac reachable — `homeOnline` says whether it is. */
+export function localAwayMachineStatus(homeOnline: boolean): MachineStatus {
   return {
     machineId: null,
-    state: "suspended",
+    state: homeOnline ? "running" : "suspended",
     spec: { cpus: 0, memoryMb: 0 },
-    reason:
-      "Your computer is another Mac — access from this device is not available yet.",
+    reason: homeOnline
+      ? "Connected to your computer — another Mac. Your files and shells live there."
+      : "Your computer is offline. Suma will reconnect when it's back online.",
     hourlyRate: "",
     accruedUsd: 0,
     reconstructed: false,

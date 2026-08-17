@@ -509,7 +509,13 @@ export interface CloudFetchDeclined {
  * they travel together.
  */
 export interface TransfersUpdate {
-  transfers: Transfer[];
+  transfers: Array<
+    Transfer & {
+      /** False while an agent-side fetch is running — the agent has no
+       *  cancel op yet, and the UI says so instead of faking a button. */
+      cancellable?: boolean;
+    }
+  >;
   declined: CloudFetchDeclined | null;
 }
 
@@ -1165,6 +1171,10 @@ export interface SumaEventMap {
     connected: boolean;
     activeSpaceId: string | null;
   };
+  /** FILES on the current machine changed (a shell wrote, a fetch landed, an
+   *  editor saved) — same machine, fresher tree. Debounced in main; the
+   *  renderer throttles its refetch on top. */
+  "workspace:filesChanged": { paths?: string[] };
   /** Gateway health or per-space egress config changed (§8.4 fail-closed banner). */
   "egress:changed": EgressStatus;
   /** A site challenged us; offer a per-site bypass rather than acting silently. */
@@ -1455,6 +1465,7 @@ export const EVENT_CHANNELS: ReadonlyArray<EventChannel> = [
   "terminal:updated",
   "ports:updated",
   "workspace:changed",
+  "workspace:filesChanged",
   "egress:changed",
   "egress:bypassSuggested",
   "egress:checkoutBypassed",

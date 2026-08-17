@@ -257,10 +257,17 @@ export function TerminalPage() {
   useEffect(() => {
     void refreshMachine();
     void refreshPorts();
-    // The explorer's listing is fetched once per app session; the refresh
-    // button re-walks on demand.
+    // The explorer's listing is fetched once per app session; watch events
+    // (workspace:filesChanged) and the refresh button keep it live after.
     if (useSumaStore.getState().workspaceTree === null)
       void refreshWorkspaceTree();
+    // Coming back to the window is the classic stale moment — something
+    // else (another app, another device) may have touched the files.
+    const onFocus = (): void => {
+      if (useSumaStore.getState().workspaceTree !== null)
+        void refreshWorkspaceTree();
+    };
+    window.addEventListener("focus", onFocus);
     // Claimed synchronously, before any await: the strip's "New terminal"
     // button opens this page by creating the shell first, and the claim must
     // not race the effect below (which is why the read is atomic).
@@ -288,6 +295,7 @@ export function TerminalPage() {
         list[0];
       if (target !== undefined) selectPty(target.ptyId);
     })();
+    return () => window.removeEventListener("focus", onFocus);
     // selectPty/refresh* are stable store actions; run once per visit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

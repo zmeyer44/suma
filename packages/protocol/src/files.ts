@@ -430,6 +430,10 @@ export const VFS_TREE_SKIPPED_FILES: ReadonlyArray<string> = [".DS_Store"];
  */
 export const CLOUD_ROOT = "~/cloud";
 
+/** Display form of the LOCAL-mode shared root — the home Mac's dedicated
+ *  folder, the local counterpart of [`CLOUD_ROOT`]. */
+export const LOCAL_HOME_ROOT = "~/Suma";
+
 /** Reject traversal and absolute escapes before any path reaches the agent. */
 export function normalizeVfsPath(path: string): string | null {
   if (path.length === 0 || path.length > 4096) return null;

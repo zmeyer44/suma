@@ -158,14 +158,17 @@ const CTL_CHANNEL = "ctl";
 /** The vfs channel's wire name. */
 const VFS_CHANNEL = "vfs";
 
-/** Response frame type each ctl request awaits; absent ⇒ fire-and-forget. */
-const CTL_RESPONSE_TYPE: Partial<Record<AgentCtlRequest["t"], AgentCtlResponse["t"]>> = {
+/** Response frame type each ctl request awaits; absent ⇒ fire-and-forget.
+ *  Exported: RelayAgentClient runs the same FIFO over a different wire.
+ *  `fetch.public` terminates on `fetch.started` — the fetch itself runs as a
+ *  background task and reports through unsolicited events. */
+export const CTL_RESPONSE_TYPE: Partial<Record<AgentCtlRequest["t"], AgentCtlResponse["t"]>> = {
   "pty.spawn": "pty.spawned",
   "pty.attach": "pty.attached",
   "pty.list": "pty.listing",
   "job.set": "job.ack",
   "ports.list": "ports",
-  "fetch.public": "fetch.done",
+  "fetch.public": "fetch.started",
 };
 
 interface PendingCtl {

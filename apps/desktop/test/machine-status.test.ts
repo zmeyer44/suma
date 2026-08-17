@@ -198,9 +198,41 @@ describe("MachineService in local compute mode", () => {
       onLocalComputerRole: (role) => roles.push(role),
     });
 
-    expect(await service.refresh()).toEqual(localAwayMachineStatus());
-    expect(service.status().reason).toContain("another Mac");
+    // No homeOnline in the stub's answer ⇒ offline copy.
+    expect(await service.refresh()).toEqual(localAwayMachineStatus(false));
+    expect(service.status().reason).toContain("offline");
     expect(roles).toEqual(["away"]);
+  });
+
+  it("shows the connected-away status when the relay reports home online", async () => {
+    const calls: string[] = [];
+    const client = {
+      getMachine: async () => ({
+        mode: "local" as const,
+        machine: null,
+        events: [],
+        homeDeviceId: "home-device",
+        homeOnline: true,
+      }),
+      getMachineLifecycle: async () => null,
+      transitionMachine: async () => {
+        calls.push("transitionMachine");
+        throw new Error("never");
+      },
+    } as unknown as ControlClient;
+    const online: boolean[] = [];
+    const service = new MachineService({
+      control: () => client,
+      emit: () => undefined,
+      controlDeviceId: () => "linked-device",
+      onHomeOnline: (up) => online.push(up),
+    });
+    const status = await service.refresh();
+    expect(status).toEqual(localAwayMachineStatus(true));
+    expect(status.state).toBe("running");
+    expect(status.reason).toContain("Connected to your computer");
+    expect(online).toEqual([true]);
+    expect(calls).toEqual([]);
   });
 
   it("uses confirmed local ownership while the control plane is offline", async () => {

@@ -11,6 +11,7 @@ import {
   hourlyRateUsd,
   parseChannel,
   parseCtlRequest,
+  parseCtlResponse,
   type CapabilityClaims,
   type LifecycleInputs,
   type ProcessTreeInfo,
@@ -65,6 +66,44 @@ describe("capability tokens (I-2: VM compromise is worthless beyond the VM)", ()
     for (const [op, cap] of Object.entries(CTL_CAPABILITY)) {
       expect(CAPABILITIES, `${op} maps to an unknown capability`).toContain(cap);
     }
+  });
+});
+
+describe("ctl fetch/watch wire shapes", () => {
+  it("round-trips fetch.started, fetch.failed, and vfs.changed", () => {
+    const samples = [
+      { t: "fetch.started", url: "https://cdn.example.com/a.bin", path: "/Downloads/a.bin" },
+      {
+        t: "fetch.failed",
+        url: "https://cdn.example.com/a.bin",
+        path: "/Downloads/a.bin",
+        error: "fetch truncated: got 5 of 10 bytes",
+      },
+      { t: "vfs.changed" },
+      { t: "vfs.changed", paths: ["/notes/a.txt", "/empty/"] },
+    ];
+    for (const sample of samples) {
+      expect(parseCtlResponse(JSON.stringify(sample))).toEqual(sample);
+    }
+  });
+
+  it("fetch.done carries the agent's manifest instead of stripping it", () => {
+    const done = {
+      t: "fetch.done",
+      url: "https://cdn.example.com/a.bin",
+      path: "/Downloads/a.bin",
+      bytes: 5,
+      manifest: {
+        fileHash: "b".repeat(64),
+        totalBytes: 5,
+        chunks: [{ hash: "a".repeat(64), offset: 0, length: 5 }],
+      },
+    };
+    const parsed = parseCtlResponse(JSON.stringify(done));
+    expect(parsed).toEqual(done);
+    // Old agents that send no manifest still parse.
+    const { manifest: _dropped, ...bare } = done;
+    expect(parseCtlResponse(JSON.stringify(bare))).toEqual(bare);
   });
 });
 

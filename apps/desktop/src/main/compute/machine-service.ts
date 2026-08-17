@@ -32,6 +32,9 @@ export interface MachineDeps {
   knownLocalComputerRole?: () => "home" | "away" | null;
   /** Gates the local simulator when the computer seat belongs elsewhere. */
   onLocalComputerRole?: (role: "home" | "away" | "not-local") => void;
+  /** Local mode: whether the home Mac's relay socket is up (true for the
+   *  home device itself). Drives the away device's connect/nudge. */
+  onHomeOnline?: (online: boolean) => void;
   now?: () => number;
 }
 
@@ -53,10 +56,13 @@ export class MachineService {
       if (knownRole !== null) {
         this.reachable = true;
         this.deps.onLocalComputerRole?.(knownRole);
+        // Control unreachable: an away device cannot know home presence —
+        // offline is the honest answer until the poll succeeds.
+        this.deps.onHomeOnline?.(knownRole === "home");
         this.setStatus(
           knownRole === "home"
             ? localHomeMachineStatus()
-            : localAwayMachineStatus(),
+            : localAwayMachineStatus(false),
         );
         return this.status();
       }
@@ -65,7 +71,8 @@ export class MachineService {
       return this.status();
     }
     try {
-      const { mode, machine, events, homeDeviceId } = await client.getMachine();
+      const { mode, machine, events, homeDeviceId, homeOnline } =
+        await client.getMachine();
       if (mode === "local") {
         // Before the first enrollment there is no owner yet; this install is
         // the provisional home. Once claimed, only that exact control device
@@ -77,8 +84,12 @@ export class MachineService {
           (currentDeviceId !== null && homeDeviceId === currentDeviceId);
         this.reachable = true;
         this.deps.onLocalComputerRole?.(isHome ? "home" : "away");
+        // The home Mac IS the computer — always online to itself. An away
+        // device reads the relay's presence answer.
+        const online = isHome || homeOnline === true;
+        this.deps.onHomeOnline?.(online);
         this.setStatus(
-          isHome ? localHomeMachineStatus() : localAwayMachineStatus(),
+          isHome ? localHomeMachineStatus() : localAwayMachineStatus(online),
         );
         return this.status();
       }
@@ -112,10 +123,11 @@ export class MachineService {
       if (knownRole !== null) {
         this.reachable = true;
         this.deps.onLocalComputerRole?.(knownRole);
+        this.deps.onHomeOnline?.(knownRole === "home");
         this.setStatus(
           knownRole === "home"
             ? localHomeMachineStatus()
-            : localAwayMachineStatus(),
+            : localAwayMachineStatus(false),
         );
         return this.status();
       }

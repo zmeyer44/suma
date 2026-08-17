@@ -105,6 +105,10 @@ export interface IpcDeps {
   ports: PortsService;
   /** The IDE's filesystem on suma://terminal — local paths, root-guarded. */
   workspaceFs: WorkspaceFsService;
+  /** A workspace IPC mutation succeeded — the explorer should refresh. The
+   *  sim's fs.watch usually fires too; this covers remote links (the VM's
+   *  2s digest scan) with an instant signal for the user's OWN edit. */
+  notifyWorkspaceMutated?: () => void;
   egress: EgressService;
   audit: AuditService;
   /* ---- Favorite sites (shared/favorites.ts) ---- */
@@ -1126,35 +1130,46 @@ export function registerIpc(deps: IpcDeps): void {
     );
   });
 
-  handle("workspace:writeFile", (args) => {
+  handle("workspace:writeFile", async (args) => {
     const a = requireRecord(args, "workspace:writeFile");
     const contents = a["contents"];
     // Not requireString: an emptied-out file is a legitimate save.
     if (typeof contents !== "string")
       throw new Error("contents must be a string");
-    return deps.workspaceFs.write(requireString(a["path"], "path"), contents);
+    const result = await deps.workspaceFs.write(
+      requireString(a["path"], "path"),
+      contents,
+    );
+    deps.notifyWorkspaceMutated?.();
+    return result;
   });
 
-  handle("workspace:mkdir", (args) => {
-    return deps.workspaceFs.mkdir(
+  handle("workspace:mkdir", async (args) => {
+    const result = await deps.workspaceFs.mkdir(
       requireString(requireRecord(args, "workspace:mkdir")["path"], "path"),
     );
+    deps.notifyWorkspaceMutated?.();
+    return result;
   });
 
-  handle("workspace:delete", (args) => {
+  handle("workspace:delete", async (args) => {
     const a = requireRecord(args, "workspace:delete");
-    return deps.workspaceFs.remove(
+    const result = await deps.workspaceFs.remove(
       requireString(a["path"], "path"),
       a["recursive"] === true,
     );
+    deps.notifyWorkspaceMutated?.();
+    return result;
   });
 
-  handle("workspace:rename", (args) => {
+  handle("workspace:rename", async (args) => {
     const a = requireRecord(args, "workspace:rename");
-    return deps.workspaceFs.rename(
+    const result = await deps.workspaceFs.rename(
       requireString(a["from"], "from"),
       requireString(a["to"], "to"),
     );
+    deps.notifyWorkspaceMutated?.();
+    return result;
   });
 
   /* ----------------------- identity egress (§8.4) ------------------------ */
