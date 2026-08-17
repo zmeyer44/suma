@@ -562,6 +562,10 @@ interface SumaState {
   readIdeFile: (path: string) => Promise<WorkspaceFile | undefined>;
   /** Write a buffer back to disk; true on success. */
   saveIdeFile: (path: string, contents: string) => Promise<boolean>;
+  /** Create an empty file and open it in the editor; true on success. */
+  createIdeFile: (path: string) => Promise<boolean>;
+  /** Create a folder (parents included); true on success. */
+  createIdeFolder: (path: string) => Promise<boolean>;
   /** Open `path` in the editor (adding a tab) and reveal the editor panel. */
   openIdeFile: (path: string) => void;
   /** Close the tab; its unsaved buffer, if any, is discarded. */
@@ -2132,6 +2136,31 @@ export const useSumaStore = create<SumaState>()((set, get) => {
       const result = await call("workspace:writeFile", { path, contents });
       // A save that created a new file should appear in the tree without
       // waiting on the machine's watcher cadence.
+      if (result !== undefined) throttledTreeRefresh();
+      return result !== undefined;
+    },
+
+    createIdeFile: async (path) => {
+      // vfs.write overwrites unconditionally, and the last-known tree is the
+      // only exists-check available over IPC. The explorer's inline naming
+      // already rejects in-tree collisions; this guards other callers and
+      // watcher-lag races.
+      if (get().workspaceTree?.paths.includes(path) ?? false) {
+        get().pushToast(`${path} already exists`, "error");
+        return false;
+      }
+      const result = await call("workspace:writeFile", { path, contents: "" });
+      if (result !== undefined) {
+        throttledTreeRefresh();
+        get().openIdeFile(path);
+      }
+      return result !== undefined;
+    },
+
+    createIdeFolder: async (path) => {
+      // mkdir is recursive and idempotent on every vfs backend, so a race
+      // with an existing directory is harmless rather than destructive.
+      const result = await call("workspace:mkdir", { path });
       if (result !== undefined) throttledTreeRefresh();
       return result !== undefined;
     },
