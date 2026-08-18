@@ -360,6 +360,84 @@
   transition-duration: 160ms;
 }
 
+/* The right tool rail (SideRail) is the chat sidebar's opposite: its layout
+   column never moves, so the page is never pushed. The panel inside is a
+   fixed 260px slab anchored past the window's right edge, and expansion is
+   ONE translateX on that slab — icons, labels, edge line, and fill ride the
+   same transform, so nothing inside can drift out of step with the reveal.
+   Transform also keeps the whole ride on the compositor: no per-frame layout,
+   unlike the width-animated chat slide (which needs layout on purpose, to
+   push the hole). The transition lives on the class permanently — there is no
+   drag-resize here to rubber-band (the reason chat-slide is applied only
+   while animating). CLOSE_MS in SideRail.tsx must outlast the collapsed
+   duration: it is what lowers the chrome view after the retreat lands. */
+.rail-slide {
+  transition: transform 240ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.rail-slide[data-collapsed] {
+  transition-duration: 180ms;
+}
+
+/* Each row's hover pill. Fixed at full row width it would be sliced by the
+   window edge while collapsed, so its RIGHT edge moves between states —
+   wrapping just the icon collapsed, the whole row (label and shortcut too)
+   expanded — on exactly the slide's clock and curve, so pill and reveal edge
+   arrive together. The color fade keeps its own quick clock: hover feedback
+   shouldn't wait on a 240ms ease. */
+.rail-slide .rail-pill {
+  transition:
+    right 240ms cubic-bezier(0.2, 0.8, 0.3, 1),
+    background-color 150ms ease;
+}
+
+.rail-slide[data-collapsed] .rail-pill {
+  transition-duration: 180ms, 150ms;
+}
+
+/* ── The rail's voice visualizer (RailVoice) ──────────────────────────────
+   Four bars, one look per assistant phase. The two CSS modes below cover
+   the phases with no audio worth showing: "idle" (armed — slow breathing,
+   nothing leaves the Mac) and "connecting" (a quicker staggered wave).
+   Phase "active" sets neither animation: an rAF loop in RailVoice.tsx
+   writes scaleY per frame from the live analyser, and an animation here
+   would fight those inline transforms. Each bar carries its index in
+   --bar, so the stagger is one calc instead of eight nth-child rules. */
+.voice-bar {
+  transform: scaleY(0.22);
+  will-change: transform;
+}
+
+.voice-bars[data-mode="idle"] .voice-bar {
+  animation: voice-breathe 2.8s ease-in-out infinite;
+  animation-delay: calc(var(--bar) * 350ms);
+}
+
+.voice-bars[data-mode="connecting"] .voice-bar {
+  animation: voice-wave 900ms ease-in-out infinite;
+  animation-delay: calc(var(--bar) * 120ms);
+}
+
+@keyframes voice-breathe {
+  0%,
+  100% {
+    transform: scaleY(0.22);
+  }
+  50% {
+    transform: scaleY(0.38);
+  }
+}
+
+@keyframes voice-wave {
+  0%,
+  100% {
+    transform: scaleY(0.25);
+  }
+  50% {
+    transform: scaleY(0.85);
+  }
+}
+
 /* The active tab's silhouette shadow (FolderShell), removable: while the
    preview shelf is open the folder merges into the shelf's shared surface,
    and even this soft cast bleeding below the base reads as a gray divider
@@ -375,18 +453,14 @@
   filter: drop-shadow(0 -1px 4px rgb(0 0 0 / 0));
 }
 
-/* The tab preview shelf (TabPreviewStrip) is the chat sidebar's mechanism
-   turned on its side: height is the animated property because the shelf is a
-   flex sibling ABOVE the content hole, so growing it pushes the hole (and the
-   tab WebContentsViews main keeps glued to it) down every frame. Applied only
-   while animating, and mirrored by OPEN_MS / CLOSE_MS in TabPreviewStrip.tsx
-   — the close timer is what unmounts the shelf. */
+/* The tab preview shelf (TabPreviewStrip) clips open OVER the page: it is a
+   fixed overlay under the strip, so animating height unrolls the shelf while
+   the content hole (and the tab views main keeps glued to it) never moves.
+   Opening only — dismissal unmounts the shelf instantly, with no exit
+   animation. Applied only while animating; duration mirrored by OPEN_MS in
+   TabPreviewStrip.tsx. */
 .tab-preview-slide {
   transition: height 220ms cubic-bezier(0.2, 0.8, 0.3, 1);
-}
-
-.tab-preview-slide[data-closing] {
-  transition-duration: 160ms;
 }
 
 /* ── The floating overlay's stack (OverlayStack) ──────────────────────────
@@ -646,10 +720,25 @@
 
 @media (prefers-reduced-motion: reduce) {
   /* The sidebar still mounts and unmounts on the same schedule — it just
-     lands at its width instead of travelling there. Same for the shelf. */
+     lands at its width instead of travelling there. Same for the shelf and
+     the tool rail. */
   .chat-slide,
-  .tab-preview-slide {
+  .tab-preview-slide,
+  .rail-slide {
     transition: none;
+  }
+
+  /* The pill jumps with the panel it tracks, but keeps its hover fade. */
+  .rail-slide .rail-pill {
+    transition: background-color 150ms ease;
+  }
+
+  /* The decorative voice loops rest; the ACTIVE phase's bars still move —
+     they are a live meter of a hot microphone, state a reduced-motion user
+     still needs to see. */
+  .voice-bars[data-mode="idle"] .voice-bar,
+  .voice-bars[data-mode="connecting"] .voice-bar {
+    animation: none;
   }
 
   .animate-terminal-cursor {

@@ -10,6 +10,7 @@ import {
   defaultSpaceEgress,
   isLoopbackHost,
   isPrivateHost,
+  matchHostedCheckout,
   proxyConfigFor,
   suggestBypassOnChallenge,
   type NetworkContext,
@@ -120,6 +121,77 @@ describe("media and per-site bypass", () => {
     expect(decideEgress("ticketmaster.com", space, net()).reason).toBe("site_bypass");
     expect(decideEgress("www.ticketmaster.com", space, net()).reason).toBe("site_bypass");
     expect(decideEgress("ticketmaster.com.evil.test", space, net()).route).toBe("gateway");
+  });
+});
+
+describe("hosted checkout bypass", () => {
+  it("recognises a processor's own checkout domain", () => {
+    expect(matchHostedCheckout("https://checkout.stripe.com/c/pay/cs_live_abc")?.label).toBe(
+      "Stripe Checkout",
+    );
+    expect(matchHostedCheckout("https://buy.stripe.com/aEU3cx4Zq")?.host).toBe("buy.stripe.com");
+    expect(decideEgress("checkout.stripe.com", workSpace(), net()).reason).toBe("hosted_checkout");
+  });
+
+  it("recognises a merchant-branded checkout domain by its path", () => {
+    // The reported case: a Shopify checkout on the merchant's own domain,
+    // which no host list could have known about.
+    const match = matchHostedCheckout(
+      "https://buy.maticrobots.com/checkouts/cn/hWNFecMbyVb6WL4UpbCn2Bpy/en-us?_r=AQAB",
+    );
+    expect(match).toEqual({ host: "buy.maticrobots.com", label: "Shopify checkout" });
+  });
+
+  it("leaves ordinary pages on the identity IP", () => {
+    for (const url of [
+      "https://maticrobots.com/products/arm",
+      "https://maticrobots.com/collections/checkouts",
+      "https://example.com/blog/c/payments",
+      "not a url",
+      "file:///etc/passwd",
+    ]) {
+      expect(matchHostedCheckout(url)).toBeNull();
+    }
+    expect(decideEgress("maticrobots.com", workSpace(), net()).route).toBe("gateway");
+  });
+
+  it("routes a detected merchant checkout host direct, subdomains included", () => {
+    const space = workSpace({ detectedCheckoutHosts: ["buy.maticrobots.com"] });
+    expect(decideEgress("buy.maticrobots.com", space, net()).reason).toBe("hosted_checkout");
+    expect(decideEgress("cdn.buy.maticrobots.com", space, net()).reason).toBe("hosted_checkout");
+    expect(decideEgress("maticrobots.com", space, net()).route).toBe("gateway");
+  });
+
+  it("keeps checkout working when the gateway is down, instead of failing closed", () => {
+    // A blocked checkout is indistinguishable from a broken payment to the
+    // user, and the page carries no identity worth protecting anyway.
+    const down = net({ gateway: "down" });
+    expect(decideEgress("checkout.stripe.com", workSpace(), down).route).toBe("direct");
+    expect(decideEgress("shop.example", workSpace(), down).route).toBe("blocked");
+  });
+
+  it("honors disabling the checkout bypass", () => {
+    const space = workSpace({
+      checkoutBypass: false,
+      detectedCheckoutHosts: ["buy.maticrobots.com"],
+    });
+    expect(decideEgress("checkout.stripe.com", space, net()).route).toBe("gateway");
+    expect(decideEgress("buy.maticrobots.com", space, net()).route).toBe("gateway");
+  });
+
+  it("puts checkout hosts in the Chromium bypass rules, with subdomain patterns", () => {
+    const cfg = proxyConfigFor(
+      workSpace({ detectedCheckoutHosts: ["buy.maticrobots.com"] }),
+      8123,
+      net(),
+    );
+    // Chromium matches a bare hostname exactly, so both forms must be present
+    // or the network stack disagrees with decideEgress.
+    expect(cfg.proxyBypassRules).toContain("checkout.stripe.com");
+    expect(cfg.proxyBypassRules).toContain("*.checkout.stripe.com");
+    expect(cfg.proxyBypassRules).toContain("buy.maticrobots.com");
+    expect(proxyConfigFor(workSpace({ checkoutBypass: false }), 8123, net()).proxyBypassRules)
+      .not.toContain("checkout.stripe.com");
   });
 });
 

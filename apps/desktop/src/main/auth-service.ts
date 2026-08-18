@@ -108,6 +108,16 @@ export class AuthService {
       const hubUrl = me?.hubUrl;
       if (typeof hubUrl === "string" && hubUrl.length > 0)
         this.deps.onHubUrl?.(hubUrl);
+      // Backfill the compute mode for linked devices and records written
+      // before modes existed (null = unknown, treated as cloud meanwhile).
+      const mode = me?.user.computeMode;
+      if (
+        (mode === "cloud" || mode === "local") &&
+        this.deps.device.enrollment().computeMode !== mode
+      ) {
+        this.deps.device.setEnrollment({ computeMode: mode });
+        this.notifyChanged();
+      }
     } catch {
       // Control unreachable — the next enroll/startup will retry.
     }
@@ -173,6 +183,7 @@ export class AuthService {
       suggestedDeviceName: this.deps.suggestedDeviceName,
       passkeyRegistered: e.credentialKind !== null,
       credentialKind: e.credentialKind,
+      computeMode: e.computeMode ?? null,
     };
   }
 
@@ -182,6 +193,8 @@ export class AuthService {
     controlUrl?: string;
     /** §11: required against a control plane with the invite gate on. */
     inviteCode?: string;
+    /** Onboarding's computer choice; omitted ⇒ the control plane's default (cloud). */
+    computeMode?: "cloud" | "local";
   }): Promise<EnrollmentStatus> {
     const url = args.controlUrl ?? this.deps.controlUrl ?? DEFAULT_CONTROL_URL;
     this.client = this.buildClient(url);
@@ -189,6 +202,7 @@ export class AuthService {
       args.email,
       args.displayName,
       args.inviteCode,
+      args.computeMode,
     );
     this.deps.device.setEnrollment({
       state: "signed-up",
@@ -196,6 +210,8 @@ export class AuthService {
       email: out.user.email,
       displayName: out.user.displayName,
       userId: out.user.id,
+      computeMode: out.user.computeMode ?? args.computeMode ?? "cloud",
+      isHomeMachine: null,
       // Persist the SIGNED bootstrap token when the server minted one: a
       // control plane with env signing keys rejects the hbr_dev_ stub, so
       // storing the stub here stranded any restart between signup and enroll.
@@ -293,6 +309,8 @@ export class AuthService {
       email: redeemed.user.email,
       displayName: redeemed.user.displayName,
       userId: redeemed.user.id,
+      computeMode: redeemed.user.computeMode ?? null,
+      isHomeMachine: null,
       authToken: redeemed.bootstrapToken,
     });
     this.notifyChanged();
@@ -309,7 +327,7 @@ export class AuthService {
     const devicePublicKey = toBase64(
       await exportPublicKeyRaw(this.deps.device.identity.publicKey),
     );
-    const { device } = await client.enrollDevice({
+    const { device, isHomeMachine } = await client.enrollDevice({
       name,
       platform: process.platform,
       devicePublicKey,
@@ -341,6 +359,10 @@ export class AuthService {
       credentialKind: "device-key",
       controlDeviceId: device.id,
       authToken,
+      isHomeMachine:
+        enrollment.computeMode === "local" && typeof isHomeMachine === "boolean"
+          ? isHomeMachine
+          : null,
     });
     // A code-linked device already shares the account's secrets and its
     // recovery code (minted by the linking device). Re-uploading here would

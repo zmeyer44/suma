@@ -25,6 +25,7 @@ import type { Cookie, Session } from "electron";
 import {
   GatewayOriginRouter,
   isDeviceLocalCookieName,
+  isLoopbackHost,
   responseIsBrowserChallenge,
   urlLooksLikeBrowserChallenge,
 } from "./routing";
@@ -38,6 +39,13 @@ interface GatewayBackedServiceDeps {
   nativeFetchImpl?: (session: Session, request: Request) => Promise<Response>;
   fetchImpl?: typeof fetch;
   onError?: (error: unknown) => void;
+  /**
+   * Give the compute plane a chance to forward a VM listener to this Mac
+   * before a loopback navigation hits Chromium's network stack, so
+   * localhost:<port> reaches a dev server running inside the machine.
+   * Resolves false (never throws into navigation) when nothing forwards.
+   */
+  ensureLoopbackForward?: (port: number) => Promise<boolean>;
 }
 
 interface SessionBinding {
@@ -56,6 +64,16 @@ interface CookieSnapshotResponse {
 }
 
 const MAX_EAGER_AUTH_BODY_BYTES = 1024 * 1024;
+
+/** The gateway answered and refused — distinct from failing to reach it. */
+class GatewayRejectionError extends Error {
+  constructor(
+    readonly status: number,
+    detail: string,
+  ) {
+    super(`session gateway rejected request (${status}): ${detail}`);
+  }
+}
 
 function shouldRetainRequestBody(
   request: Request,
@@ -294,12 +312,21 @@ export class GatewayBackedService {
     spaceId: string,
     request: Request,
   ): Promise<Response> {
+    const requestUrl = new URL(request.url);
+    // Loopback never leaves this device: the remote gateway cannot dial it
+    // and would only refuse it. Let the compute plane forward the port from
+    // the VM if a workload is listening there, then go through Chromium so
+    // the forwarded (or genuinely local) listener answers.
+    if (isLoopbackHost(requestUrl.hostname)) {
+      await this.forwardLoopbackPort(requestUrl);
+      return this.nativeFetch(ses, request);
+    }
+
     const endpoint = this.endpoint;
     if (endpoint === null) {
       return this.nativeFetch(ses, request);
     }
 
-    const requestUrl = new URL(request.url);
     if (urlLooksLikeBrowserChallenge(request.url)) {
       this.promoteNativeOrigin(requestUrl.hostname);
       return this.nativeFetch(ses, request);
@@ -404,9 +431,7 @@ export class GatewayBackedService {
       );
       if (response.headers.get(GATEWAY_RESPONSE_HEADER) !== "authoritative") {
         const detail = await response.text().catch(() => "");
-        throw new Error(
-          `session gateway rejected request (${response.status}): ${detail}`,
-        );
+        throw new GatewayRejectionError(response.status, detail);
       }
       if (responseIsBrowserChallenge(request.url, response)) {
         this.promoteNativeOrigin(requestUrl.hostname);
@@ -427,10 +452,36 @@ export class GatewayBackedService {
       });
     } catch (error) {
       this.log(error);
+      // "Could not reach" must mean exactly that. A gateway that answered
+      // and declined gets its own message, or the user debugs the wrong hop.
+      if (error instanceof GatewayRejectionError) {
+        return this.gatewayError(
+          502,
+          `Suma's session gateway declined this request (${error.status})`,
+        );
+      }
       return this.gatewayError(
         502,
         "Suma could not reach the session gateway",
       );
+    }
+  }
+
+  /** Never throws into navigation: a refused or impossible forward simply
+   *  leaves the loopback fetch to succeed or fail on its own. */
+  private async forwardLoopbackPort(url: URL): Promise<void> {
+    const ensure = this.deps.ensureLoopbackForward;
+    if (ensure === undefined) return;
+    const port =
+      url.port !== ""
+        ? Number(url.port)
+        : url.protocol === "https:"
+          ? 443
+          : 80;
+    try {
+      await ensure(port);
+    } catch (error) {
+      this.log(error);
     }
   }
 

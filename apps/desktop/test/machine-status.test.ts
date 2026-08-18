@@ -1,17 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { formatHourlyRate, hourlyRateUsd } from "@suma/protocol";
+import { MachineService } from "../src/main/compute/machine-service";
 import {
   defaultReasonFor,
   isAwakeState,
+  localAwayMachineStatus,
+  localHomeMachineStatus,
   localOnlyMachineStatus,
   presentMachineStatus,
   type ControlMachineEventRow,
   type ControlMachineRow,
 } from "../src/main/compute/machine-status";
+import type { ControlClient } from "../src/main/control-client";
 
 const NOW = Date.parse("2026-08-05T12:00:00Z");
 
-function machine(overrides: Partial<ControlMachineRow> = {}): ControlMachineRow {
+function machine(
+  overrides: Partial<ControlMachineRow> = {},
+): ControlMachineRow {
   return {
     id: "m1",
     state: "running",
@@ -24,7 +30,9 @@ function machine(overrides: Partial<ControlMachineRow> = {}): ControlMachineRow 
   };
 }
 
-function event(overrides: Partial<ControlMachineEventRow> = {}): ControlMachineEventRow {
+function event(
+  overrides: Partial<ControlMachineEventRow> = {},
+): ControlMachineEventRow {
   return {
     id: "e1",
     machineId: "m1",
@@ -74,7 +82,9 @@ describe("presentMachineStatus", () => {
       lifecycleExplanation: "Awake because a job is set to keep running.",
       nowMs: NOW,
     });
-    expect(explained.reason).toBe("Awake because a job is set to keep running.");
+    expect(explained.reason).toBe(
+      "Awake because a job is set to keep running.",
+    );
 
     const fallback = presentMachineStatus({
       machine: machine({ state: "suspended" }),
@@ -130,5 +140,124 @@ describe("isAwakeState", () => {
     expect(isAwakeState("boosted")).toBe(true);
     expect(isAwakeState("suspended")).toBe(false);
     expect(isAwakeState("resuming")).toBe(false);
+  });
+});
+
+describe("MachineService in local compute mode", () => {
+  function localModeClient(homeDeviceId: string | null = null): {
+    client: ControlClient;
+    calls: string[];
+  } {
+    const calls: string[] = [];
+    const client = {
+      getMachine: async () => {
+        calls.push("getMachine");
+        return {
+          mode: "local" as const,
+          machine: null,
+          events: [],
+          homeDeviceId,
+        };
+      },
+      getMachineLifecycle: async () => {
+        calls.push("getMachineLifecycle");
+        return null;
+      },
+      transitionMachine: async () => {
+        calls.push("transitionMachine");
+        throw new Error("must never be called in local mode");
+      },
+    } as unknown as ControlClient;
+    return { client, calls };
+  }
+
+  it("reports this-Mac status, never retargets the link, plane ok", async () => {
+    const { client } = localModeClient();
+    const addresses: string[] = [];
+    const service = new MachineService({
+      control: () => client,
+      emit: () => undefined,
+      onAgentAddress: (address) => addresses.push(address),
+    });
+    const status = await service.refresh();
+    expect(status).toEqual(localHomeMachineStatus());
+    expect(status.machineId).toBeNull();
+    expect(status.state).toBe("running");
+    expect(status.reason).toContain("This Mac is your computer");
+    expect(addresses).toEqual([]);
+    expect(service.planeState()).toBe("ok");
+  });
+
+  it("gates local compute when another enrolled Mac owns the seat", async () => {
+    const { client } = localModeClient("home-device");
+    const roles: string[] = [];
+    const service = new MachineService({
+      control: () => client,
+      emit: () => undefined,
+      controlDeviceId: () => "linked-device",
+      onLocalComputerRole: (role) => roles.push(role),
+    });
+
+    // No homeOnline in the stub's answer ⇒ offline copy.
+    expect(await service.refresh()).toEqual(localAwayMachineStatus(false));
+    expect(service.status().reason).toContain("offline");
+    expect(roles).toEqual(["away"]);
+  });
+
+  it("shows the connected-away status when the relay reports home online", async () => {
+    const calls: string[] = [];
+    const client = {
+      getMachine: async () => ({
+        mode: "local" as const,
+        machine: null,
+        events: [],
+        homeDeviceId: "home-device",
+        homeOnline: true,
+      }),
+      getMachineLifecycle: async () => null,
+      transitionMachine: async () => {
+        calls.push("transitionMachine");
+        throw new Error("never");
+      },
+    } as unknown as ControlClient;
+    const online: boolean[] = [];
+    const service = new MachineService({
+      control: () => client,
+      emit: () => undefined,
+      controlDeviceId: () => "linked-device",
+      onHomeOnline: (up) => online.push(up),
+    });
+    const status = await service.refresh();
+    expect(status).toEqual(localAwayMachineStatus(true));
+    expect(status.state).toBe("running");
+    expect(status.reason).toContain("Connected to your computer");
+    expect(online).toEqual([true]);
+    expect(calls).toEqual([]);
+  });
+
+  it("uses confirmed local ownership while the control plane is offline", async () => {
+    const roles: string[] = [];
+    const service = new MachineService({
+      control: () => null,
+      emit: () => undefined,
+      knownLocalComputerRole: () => "home",
+      onLocalComputerRole: (role) => roles.push(role),
+    });
+
+    expect(await service.refresh()).toEqual(localHomeMachineStatus());
+    expect(roles).toEqual(["home"]);
+  });
+
+  it("refuses wake/suspend with a friendly error instead of a control call", async () => {
+    const { client, calls } = localModeClient();
+    const service = new MachineService({
+      control: () => client,
+      emit: () => undefined,
+    });
+    await service.refresh();
+    await expect(service.suspend()).rejects.toThrow(
+      /this Mac is your computer/,
+    );
+    expect(calls.filter((c) => c === "transitionMachine")).toEqual([]);
   });
 });

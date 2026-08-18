@@ -22,7 +22,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use suma_agent::caps::CapabilityClaims;
-use suma_agent::dispatch::{check_pty_io, dispatch, pty_input, AgentState};
+use suma_agent::dispatch::{check_fwd, check_pty_io, dispatch, pty_input, AgentState, CtlEvents};
+use suma_agent::fwd::FwdSession;
 use suma_agent::jobs::JobRegistry;
 use suma_agent::mux::{parse_channel, read_frame, write_frame, Channel, Frame};
 use suma_agent::ports::LsofSource;
@@ -31,14 +32,13 @@ use suma_agent::pty::PtyManager;
 use suma_agent::vfs::{self, VfsRoot};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
 
-    let machine_id =
-        std::env::var("SUMA_MACHINE_ID").unwrap_or_else(|_| "dev-machine".to_string());
+    let machine_id = std::env::var("SUMA_MACHINE_ID").unwrap_or_else(|_| "dev-machine".to_string());
 
     // Dev stand-in for token delivery: claims come from the environment and
     // are never verified — see the module docs for what that does and does not
@@ -70,6 +70,14 @@ async fn main() -> anyhow::Result<()> {
         vfs_root: vfs_root.clone(),
     }));
 
+    // The Files-root watcher: one process-wide bus, scans only while some
+    // connection is subscribed (watch.rs). Connections subscribe on their
+    // first ctl frame — pty/vfs-only clients never hear from it.
+    let (watch_bus, _) =
+        broadcast::channel::<AgentCtlResponse>(suma_agent::watch::WATCH_BUS_CAPACITY);
+    tokio::spawn(suma_agent::watch::run(vfs_root.clone(), watch_bus.clone()));
+    tokio::spawn(run_exit_pump(Arc::clone(&state), watch_bus.clone()));
+
     let listen = std::env::var("SUMA_AGENT_LISTEN").unwrap_or_else(|_| "127.0.0.1:0".to_string());
     let listener = TcpListener::bind(&listen).await?;
     tracing::info!(addr = %listener.local_addr()?, %machine_id, "suma-agent listening");
@@ -80,8 +88,11 @@ async fn main() -> anyhow::Result<()> {
         let claims = claims.clone();
         let machine_id = machine_id.clone();
         let vfs_root = vfs_root.clone();
+        let watch_bus = watch_bus.clone();
         tokio::spawn(async move {
-            if let Err(err) = serve_connection(stream, state, claims, machine_id, vfs_root).await {
+            if let Err(err) =
+                serve_connection(stream, state, claims, machine_id, vfs_root, watch_bus).await
+            {
                 tracing::debug!(%peer, error = %err, "mux connection closed");
             }
         });
@@ -99,6 +110,7 @@ async fn serve_connection(
     claims: CapabilityClaims,
     machine_id: String,
     vfs_root: VfsRoot,
+    watch_bus: broadcast::Sender<AgentCtlResponse>,
 ) -> anyhow::Result<()> {
     let (mut reader, write_half) = stream.into_split();
     let writer: SharedWriter = Arc::new(Mutex::new(write_half));
@@ -106,21 +118,56 @@ async fn serve_connection(
     // client that disconnects stops costing a task per shell it watched.
     let mut pumps: HashMap<String, PumpHandle> = HashMap::new();
 
+    // The connection's ctl writer: EVERY ctl frame — request responses and
+    // unsolicited events alike — goes through this one queue, so a background
+    // fetch's progress can stream while the frame loop sits in read_frame,
+    // and ordering is exactly send order. The forwarder aborts with the
+    // connection (PumpHandle drop), which also closes the queue for any
+    // still-running background task — its sends become silent no-ops.
+    let (ctl_tx, mut ctl_rx) = mpsc::unbounded_channel::<AgentCtlResponse>();
+    let ctl_events = CtlEvents(ctl_tx);
+    let _ctl_pump = {
+        let writer = Arc::clone(&writer);
+        PumpHandle(tokio::spawn(async move {
+            while let Some(response) = ctl_rx.recv().await {
+                let payload = match serde_json::to_vec(&response) {
+                    Ok(payload) => payload,
+                    Err(_) => continue,
+                };
+                let frame = Frame {
+                    channel: "ctl".to_string(),
+                    payload,
+                };
+                if write_shared(&writer, &frame).await.is_err() {
+                    return;
+                }
+            }
+        }))
+    };
+
+    // Watch subscription, armed by this connection's FIRST ctl frame: a
+    // client that speaks ctl is a UI that renders the file tree; pty- and
+    // vfs-only connections never subscribe. Events are re-gated on fs.read
+    // per delivery so an expired claims window stops the stream.
+    let mut watch_pump: Option<PumpHandle> = None;
+
+    // A port forward makes this connection dedicated to one stream: the
+    // first fwd frame dials the port, the rest are that stream's bytes, and
+    // connection teardown ends it (dropping the session aborts its pump).
+    let mut fwd: Option<(String, FwdSession)> = None;
+
     while let Some(frame) = read_frame(&mut reader).await? {
         match parse_channel(&frame.channel) {
             Some(Channel::Ctl) => {
-                let responses = handle_ctl(&state, &claims, &machine_id, &frame.payload).await;
-                for response in responses {
-                    let payload = serde_json::to_vec(&response)?;
-                    write_shared(
-                        &writer,
-                        &Frame {
-                            channel: "ctl".to_string(),
-                            payload,
-                        },
-                    )
-                    .await?;
+                if watch_pump.is_none() {
+                    watch_pump = Some(start_event_pump(
+                        &watch_bus,
+                        ctl_events.clone(),
+                        claims.clone(),
+                        machine_id.clone(),
+                    ));
                 }
+                handle_ctl(&state, &claims, &machine_id, &frame.payload, &ctl_events).await;
             }
             Some(Channel::Pty(pty_id)) => {
                 // An EMPTY frame is the subscription: the mux has no separate
@@ -183,9 +230,54 @@ async fn serve_connection(
                 )
                 .await?;
             }
-            // fwd/log pumps are still Phase 3+ wiring; frames are dropped, not
-            // misrouted.
-            Some(Channel::Fwd(_)) | Some(Channel::Log) => {
+            Some(Channel::Fwd { port, .. }) => {
+                match &mut fwd {
+                    // Already forwarding: a mismatched channel string on a
+                    // dedicated connection is a protocol error — close it.
+                    Some((channel, session)) if *channel == frame.channel => {
+                        if frame.payload.is_empty() {
+                            // Empty after OPEN = the desktop closed the
+                            // stream. The connection is dedicated, so end it.
+                            return Ok(());
+                        }
+                        if session.write(&frame.payload).await.is_err() {
+                            return Ok(()); // upstream gone — tear down
+                        }
+                    }
+                    Some(_) => return Ok(()), // different fwd channel — protocol error
+                    None => {
+                        // First fwd frame: authorize, then dial. Any refusal
+                        // closes the connection — the desktop's socket pair
+                        // destroys on the disconnect, a prompt honest failure
+                        // (there is no error payload on a fwd stream).
+                        if let Some(reason) = check_fwd(&claims, &machine_id, now_seconds()) {
+                            tracing::debug!(%reason, "fwd denied");
+                            return Ok(());
+                        }
+                        match FwdSession::open(frame.channel.clone(), port, Arc::clone(&writer))
+                            .await
+                        {
+                            Ok(mut session) => {
+                                // Tolerate data-first (OPEN is normally empty,
+                                // but a client that sends bytes immediately is
+                                // fine): write a non-empty first payload.
+                                if !frame.payload.is_empty()
+                                    && session.write(&frame.payload).await.is_err()
+                                {
+                                    return Ok(());
+                                }
+                                fwd = Some((frame.channel.clone(), session));
+                            }
+                            Err(err) => {
+                                tracing::debug!(port, %err, "fwd dial failed");
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+            // The log channel is parsed but unwired on all transports.
+            Some(Channel::Log) => {
                 tracing::debug!(channel = %frame.channel, "channel not wired yet");
             }
             None => {
@@ -320,6 +412,69 @@ async fn start_pty_pump(
     })))
 }
 
+/// Forward shared-bus events onto this connection's ctl queue, re-checking
+/// the event's required capability per delivery (see `watch::event_capability`)
+/// — so an expired or under-scoped claims set hears nothing, and a `pty.io`
+/// connection gets `pty.exited` while an `fs.read`-only one gets `vfs.changed`.
+/// Lagged receivers skip ahead: `vfs.changed` is collapsible, and a missed
+/// `pty.exited` self-corrects on the next `pty.list`/attach.
+fn start_event_pump(
+    bus: &broadcast::Sender<AgentCtlResponse>,
+    events: CtlEvents,
+    claims: CapabilityClaims,
+    machine_id: String,
+) -> PumpHandle {
+    let mut rx = bus.subscribe();
+    PumpHandle(tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let allowed = match suma_agent::watch::event_capability(&event) {
+                        Some(cap) => suma_agent::caps::check_capability(
+                            &claims,
+                            &machine_id,
+                            cap,
+                            now_seconds(),
+                        )
+                        .is_none(),
+                        None => true,
+                    };
+                    if allowed {
+                        events.send(event);
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    }))
+}
+
+/// The PTY exit reaper: broadcast `pty.exited` for every shell that has
+/// exited since the last tick. Structured like `watch::run` — a 2 s poll
+/// that idles at zero subscribers (nothing to tell, nobody to tell) — because
+/// portable-pty offers no async exit signal, only `try_wait`.
+async fn run_exit_pump(
+    state: std::sync::Arc<Mutex<AgentState>>,
+    bus: broadcast::Sender<AgentCtlResponse>,
+) {
+    let mut interval = tokio::time::interval(suma_agent::watch::WATCH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        if bus.receiver_count() == 0 {
+            continue;
+        }
+        let exits = {
+            let mut st = state.lock().await;
+            st.ptys.collect_new_exits()
+        };
+        for (pty_id, code) in exits {
+            let _ = bus.send(AgentCtlResponse::PtyExited { pty_id, code });
+        }
+    }
+}
+
 /// Wall-clock seconds, the units capability windows are expressed in.
 ///
 /// An unreadable clock reads as "after every expiry", so every token is
@@ -333,32 +488,40 @@ fn now_seconds() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-/// Parse and dispatch one ctl payload; returns the frames to write back
-/// (progress events first, terminal response last).
+/// Parse and dispatch one ctl payload. Everything it produces — the terminal
+/// response and any unsolicited events a handler spawned — flows through the
+/// connection's ctl pump; this function returns nothing.
+///
+/// The terminal response is sent through the SAME queue as events, so a
+/// response enqueued here and an event from a background task keep their
+/// relative order on the wire.
 async fn handle_ctl(
     state: &Arc<Mutex<AgentState>>,
     claims: &CapabilityClaims,
     machine_id: &str,
     payload: &[u8],
-) -> Vec<AgentCtlResponse> {
+    events: &CtlEvents,
+) {
     let request: AgentCtlRequest = match serde_json::from_slice(payload) {
         Ok(req) => req,
         Err(err) => {
-            return vec![AgentCtlResponse::Error {
+            // A direct send, not CtlEvents::send — this IS a response (to an
+            // unparseable request), and responses may be errors.
+            let _ = events.0.send(AgentCtlResponse::Error {
                 code: "bad_request".to_string(),
                 message: format!("unparseable ctl payload: {err}"),
-            }];
+            });
+            return;
         }
     };
     let now = now_seconds();
 
-    let mut events: Vec<AgentCtlResponse> = Vec::new();
     let mut st = state.lock().await;
-    let mut emit = |resp: AgentCtlResponse| events.push(resp);
-    let response = dispatch(&mut st, claims, machine_id, now, request, &mut emit).await;
+    let response = dispatch(&mut st, claims, machine_id, now, request, events).await;
     drop(st);
     if let Some(response) = response {
-        events.push(response);
+        // Responses go through the raw sender: `error` is a legitimate
+        // terminal response, and CtlEvents::send debug-asserts against it.
+        let _ = events.0.send(response);
     }
-    events
 }

@@ -38,6 +38,7 @@ const SERVER_ROUTES = [
   "GET /v1/files/transfers", // app.ts: v1.get("/files/transfers", …)
   "POST /v1/files/transfers", // app.ts: v1.post("/files/transfers", …)
   "POST /v1/files/transfers/progress", // app.ts — the AGENT's route, never the desktop's
+  "POST /v1/files/transfers/:id/progress", // app.ts — device relay of agent events
   "POST /v1/files/transfers/:id/cancel", // app.ts: v1.post("/files/transfers/:id/cancel", …)
   "GET /v1/files", // app.ts: v1.get("/files", …)
   "DELETE /v1/files/:id", // app.ts: v1.delete("/files/:id", …)
@@ -266,19 +267,36 @@ describe("FilesClient route contract (services/control /v1/files)", () => {
   });
 
   it("creates, lists, and cancels transfers on the transfer routes", async () => {
-    const { client: files, calls } = client(() => ({ transfer: TRANSFER, transfers: [TRANSFER] }));
-    await files.createTransfer(TRANSFER.url, TRANSFER.destPath);
+    const { client: files, calls } = client(() => ({
+      transfer: TRANSFER,
+      transfers: [TRANSFER],
+    }));
+    await files.createTransfer(
+      TRANSFER.url,
+      TRANSFER.destPath,
+      TRANSFER.totalBytes,
+    );
+    await files.reportTransfer(TRANSFER_ID, {
+      state: "fetching",
+      receivedBytes: 1,
+    });
     await files.listTransfers();
     await files.cancelTransfer(TRANSFER_ID);
     expect(calls.map((call) => call.route)).toEqual([
       "POST /v1/files/transfers",
+      "POST /v1/files/transfers/:id/progress",
       "GET /v1/files/transfers",
       "POST /v1/files/transfers/:id/cancel",
     ]);
     // createTransferSchema is `.strict()` and has no field that could carry a
     // cookie, a header, or a certificate — §8.6, enforced on both sides.
-    expect(Object.keys(calls[0]?.body ?? {}).sort()).toEqual(["destPath", "url"]);
-    expect(calls[2]?.path).toBe(`/v1/files/transfers/${TRANSFER_ID}/cancel`);
+    expect(Object.keys(calls[0]?.body ?? {}).sort()).toEqual([
+      "destPath",
+      "totalBytes",
+      "url",
+    ]);
+    expect(calls[1]?.body).toEqual({ state: "fetching", receivedBytes: 1 });
+    expect(calls[3]?.path).toBe(`/v1/files/transfers/${TRANSFER_ID}/cancel`);
   });
 
   it("never calls a route the control plane does not serve", async () => {
@@ -310,6 +328,10 @@ describe("FilesClient route contract (services/control /v1/files)", () => {
     await files.quota();
     await files.remove("/notes/a.bin");
     await files.createTransfer(TRANSFER.url, TRANSFER.destPath);
+    await files.reportTransfer(TRANSFER_ID, {
+      state: "fetching",
+      receivedBytes: 1,
+    });
     await files.listTransfers();
     await files.cancelTransfer(TRANSFER_ID);
     await files.manifest("/notes/a.bin");

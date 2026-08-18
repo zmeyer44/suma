@@ -176,13 +176,15 @@ for local dev).
 
 ## Regenerating the DMG art
 
-The SVG sources are committed (`build/icon.svg`, `build/background.svg`);
-the rasters they produce are gitignored and must be regenerated on a fresh
-clone before packaging:
+The SVG sources are committed (`build/icon.svg`, `build/background.svg`).
+`build/icon.png` is also committed because the running app uses it for the
+full-bleed Dock icon; other generated rasters are gitignored:
 
-- App icon: `node apps/desktop/scripts/build-icons.mjs` (rasterizes
-  `build/icon.svg` — the site mark from `apps/www/public/mark.svg` refit to
-  the macOS icon grid — into `icon.png` + `icon.icns`; needs ImageMagick)
+- App icon: edit `build/icon.svg`, then run
+  `node apps/desktop/scripts/build-icons.mjs`. The script rasterizes the shared
+  development/production Dock icon plus the bundle `.icns`; it needs
+  ImageMagick. Production packaging uses the `.icns` for Finder and Spotlight,
+  then bundles `icon.png` for the runtime Dock override.
 - Installer background, deterministic path (used for 0.0.1):
   `rsvg-convert -w 1320 -h 800 build/background.svg -o build/background@2x.png`
   then `magick build/background@2x.png -resize 660x400 build/background.png`

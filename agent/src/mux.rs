@@ -34,7 +34,14 @@ pub struct Frame {
 pub enum Channel {
     Ctl,
     Pty(String),
-    Fwd(u16),
+    Fwd {
+        port: u16,
+        /// Stream identity on transports where one connection carries many
+        /// forward streams (the relay). Over per-connection TCP the bare
+        /// form suffices — the connection IS the stream — and the id, when
+        /// present, is accepted and ignored.
+        stream: Option<String>,
+    },
     Vfs,
     Log,
 }
@@ -42,10 +49,10 @@ pub enum Channel {
 /// Mirror of the TS `parseChannel`, including its rejections: unknown heads,
 /// a missing slash, an empty pty id, and out-of-range ports are all `None`.
 /// Like the TS version (which splits on the *first* slash), a pty id may
-/// itself contain `/`. One deliberate divergence: the port is parsed as
-/// strict decimal digits, where JS `parseInt` would accept and truncate
-/// trailing garbage (`"fwd/80abc"` → 80). No conforming client emits such
-/// names, and the stricter read can only reject, never misroute.
+/// itself contain `/`. Both sides parse the fwd port as STRICT decimal
+/// digits (the TS side was tightened to match when stream ids landed —
+/// `"fwd/80abc"` is a rejection everywhere). `fwd/<port>/<streamId>` names
+/// one stream on a shared connection; the id is any non-empty suffix.
 pub fn parse_channel(name: &str) -> Option<Channel> {
     match name {
         "ctl" => return Some(Channel::Ctl),
@@ -57,11 +64,16 @@ pub fn parse_channel(name: &str) -> Option<Channel> {
     match head {
         "pty" if !rest.is_empty() => Some(Channel::Pty(rest.to_string())),
         "fwd" => {
-            let port: u16 = rest.parse().ok()?;
+            let (port_part, stream) = match rest.split_once('/') {
+                Some((port_part, id)) if !id.is_empty() => (port_part, Some(id.to_string())),
+                Some(_) => return None, // "fwd/3000/" — empty id refused
+                None => (rest, None),
+            };
+            let port: u16 = port_part.parse().ok()?;
             if port == 0 {
                 return None;
             }
-            Some(Channel::Fwd(port))
+            Some(Channel::Fwd { port, stream })
         }
         _ => None,
     }
@@ -72,7 +84,11 @@ pub fn channel_name(channel: &Channel) -> String {
     match channel {
         Channel::Ctl => "ctl".to_string(),
         Channel::Pty(id) => format!("pty/{id}"),
-        Channel::Fwd(port) => format!("fwd/{port}"),
+        Channel::Fwd { port, stream: None } => format!("fwd/{port}"),
+        Channel::Fwd {
+            port,
+            stream: Some(id),
+        } => format!("fwd/{port}/{id}"),
         Channel::Vfs => "vfs".to_string(),
         Channel::Log => "log".to_string(),
     }
@@ -146,8 +162,28 @@ mod tests {
         assert_eq!(parse_channel("pty/abc"), Some(Channel::Pty("abc".into())));
         // First-slash split, mirroring the TS indexOf("/") behaviour.
         assert_eq!(parse_channel("pty/a/b"), Some(Channel::Pty("a/b".into())));
-        assert_eq!(parse_channel("fwd/8080"), Some(Channel::Fwd(8080)));
-        assert_eq!(parse_channel("fwd/65535"), Some(Channel::Fwd(65535)));
+        assert_eq!(
+            parse_channel("fwd/8080"),
+            Some(Channel::Fwd {
+                port: 8080,
+                stream: None
+            })
+        );
+        assert_eq!(
+            parse_channel("fwd/65535"),
+            Some(Channel::Fwd {
+                port: 65535,
+                stream: None
+            })
+        );
+        // Stream-id form for shared-connection transports (the relay).
+        assert_eq!(
+            parse_channel("fwd/8080/s-1"),
+            Some(Channel::Fwd {
+                port: 8080,
+                stream: Some("s-1".into())
+            })
+        );
     }
 
     #[test]
@@ -161,6 +197,8 @@ mod tests {
             "fwd/65536",
             "fwd/abc",
             "fwd/-1",
+            "fwd/8080/",
+            "fwd/80abc/s-1",
             "web/1",
             "CTL",
             "ctl/x",
@@ -171,7 +209,7 @@ mod tests {
 
     #[test]
     fn channel_names_round_trip() {
-        for name in ["ctl", "vfs", "log", "pty/t-1", "fwd/3000"] {
+        for name in ["ctl", "vfs", "log", "pty/t-1", "fwd/3000", "fwd/3000/abc"] {
             let ch = parse_channel(name).unwrap();
             assert_eq!(channel_name(&ch), name);
         }

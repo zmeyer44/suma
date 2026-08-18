@@ -191,6 +191,9 @@ export interface DownloadItemInfo {
   receivedBytes: number;
   totalBytes: number;
   startedAtMs: number;
+  /** Cloud mode: where the finished file was also mirrored on the account's
+   *  computer (a vfs wire path like "/Personal/Downloads/report.pdf"). */
+  cloudPath?: string;
 }
 
 export interface EnrollmentStatus {
@@ -208,6 +211,9 @@ export interface EnrollmentStatus {
   /** A WebAuthn or device-key credential is registered for login. */
   passkeyRegistered: boolean;
   credentialKind: "webauthn" | "device-key" | null;
+  /** Where the account's computer lives ("cloud" VM vs this Mac). null =
+   *  unknown (legacy/linked record awaiting /v1/me backfill) ⇒ treat as cloud. */
+  computeMode: "cloud" | "local" | null;
   /** Present ONLY in the response that first reveals it — shown once (§8.2). */
   recoveryCode?: string;
 }
@@ -370,13 +376,40 @@ export interface WorkspaceTree {
   truncated: boolean;
 }
 
-export interface WorkspaceFile {
-  path: string;
-  /** UTF-8 text; empty when `unreadable`. */
-  contents: string;
-  /** Binary or over the size cap — shown as a notice, never edited. */
-  unreadable: boolean;
-}
+/**
+ * What the IDE got back for a file: editable text, an image it can render but
+ * not edit, or a notice. The kind decides the pane — main never hands the
+ * renderer bytes it has no way to show.
+ */
+export type WorkspaceFile =
+  | { path: string; kind: "text"; contents: string }
+  | {
+      path: string;
+      kind: "image";
+      /** `data:` URL, ready for an <img src>. The chrome's CSP allows data:. */
+      dataUrl: string;
+      /** Sniffed from the file's magic bytes, not its extension. */
+      mime: string;
+      bytes: number;
+    }
+  | {
+      path: string;
+      kind: "audio";
+      /**
+       * suma-workspace:// stream URL for an <audio src>. Unlike an image, the
+       * bytes never cross IPC — the protocol serves Range requests so the
+       * player can seek (main/workspace-media.ts).
+       */
+      url: string;
+      /** Sniffed from the file's magic bytes, not its extension. */
+      mime: string;
+      bytes: number;
+    }
+  | {
+      path: string;
+      kind: "unreadable";
+      reason: "binary" | "too-large" | "unsupported";
+    };
 
 /** Per-space egress state surfaced in the site controls (§8.4, §8.7). */
 export interface EgressStatus {
@@ -386,6 +419,11 @@ export interface EgressStatus {
   /** One-click "browse direct for now", reset on reconnect. */
   temporaryDirectOverride: boolean;
   mediaBypass: boolean;
+  /** Hosted checkout pages route direct — payment processors refuse proxied
+   *  requests outright rather than challenge them (§8.4). */
+  checkoutBypass: boolean;
+  /** Merchant-branded checkout hosts recognised this session; not persisted. */
+  detectedCheckoutHosts: string[];
   siteBypass: string[];
   /** Set when the gateway is down and requests are being blocked. */
   failClosed: boolean;
@@ -471,7 +509,13 @@ export interface CloudFetchDeclined {
  * they travel together.
  */
 export interface TransfersUpdate {
-  transfers: Transfer[];
+  transfers: Array<
+    Transfer & {
+      /** False while an agent-side fetch is running — the agent has no
+       *  cancel op yet, and the UI says so instead of faking a button. */
+      cancellable?: boolean;
+    }
+  >;
   declined: CloudFetchDeclined | null;
 }
 
@@ -642,7 +686,8 @@ export interface SumaInvokeMap {
 
   /**
    * The voice assistant (shared/voice.ts). The wake-word engine and the
-   * Gemini Live session run in MAIN (main/voice/voice-service.ts) — the key
+   * agent session (the chat sidebar's AI SDK loop with transcription in and
+   * realtime TTS out) run in MAIN (main/voice/voice-service.ts) — the keys
    * and the browser tools live there. The overlay renderer owns the
    * microphone and the speakers: `voice:audio` carries 16 kHz PCM16 mic
    * frames inward while the assistant is armed or in a session; reply audio
@@ -651,7 +696,10 @@ export interface SumaInvokeMap {
    * (HUD) — both senders are trusted for the voice:* channels.
    */
   "voice:settings": { args: void; result: VoiceSettingsInfo };
-  "voice:updateSettings": { args: VoiceSettingsPatch; result: VoiceSettingsInfo };
+  "voice:updateSettings": {
+    args: VoiceSettingsPatch;
+    result: VoiceSettingsInfo;
+  };
   /** Pull on mount — status pushes sent before a surface existed are gone. */
   "voice:status": { args: void; result: VoiceStatus };
   "voice:audio": { args: VoiceAudioInArgs; result: void };
@@ -726,6 +774,7 @@ export interface SumaInvokeMap {
       displayName?: string;
       controlUrl?: string;
       inviteCode?: string;
+      computeMode?: "cloud" | "local";
     };
     result: EnrollmentStatus;
   };
@@ -812,6 +861,15 @@ export interface SumaInvokeMap {
     args: { path: string; contents: string };
     result: { ok: true };
   };
+  "workspace:mkdir": { args: { path: string }; result: { ok: true } };
+  "workspace:delete": {
+    args: { path: string; recursive?: boolean };
+    result: { ok: true };
+  };
+  "workspace:rename": {
+    args: { from: string; to: string };
+    result: { ok: true };
+  };
 
   /* ---- Phase 2: identity egress (§8.4, §8.7) ---- */
   "egress:status": { args: { spaceId: string }; result: EgressStatus };
@@ -859,12 +917,18 @@ export interface SumaInvokeMap {
   "nostr:generateKey": { args: void; result: NostrSettingsInfo };
   "nostr:removeKey": { args: void; result: NostrSettingsInfo };
   /** What `window.nostr.getRelays()` will answer — edited on the settings page. */
-  "nostr:setRelays": { args: { relays: NostrRelayPolicy }; result: NostrSettingsInfo };
+  "nostr:setRelays": {
+    args: { relays: NostrRelayPolicy };
+    result: NostrSettingsInfo;
+  };
   "nostr:setSitePolicy": {
     args: { host: string; patch: NostrSitePolicyPatch };
     result: NostrSettingsInfo;
   };
-  "nostr:removeSitePolicy": { args: { host: string }; result: NostrSettingsInfo };
+  "nostr:removeSitePolicy": {
+    args: { host: string };
+    result: NostrSettingsInfo;
+  };
   /** The approval queue, oldest first — pull for a surface that just mounted
    *  (pushes sent before it existed are gone). Preview-overlay trust lane. */
   "nostr:pending": { args: void; result: NostrPendingRequest[] };
@@ -958,7 +1022,10 @@ export interface SumaInvokeMap {
    * around it would deaden the whole top-right strip of the page. Omitted ⇒
    * the classic full card width.
    */
-  "savePreview:bounds": { args: { height: number; width?: number }; result: void };
+  "savePreview:bounds": {
+    args: { height: number; width?: number };
+    result: void;
+  };
   /** A card was clicked: open the Saves panel in the chrome on this item. */
   "savePreview:activate": { args: { id: string }; result: void };
   /**
@@ -1097,10 +1164,25 @@ export interface SumaEventMap {
   "terminal:data": { ptyId: string; data: string };
   "terminal:updated": TerminalInfo[];
   "ports:updated": PortForwardInfo[];
+  /** The machine behind the IDE's filesystem changed (sim⇄VM swap, reconnect,
+   *  active-space move) — the explorer refetches, stale buffers drop. */
+  "workspace:changed": {
+    source: "sim" | "remote";
+    connected: boolean;
+    activeSpaceId: string | null;
+  };
+  /** FILES on the current machine changed (a shell wrote, a fetch landed, an
+   *  editor saved) — same machine, fresher tree. Debounced in main; the
+   *  renderer throttles its refetch on top. */
+  "workspace:filesChanged": { paths?: string[] };
   /** Gateway health or per-space egress config changed (§8.4 fail-closed banner). */
   "egress:changed": EgressStatus;
   /** A site challenged us; offer a per-site bypass rather than acting silently. */
   "egress:bypassSuggested": { spaceId: string; host: string; reason: string };
+  /** A hosted checkout page was routed direct automatically (§8.4). Applied,
+   *  not offered — the page never renders through the proxy — so the user is
+   *  told after the fact instead of being asked. */
+  "egress:checkoutBypassed": { spaceId: string; host: string; label: string };
 
   /* ---- Nostr signer ---- */
   /** The approval queue changed — full list, oldest first. Pushed to BOTH
@@ -1290,6 +1372,9 @@ export const INVOKE_CHANNELS: ReadonlyArray<InvokeChannel> = [
   "workspace:tree",
   "workspace:readFile",
   "workspace:writeFile",
+  "workspace:mkdir",
+  "workspace:delete",
+  "workspace:rename",
   "egress:status",
   "egress:setPolicy",
   "egress:browseDirectForNow",
@@ -1379,8 +1464,11 @@ export const EVENT_CHANNELS: ReadonlyArray<EventChannel> = [
   "terminal:data",
   "terminal:updated",
   "ports:updated",
+  "workspace:changed",
+  "workspace:filesChanged",
   "egress:changed",
   "egress:bypassSuggested",
+  "egress:checkoutBypassed",
   "nostr:pendingChanged",
   "nostr:openDetail",
   "nostr:settingsChanged",

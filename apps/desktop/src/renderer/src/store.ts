@@ -24,10 +24,15 @@ import {
   clampExplorerWidth,
   clampTerminalHeight,
   dropIdeBuffer,
+  ideWorkspaceKey,
+  moveIdeBuffers,
   getStoredIdeLayout,
+  restoreIdeWorkspaceView,
+  stashIdeWorkspaceView,
   storeIdeLayout,
   type IdePanel,
 } from "./lib/ide";
+import { throttleTrailing } from "./lib/throttle";
 import {
   clampSavesWidth,
   getStoredSavesOpen,
@@ -112,6 +117,15 @@ export interface BypassSuggestion {
   spaceId: string;
   host: string;
   reason: string;
+}
+
+/** A hosted checkout page already routed direct (§8.4) — a notice, not an
+ *  offer: a proxied checkout is rejected before it can render, so there is no
+ *  version of the page the user could have looked at and decided about. */
+export interface CheckoutBypassNotice {
+  spaceId: string;
+  host: string;
+  label: string;
 }
 
 export interface OriginPopoverAnchor {
@@ -207,6 +221,7 @@ interface SumaState {
   ports: PortForwardInfo[];
   egressBySpace: Record<string, EgressStatus>;
   bypassSuggestions: BypassSuggestion[];
+  checkoutBypassNotices: CheckoutBypassNotice[];
   audit: AuditEntry[];
   auditLoaded: boolean;
 
@@ -220,6 +235,21 @@ interface SumaState {
   ideTerminalHeight: number;
   /** The workspace file listing behind the explorer; null until first fetch. */
   workspaceTree: WorkspaceTree | null;
+  /** Which machine serves the IDE's filesystem right now — "sim" until the
+   *  cloud VM link comes up; null before the first workspace:changed event. */
+  workspaceSource: "sim" | "remote" | null;
+  /** The space part of the filesystem identity; kept separately so the first
+   *  source announcement can migrate buffers loaded before it arrived. */
+  workspaceSpaceId: string | null;
+  /** Compute mode distinguishes two simulated roots (dev/local-mode). */
+  workspaceComputeMode: "cloud" | "local" | null;
+  /** null before the first connection event; false deliberately clears stale
+   *  explorer data while the selected computer is unavailable. */
+  workspaceConnected: boolean | null;
+  /** Composite machine+mode+space identity used to scope editor buffers. */
+  workspaceKey: string;
+  /** Increments on reconnects too, forcing clean editor surfaces to reload. */
+  workspaceRevision: number;
   /** Editor tabs, in open order; paths are workspace-relative. */
   ideOpenFiles: string[];
   ideActiveFile: string | null;
@@ -278,7 +308,10 @@ interface SumaState {
   generateNostrKey: () => Promise<string | null>;
   removeNostrKey: () => Promise<void>;
   setNostrRelays: (relays: NostrRelayPolicy) => Promise<void>;
-  setNostrSitePolicy: (host: string, patch: NostrSitePolicyPatch) => Promise<void>;
+  setNostrSitePolicy: (
+    host: string,
+    patch: NostrSitePolicyPatch,
+  ) => Promise<void>;
   removeNostrSitePolicy: (host: string) => Promise<void>;
   /** Save ("" clears) the Buzz relay URL; saving starts a roster fetch. */
   setBuzzRelay: (url: string) => Promise<boolean>;
@@ -403,6 +436,15 @@ interface SumaState {
   tabDragging: boolean;
   setTabDragging: (dragging: boolean) => void;
 
+  /** The right tool rail (SideRail) is expanded over the content hole. The
+   *  rail's layout column stays 50px — expansion paints the panel OVER the
+   *  page rather than pushing it — so the extra width needs the chrome view
+   *  raised (same overlay mechanism as modals) to be visible and clickable
+   *  above the tab WebContentsViews. Stays true through the collapse slide so
+   *  the retreating panel isn't cut off mid-animation. */
+  railExpanded: boolean;
+  setRailExpanded: (expanded: boolean) => void;
+
   /** Page snapshots for the preview shelf, keyed by tab id (`tabs:thumbnail`). */
   tabThumbnails: Record<string, TabThumbnail>;
   /** The preview shelf under the strip is open — it takes layout height, so
@@ -411,6 +453,13 @@ interface SumaState {
   /** Opening also pulls the space's cached thumbnails and asks main to
    *  re-capture the visible tab, so the shelf is fresh by the time it lands. */
   setTabPreviewOpen: (open: boolean) => void;
+  /** The shelf is in the DOM. It is an OVERLAY on the content hole (the page
+   *  under it never resizes), so the chrome must be raised above the tab
+   *  views while it shows; App folds this into modalOpen, the railExpanded
+   *  pattern. Set by TabPreviewStrip: mounts on open (before the slide-in),
+   *  unmounts instantly on dismissal — there is no exit animation. */
+  tabPreviewMounted: boolean;
+  setTabPreviewMounted: (mounted: boolean) => void;
   /** The tab the pointer is on in the STRIP — its shelf card mirrors the
    *  hover, so the row above and the picture below read as one control:
    *  the lit card is the page a click right now would land on. Maintained
@@ -440,6 +489,7 @@ interface SumaState {
     email: string,
     displayName?: string,
     inviteCode?: string,
+    computeMode?: "cloud" | "local",
   ) => Promise<EnrollmentStatus | undefined>;
   enrollDevice: (name: string) => Promise<EnrollmentStatus | undefined>;
   /** §8.2 second-device flow: mint on the enrolled Mac, sign in on the new one. */
@@ -512,6 +562,10 @@ interface SumaState {
   readIdeFile: (path: string) => Promise<WorkspaceFile | undefined>;
   /** Write a buffer back to disk; true on success. */
   saveIdeFile: (path: string, contents: string) => Promise<boolean>;
+  /** Create an empty file and open it in the editor; true on success. */
+  createIdeFile: (path: string) => Promise<boolean>;
+  /** Create a folder (parents included); true on success. */
+  createIdeFolder: (path: string) => Promise<boolean>;
   /** Open `path` in the editor (adding a tab) and reveal the editor panel. */
   openIdeFile: (path: string) => void;
   /** Close the tab; its unsaved buffer, if any, is discarded. */
@@ -534,6 +588,7 @@ interface SumaState {
     host: string,
   ) => Promise<EgressDecisionInfo | undefined>;
   dismissBypassSuggestion: (spaceId: string, host: string) => void;
+  dismissCheckoutBypassNotice: (spaceId: string, host: string) => void;
   refreshAudit: () => Promise<void>;
 }
 
@@ -562,6 +617,7 @@ const FALLBACK_AUTH: EnrollmentStatus = {
   suggestedDeviceName: "My Mac",
   passkeyRegistered: false,
   credentialKind: null,
+  computeMode: null,
 };
 
 const FALLBACK_CREDENTIAL_STATUS: CredentialProviderStatus = {
@@ -641,6 +697,12 @@ function persistIdeLayout(s: SumaState): void {
   });
 }
 
+/** At most one explorer refetch per second, with the trailing signal kept —
+ *  file-change events burst, and the LAST one must still refresh the tree. */
+const throttledTreeRefresh = throttleTrailing(() => {
+  void useSumaStore.getState().refreshWorkspaceTree();
+}, 1_000);
+
 export const useSumaStore = create<SumaState>()((set, get) => {
   /** Every invoke error surfaces as a non-blocking toast; callers get undefined. */
   async function call<C extends InvokeChannel>(
@@ -717,8 +779,7 @@ export const useSumaStore = create<SumaState>()((set, get) => {
       const ids = Object.keys(next);
       if (ids.length > MAX_TAB_THUMBNAILS) {
         ids.sort(
-          (a, b) =>
-            (next[a]?.capturedAtMs ?? 0) - (next[b]?.capturedAtMs ?? 0),
+          (a, b) => (next[a]?.capturedAtMs ?? 0) - (next[b]?.capturedAtMs ?? 0),
         );
         for (const id of ids.slice(0, ids.length - MAX_TAB_THUMBNAILS)) {
           delete next[id];
@@ -730,6 +791,81 @@ export const useSumaStore = create<SumaState>()((set, get) => {
 
   function activeSpaceId(): string | null {
     return get().spaces.find((s) => s.active)?.id ?? null;
+  }
+
+  /**
+   * Change the filesystem identity atomically. Each workspace keeps its own
+   * tabs and dirty buffers; clean buffers are discarded so a reconnect reads
+   * the disk again. The first source announcement is special: files may have
+   * already loaded before main announced whether the link is sim or remote,
+   * so those buffers are re-keyed instead of being treated as another place.
+   */
+  function transitionIdeWorkspace(
+    source: "sim" | "remote" | null,
+    spaceId: string | null,
+    connected: boolean | null,
+    refreshTree: boolean,
+  ): void {
+    const previous = get();
+    const computeMode = previous.auth.computeMode;
+    const nextKey = ideWorkspaceKey(source, spaceId, computeMode);
+    const identityChanged = nextKey !== previous.workspaceKey;
+    const firstSourceAnnouncement =
+      previous.workspaceSource === null &&
+      source !== null &&
+      previous.workspaceSpaceId === spaceId &&
+      previous.workspaceComputeMode === computeMode;
+
+    let openFiles = previous.ideOpenFiles;
+    let activeFile = previous.ideActiveFile;
+    let dirty = previous.ideDirty;
+
+    if (identityChanged) {
+      if (firstSourceAnnouncement) {
+        moveIdeBuffers(previous.workspaceKey, nextKey, openFiles);
+      } else {
+        stashIdeWorkspaceView(previous.workspaceKey, {
+          openFiles,
+          activeFile,
+          dirty,
+        });
+        const restored = restoreIdeWorkspaceView(nextKey);
+        openFiles = restored.openFiles;
+        activeFile = restored.activeFile;
+        dirty = restored.dirty;
+      }
+    }
+
+    for (const path of openFiles) {
+      if (!(dirty[path] ?? false)) dropIdeBuffer(nextKey, path);
+    }
+
+    set({
+      workspaceTree: null,
+      workspaceSource: source,
+      workspaceSpaceId: spaceId,
+      workspaceComputeMode: computeMode,
+      workspaceConnected: connected,
+      workspaceKey: nextKey,
+      workspaceRevision: previous.workspaceRevision + 1,
+      ideOpenFiles: openFiles,
+      ideActiveFile: activeFile,
+      ideDirty: dirty,
+    });
+
+    if (
+      identityChanged &&
+      !firstSourceAnnouncement &&
+      previous.ideOpenFiles.some((path) => previous.ideDirty[path] ?? false)
+    ) {
+      get().pushToast(
+        "Workspace changed — unsaved edits remain with the workspace where you made them.",
+        "warning",
+      );
+    }
+    if (refreshTree && connected !== false) {
+      void get().refreshWorkspaceTree();
+    }
   }
 
   function activeTab(): TabInfo | null {
@@ -838,6 +974,7 @@ export const useSumaStore = create<SumaState>()((set, get) => {
     ports: [],
     egressBySpace: {},
     bypassSuggestions: [],
+    checkoutBypassNotices: [],
     audit: [],
     auditLoaded: false,
 
@@ -847,6 +984,12 @@ export const useSumaStore = create<SumaState>()((set, get) => {
     ideExplorerWidth: initialIdeLayout.explorerWidth,
     ideTerminalHeight: initialIdeLayout.terminalHeight,
     workspaceTree: null,
+    workspaceSource: null,
+    workspaceSpaceId: null,
+    workspaceComputeMode: null,
+    workspaceConnected: null,
+    workspaceKey: ideWorkspaceKey(null, null, null),
+    workspaceRevision: 0,
     ideOpenFiles: [],
     ideActiveFile: null,
     ideDirty: {},
@@ -943,7 +1086,19 @@ export const useSumaStore = create<SumaState>()((set, get) => {
           set({ signInQueue }),
         ),
         window.suma.on("downloads:updated", (downloads) => set({ downloads })),
-        window.suma.on("auth:changed", (status) => setAuthStatus(status)),
+        window.suma.on("auth:changed", (status) => {
+          const previousMode = get().auth.computeMode;
+          setAuthStatus(status);
+          if (status.computeMode !== previousMode) {
+            const workspace = get();
+            transitionIdeWorkspace(
+              workspace.workspaceSource,
+              workspace.workspaceSpaceId,
+              workspace.workspaceConnected,
+              false,
+            );
+          }
+        }),
         window.suma.on("devices:updated", (devices) => set({ devices })),
         window.suma.on("workspaceSync:changed", (workspaceSync) =>
           set({ workspaceSync }),
@@ -966,6 +1121,22 @@ export const useSumaStore = create<SumaState>()((set, get) => {
           ),
         ),
         window.suma.on("machine:changed", (machine) => set({ machine })),
+        // The filesystem behind the IDE moved (sim⇄VM swap, reconnect, or
+        // active-space change). Tabs and dirty text belong to that exact
+        // identity, never whichever machine happens to be connected next.
+        window.suma.on(
+          "workspace:changed",
+          ({ source, connected, activeSpaceId }) =>
+            transitionIdeWorkspace(source, activeSpaceId, connected, true),
+        ),
+        // Files changed on the SAME machine (shell write, fetch landing,
+        // editor save) — refetch the tree, throttled: signals burst, the
+        // refetch is idempotent, and the trailing call keeps the last one.
+        // Gated on "the IDE page has been visited" (tree already fetched);
+        // refreshWorkspaceTree's workspaceRevision guard drops stale races.
+        window.suma.on("workspace:filesChanged", () => {
+          if (get().workspaceTree !== null) throttledTreeRefresh();
+        }),
         // terminal:data streams straight to the TerminalPanel — the byte
         // stream never routes through the store.
         window.suma.on("terminal:updated", (terminals) => set({ terminals })),
@@ -1049,6 +1220,17 @@ export const useSumaStore = create<SumaState>()((set, get) => {
                   ),
               ),
               suggestion,
+            ],
+          })),
+        ),
+        window.suma.on("egress:checkoutBypassed", (notice) =>
+          set((s) => ({
+            checkoutBypassNotices: [
+              ...s.checkoutBypassNotices.filter(
+                (n) =>
+                  !(n.spaceId === notice.spaceId && n.host === notice.host),
+              ),
+              notice,
             ],
           })),
         ),
@@ -1251,7 +1433,8 @@ export const useSumaStore = create<SumaState>()((set, get) => {
       set({ nostrSettings: info });
       // Clearing the relay clears the roster; a set relay's fetch results
       // arrive via nostr:buzzAgentsChanged.
-      if (info.buzzRelayUrl === null) set({ buzzAgents: { ...IDLE_BUZZ_STATE } });
+      if (info.buzzRelayUrl === null)
+        set({ buzzAgents: { ...IDLE_BUZZ_STATE } });
       return true;
     },
 
@@ -1609,6 +1792,12 @@ export const useSumaStore = create<SumaState>()((set, get) => {
       if (!resizing) saveSplitRatios(get().splitRatios);
     },
 
+    railExpanded: false,
+    setRailExpanded: (expanded) => {
+      if (get().railExpanded === expanded) return;
+      set({ railExpanded: expanded });
+    },
+
     tabDragging: false,
     setTabDragging: (dragging) => {
       if (get().tabDragging === dragging) return;
@@ -1633,6 +1822,12 @@ export const useSumaStore = create<SumaState>()((set, get) => {
         if (thumbs === undefined) return;
         for (const thumb of thumbs) mergeThumbnail(thumb);
       });
+    },
+
+    tabPreviewMounted: false,
+    setTabPreviewMounted: (mounted) => {
+      if (get().tabPreviewMounted === mounted) return;
+      set({ tabPreviewMounted: mounted });
     },
 
     tabPreviewHoverId: null,
@@ -1667,12 +1862,13 @@ export const useSumaStore = create<SumaState>()((set, get) => {
       set({ onboardingDismissed: false, overlay: "none", originPopover: null }),
     dismissOnboarding: () => set({ onboardingDismissed: true }),
 
-    signup: async (email, displayName, inviteCode) => {
+    signup: async (email, displayName, inviteCode, computeMode) => {
       const args: SumaInvokeMap["auth:signup"]["args"] = { email };
       if (displayName !== undefined && displayName.length > 0)
         args.displayName = displayName;
       if (inviteCode !== undefined && inviteCode.length > 0)
         args.inviteCode = inviteCode;
+      if (computeMode !== undefined) args.computeMode = computeMode;
       const status = await call("auth:signup", args);
       if (status !== undefined) setAuthStatus(status);
       return status;
@@ -1905,14 +2101,67 @@ export const useSumaStore = create<SumaState>()((set, get) => {
     },
 
     refreshWorkspaceTree: async () => {
+      // The first terminal visit can precede main's initial source event, but
+      // the hydrated space roster already knows which space is active.
+      const before = get();
+      const spaceId = activeSpaceId();
+      const expectedKey = ideWorkspaceKey(
+        before.workspaceSource,
+        spaceId,
+        before.auth.computeMode,
+      );
+      if (before.workspaceKey !== expectedKey) {
+        transitionIdeWorkspace(
+          before.workspaceSource,
+          spaceId,
+          before.workspaceConnected,
+          false,
+        );
+      }
+      const request = get();
       const workspaceTree = await call("workspace:tree", undefined);
-      if (workspaceTree !== undefined) set({ workspaceTree });
+      const current = get();
+      if (
+        workspaceTree !== undefined &&
+        current.workspaceKey === request.workspaceKey &&
+        current.workspaceRevision === request.workspaceRevision
+      ) {
+        set({ workspaceTree });
+      }
     },
 
     readIdeFile: (path) => call("workspace:readFile", { path }),
 
     saveIdeFile: async (path, contents) => {
       const result = await call("workspace:writeFile", { path, contents });
+      // A save that created a new file should appear in the tree without
+      // waiting on the machine's watcher cadence.
+      if (result !== undefined) throttledTreeRefresh();
+      return result !== undefined;
+    },
+
+    createIdeFile: async (path) => {
+      // vfs.write overwrites unconditionally, and the last-known tree is the
+      // only exists-check available over IPC. The explorer's inline naming
+      // already rejects in-tree collisions; this guards other callers and
+      // watcher-lag races.
+      if (get().workspaceTree?.paths.includes(path) ?? false) {
+        get().pushToast(`${path} already exists`, "error");
+        return false;
+      }
+      const result = await call("workspace:writeFile", { path, contents: "" });
+      if (result !== undefined) {
+        throttledTreeRefresh();
+        get().openIdeFile(path);
+      }
+      return result !== undefined;
+    },
+
+    createIdeFolder: async (path) => {
+      // mkdir is recursive and idempotent on every vfs backend, so a race
+      // with an existing directory is harmless rather than destructive.
+      const result = await call("workspace:mkdir", { path });
+      if (result !== undefined) throttledTreeRefresh();
       return result !== undefined;
     },
 
@@ -1930,7 +2179,7 @@ export const useSumaStore = create<SumaState>()((set, get) => {
     },
 
     closeIdeFile: (path) => {
-      dropIdeBuffer(path);
+      dropIdeBuffer(get().workspaceKey, path);
       set((s) => {
         const remaining = s.ideOpenFiles.filter((p) => p !== path);
         const { [path]: _dropped, ...dirty } = s.ideDirty;
@@ -1940,7 +2189,11 @@ export const useSumaStore = create<SumaState>()((set, get) => {
           const index = s.ideOpenFiles.indexOf(path);
           active = remaining[Math.min(index, remaining.length - 1)] ?? null;
         }
-        return { ideOpenFiles: remaining, ideActiveFile: active, ideDirty: dirty };
+        return {
+          ideOpenFiles: remaining,
+          ideActiveFile: active,
+          ideDirty: dirty,
+        };
       });
     },
 
@@ -2015,6 +2268,13 @@ export const useSumaStore = create<SumaState>()((set, get) => {
       set((s) => ({
         bypassSuggestions: s.bypassSuggestions.filter(
           (b) => !(b.spaceId === spaceId && b.host === host),
+        ),
+      })),
+
+    dismissCheckoutBypassNotice: (spaceId, host) =>
+      set((s) => ({
+        checkoutBypassNotices: s.checkoutBypassNotices.filter(
+          (n) => !(n.spaceId === spaceId && n.host === host),
         ),
       })),
 

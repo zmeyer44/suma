@@ -36,7 +36,10 @@ import {
   type ChatSettingsPatch,
   type ChatToolGroupId,
 } from "../shared/chat";
-import type { VoiceSettingsPatch } from "../shared/voice";
+import {
+  isVoiceTtsProviderId,
+  type VoiceSettingsPatch,
+} from "../shared/voice";
 import type { AuditService } from "./audit-service";
 import type { SpeakRequest, TtsService } from "./audio/tts-service";
 import type { ChatRunEmitter, ChatService } from "./chat/chat-service";
@@ -92,7 +95,7 @@ export interface IpcDeps {
   tts: TtsService;
   /** The assistant's agent loop — model calls and browser tools in main. */
   chat: ChatService;
-  /** The voice assistant — wake word + Gemini Live session in main. */
+  /** The voice assistant — wake word + the AI SDK agent session in main. */
   voice: VoiceService;
   /** App self-updates — app-level singleton, outlives sign-out (§8.2). */
   updates: UpdateService;
@@ -102,6 +105,10 @@ export interface IpcDeps {
   ports: PortsService;
   /** The IDE's filesystem on suma://terminal — local paths, root-guarded. */
   workspaceFs: WorkspaceFsService;
+  /** A workspace IPC mutation succeeded — the explorer should refresh. The
+   *  sim's fs.watch usually fires too; this covers remote links (the VM's
+   *  2s digest scan) with an instant signal for the user's OWN edit. */
+  notifyWorkspaceMutated?: () => void;
   egress: EgressService;
   audit: AuditService;
   /* ---- Favorite sites (shared/favorites.ts) ---- */
@@ -748,10 +755,16 @@ export function registerIpc(deps: IpcDeps): void {
     }
     if (typeof a["wakeWord"] === "string") patch.wakeWord = a["wakeWord"];
     if (typeof a["model"] === "string") patch.model = a["model"];
+    if (typeof a["sttModel"] === "string") patch.sttModel = a["sttModel"];
+    if (typeof a["narratorModel"] === "string") {
+      patch.narratorModel = a["narratorModel"];
+    }
+    if (isVoiceTtsProviderId(a["ttsProvider"])) {
+      patch.ttsProvider = a["ttsProvider"];
+    }
     if (typeof a["voice"] === "string") patch.voice = a["voice"];
-    // The key crosses IPC exactly once, inward; voice:settings reports only
-    // whether one exists (the tts:updateSettings contract).
-    if (typeof a["apiKey"] === "string") patch.apiKey = a["apiKey"];
+    // No credentials cross here anymore: the model rides the chat sidebar's
+    // key chain, and the TTS key is tts:updateSettings' business.
     return deps.voice.updateSettings(patch);
   });
 
@@ -929,6 +942,7 @@ export function registerIpc(deps: IpcDeps): void {
       displayName?: string;
       controlUrl?: string;
       inviteCode?: string;
+      computeMode?: "cloud" | "local";
     } = {
       email: requireString(a["email"], "email"),
     };
@@ -938,6 +952,8 @@ export function registerIpc(deps: IpcDeps): void {
       signup.controlUrl = a["controlUrl"];
     if (typeof a["inviteCode"] === "string")
       signup.inviteCode = a["inviteCode"];
+    if (a["computeMode"] === "cloud" || a["computeMode"] === "local")
+      signup.computeMode = a["computeMode"];
     return deps.auth.signup(signup);
   });
 
@@ -1114,13 +1130,46 @@ export function registerIpc(deps: IpcDeps): void {
     );
   });
 
-  handle("workspace:writeFile", (args) => {
+  handle("workspace:writeFile", async (args) => {
     const a = requireRecord(args, "workspace:writeFile");
     const contents = a["contents"];
     // Not requireString: an emptied-out file is a legitimate save.
     if (typeof contents !== "string")
       throw new Error("contents must be a string");
-    return deps.workspaceFs.write(requireString(a["path"], "path"), contents);
+    const result = await deps.workspaceFs.write(
+      requireString(a["path"], "path"),
+      contents,
+    );
+    deps.notifyWorkspaceMutated?.();
+    return result;
+  });
+
+  handle("workspace:mkdir", async (args) => {
+    const result = await deps.workspaceFs.mkdir(
+      requireString(requireRecord(args, "workspace:mkdir")["path"], "path"),
+    );
+    deps.notifyWorkspaceMutated?.();
+    return result;
+  });
+
+  handle("workspace:delete", async (args) => {
+    const a = requireRecord(args, "workspace:delete");
+    const result = await deps.workspaceFs.remove(
+      requireString(a["path"], "path"),
+      a["recursive"] === true,
+    );
+    deps.notifyWorkspaceMutated?.();
+    return result;
+  });
+
+  handle("workspace:rename", async (args) => {
+    const a = requireRecord(args, "workspace:rename");
+    const result = await deps.workspaceFs.rename(
+      requireString(a["from"], "from"),
+      requireString(a["to"], "to"),
+    );
+    deps.notifyWorkspaceMutated?.();
+    return result;
   });
 
   /* ----------------------- identity egress (§8.4) ------------------------ */

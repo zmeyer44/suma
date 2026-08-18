@@ -7,13 +7,18 @@ import { CredentialFill } from "./components/CredentialFill";
 import { DownloadsPanel } from "./components/DownloadsPanel";
 import { GlanceOverlay } from "./components/GlanceOverlay";
 import { ImagePreviewModal } from "./components/ImagePreviewModal";
-import { BypassSuggestions, EgressBanner } from "./components/EgressBanner";
+import {
+  BypassSuggestions,
+  CheckoutBypassNotices,
+  EgressBanner,
+} from "./components/EgressBanner";
 import { MigrationWizard } from "./components/MigrationWizard";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { NostrRequestPanel } from "./components/NostrRequestPanel";
 import { OriginControls } from "./components/OriginControls";
 import { PasskeyPicker } from "./components/PasskeyPicker";
 import { SavesPanel } from "./components/SavesPanel";
+import { SideRail } from "./components/SideRail";
 import { DegradedBanner } from "./components/StatusPills";
 import { TabPreviewStrip } from "./components/TabPreviewStrip";
 import { TabStrip } from "./components/TabStrip";
@@ -49,9 +54,16 @@ export function App() {
   // paneResizing rides the same mechanism: a divider drag needs the chrome on
   // top so pointer moves crossing the panes aren't swallowed by the sites.
   // tabDragging is the same story for a tab dragged out of the strip.
+  // railExpanded too: the hovered tool rail slides over the content hole
+  // instead of pushing it, so its overhang is invisible until chrome rises.
+  // tabPreviewMounted is the same story for the thumbnail shelf: it overlays
+  // the page, which never resizes under it; dismissal unmounts the shelf and
+  // lowers the chrome in the same frame.
   const modalOpen = useSumaStore(
     (s) =>
       s.overlay !== "none" ||
+      s.railExpanded ||
+      s.tabPreviewMounted ||
       s.originPopover !== null ||
       s.statusPopoverOpen ||
       s.passkeyRequest !== null ||
@@ -135,9 +147,10 @@ export function App() {
   return (
     <div className="flex h-full flex-col bg-transparent text-text">
       <TabStrip />
-      {/* The hover preview shelf: a layout sibling like the banners below, so
-          opening it shrinks the content hole and the page slides down under
-          it (ContentPanes re-reports the bounds; main tracks the views). */}
+      {/* The hover preview shelf: an OVERLAY fixed under the strip, not a
+          layout sibling — the content hole (and the tab views main glues to
+          it) never moves. While any of it shows, tabPreviewMounted raises
+          the chrome above the tab views (modalOpen above). */}
       <TabPreviewStrip />
       {/* Playback controls are NOT here: they live in the floating overlay
           window (AudioPlayer.tsx via OverlayStack), which stays visible above
@@ -155,6 +168,10 @@ export function App() {
         <SavesPanel />
         <VideosPanel />
         <NostrRequestPanel />
+        {/* Last in the row: the rail owns the window's right edge, and DOM
+            order is what lets its expanded panel paint over the panels
+            beside it without a z-index arms race. */}
+        <SideRail />
       </div>
 
       <OriginControls />
@@ -182,6 +199,7 @@ export function App() {
           clicks from the page. */}
       <div className="pointer-events-none fixed bottom-3 left-3 z-50 flex w-[320px] flex-col gap-2">
         <BypassSuggestions />
+        <CheckoutBypassNotices />
         {/* Last in the column so the toast pile grows up from the corner.
             Its viewport collapses to zero height when empty. */}
         <Toaster />

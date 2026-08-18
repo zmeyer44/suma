@@ -14,13 +14,37 @@
  * `cloudFetchEligibility` cleared — public or presigned, no cookie, no
  * Authorization header, no client certificate, no userinfo. This service never
  * reads a cookie jar and never forwards a request header.
+ *
+ * Cancellation: `cancelTransfer` on an active agent fetch sends `fetch.cancel`
+ * to the computer AND moves the durable transfer to cancelled. A fetch that
+ * happens to COMPLETE just as it is cancelled leaves its file on the
+ * computer's disk but deliberately does NOT mirror it into Files — the
+ * `fetch.done` for an already-cancelled row is dropped. That is the accepted
+ * cost of a race with a terminal state; the artifact is still visible on the
+ * machine itself over vfs.
  */
 
 import { randomUUID } from "node:crypto";
 import { stat as statFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { clearInterval, setInterval } from "node:timers";
-import { CLOUD_ROOT, normalizeVfsPath, type FileEntry, type Transfer } from "@suma/protocol";
+import {
+  clearInterval,
+  clearTimeout,
+  setInterval,
+  setTimeout,
+} from "node:timers";
+import {
+  CLOUD_ROOT,
+  FETCH_CANCELLED_ERROR,
+  fromBase64,
+  normalizeVfsPath,
+  type AgentCtlRequest,
+  type AgentCtlResponse,
+  type FileEntry,
+  type Transfer,
+  type VfsRequest,
+  type VfsResponse,
+} from "@suma/protocol";
 import {
   assembleFromChunks,
   buildManifest,
@@ -41,7 +65,13 @@ import type {
 } from "../../shared/ipc";
 import { FilesClient, FilesUnavailableError } from "./files-client";
 import { contentTypeFor } from "./mime";
-import { basename, dirname, listDirectory, normalizeDirPath, presentQuota } from "./tree";
+import {
+  basename,
+  dirname,
+  listDirectory,
+  normalizeDirPath,
+  presentQuota,
+} from "./tree";
 
 /**
  * Uploads arrive as bytes from the Files page and are chunked in memory, so a
@@ -66,10 +96,53 @@ const V1_END_TO_END_ENCRYPTED = false;
 const POLL_MS = 4_000;
 const IDLE_REFRESH_TICKS = 8;
 
-const ACTIVE_STATES: ReadonlySet<Transfer["state"]> = new Set(["queued", "fetching", "storing"]);
+/** How long to wait for `fetch.started` before treating the agent as too
+ *  old to run background fetches (it would answer fetch.done-first, later). */
+const FETCH_START_TIMEOUT_MS = 10_000;
+
+/** Progress events arrive per 64 KiB; the renderer needs far less. */
+const AGENT_PROGRESS_PUSH_MS = 500;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`no answer within ${ms} ms`)),
+      ms,
+    );
+    timer.unref?.();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      },
+    );
+  });
+}
+
+const ACTIVE_STATES: ReadonlySet<Transfer["state"]> = new Set([
+  "queued",
+  "fetching",
+  "storing",
+]);
 
 export interface FilesDeps {
   client: FilesClient;
+  /**
+   * The machine behind the terminal/IDE — where an eligible public download
+   * actually fetches (§8.6, via `fetch.public`). The VM in cloud mode, the
+   * SimAgent/home Mac in local mode. Progress and completion arrive as
+   * unsolicited ctl events, correlated by fetchId.
+   */
+  agent: {
+    ctl: (request: AgentCtlRequest) => Promise<AgentCtlResponse | null>;
+    onCtlEvent: (listener: (event: AgentCtlResponse) => void) => () => void;
+    connected: () => boolean;
+    vfs: (request: VfsRequest) => Promise<VfsResponse>;
+  };
   /** Push to the chrome renderer AND the suma://files page. */
   emitTransfers: (update: TransfersUpdate) => void;
   emitChanged: (payload: { path: string }) => void;
@@ -96,11 +169,37 @@ export class FilesService {
   /** Transfers that never reached the control plane — kept so a failed cloud
    *  fetch is visible instead of vanishing after the local download stopped. */
   private readonly localFailures = new Map<string, Transfer>();
+  /** Agent-side fetches (`fetch.public`), keyed by the durable control-plane
+   * transfer id, which is also the fetchId on every mux event. */
+  private readonly agentTransfers = new Map<string, Transfer>();
+  /** Serialize reports/storage per transfer so completion cannot overtake a
+   * slow progress request on the control plane. */
+  private readonly agentTransferTails = new Map<string, Promise<void>>();
+  private readonly lastAgentProgressPushMs = new Map<string, number>();
+  /** Agent fetches we asked to cancel — the eventual fetch.failed(sentinel)
+   *  for these settles as "cancelled", not "failed". */
+  private readonly pendingCancels = new Set<string>();
+  /** Placeholder ids shown while createTransfer is still in flight. They do
+   *  not exist on the agent or control plane yet, so cancellation must be
+   *  carried across to the durable id rather than sent using this id. */
+  private readonly pendingTransferIds = new Set<string>();
+  /** Durable cancellations that have not yet been confirmed by the control
+   *  plane. A failed request remains here and is retried by refreshTransfers. */
+  private readonly durableCancels = new Set<string>();
+  private readonly durableCancelTasks = new Map<string, Promise<void>>();
+  /** Abort storage uploads after fetch.done. fetch.cancel cannot help once the
+   *  agent has already published its terminal event. */
+  private readonly agentStoreCancels = new Map<string, AbortController>();
   private declined: CloudFetchDeclined | null = null;
   private timer: NodeJS.Timeout | null = null;
   private tick = 0;
+  private readonly unsubAgentEvents: () => void;
 
-  constructor(private readonly deps: FilesDeps) {}
+  constructor(private readonly deps: FilesDeps) {
+    this.unsubAgentEvents = deps.agent.onCtlEvent((event) => {
+      this.onAgentEvent(event);
+    });
+  }
 
   /* -------------------------------- browse ------------------------------- */
 
@@ -163,9 +262,13 @@ export class FilesService {
       let bytes = fetched.get(chunk.hash);
       if (bytes === undefined) {
         const url = urls.get(chunk.hash);
-        if (url === undefined) throw new Error(`no download URL for chunk ${chunk.hash}`);
+        if (url === undefined)
+          throw new Error(`no download URL for chunk ${chunk.hash}`);
         const res = await fetchImpl(url);
-        if (!res.ok) throw new Error(`chunk ${chunk.hash} download failed (${String(res.status)})`);
+        if (!res.ok)
+          throw new Error(
+            `chunk ${chunk.hash} download failed (${String(res.status)})`,
+          );
         bytes = new Uint8Array(await res.arrayBuffer());
         if (hashChunk(bytes) !== chunk.hash) {
           throw new Error(`chunk ${chunk.hash} failed its integrity check`);
@@ -187,7 +290,8 @@ export class FilesService {
     const identity = this.deps.identity();
     const names = new Map<string, string>();
     try {
-      for (const device of await this.deps.listDevices()) names.set(device.id, device.name);
+      for (const device of await this.deps.listDevices())
+        names.set(device.id, device.name);
     } catch {
       // Names are a courtesy. A raw device id in one row beats failing the
       // whole page because the control plane is unreachable.
@@ -228,7 +332,8 @@ export class FilesService {
     uploadId?: string;
   }): Promise<FileUploadResult> {
     const destPath = normalizeVfsPath(args.path);
-    if (destPath === null || destPath === "/") throw new Error(`invalid destination "${args.path}"`);
+    if (destPath === null || destPath === "/")
+      throw new Error(`invalid destination "${args.path}"`);
     const totalBytes = args.data.byteLength;
     if (totalBytes > MAX_UPLOAD_BYTES) {
       throw new Error(
@@ -254,10 +359,15 @@ export class FilesService {
         0,
       );
       report("uploading", sentBytes, null);
-      await this.uploadChunks(manifest, args.data, created.missing, (stored) => {
-        sentBytes += stored;
-        report("uploading", sentBytes, null);
-      });
+      await this.uploadChunks(
+        manifest,
+        args.data,
+        created.missing,
+        (stored) => {
+          sentBytes += stored;
+          report("uploading", sentBytes, null);
+        },
+      );
       // Completion is keyed by the id the manifest write just returned: the
       // control plane confirms chunk bytes per FILE, not per path.
       const file = await this.deps.client.completeUpload(created.file.id);
@@ -289,7 +399,8 @@ export class FilesService {
   async downloadBytes(filePath: string): Promise<Uint8Array> {
     const normalized = this.requirePath(filePath);
     const manifest = await this.deps.client.manifest(normalized);
-    if (manifest === null) throw new Error(`${normalized} is not in your cloud files`);
+    if (manifest === null)
+      throw new Error(`${normalized} is not in your cloud files`);
     const hashes = [...new Set(manifest.chunks.map((chunk) => chunk.hash))];
     const urls = await this.deps.client.presignChunkDownloads(hashes);
     const fetchImpl = this.deps.fetchImpl ?? fetch;
@@ -297,15 +408,22 @@ export class FilesService {
     const chunks = new Map<string, Uint8Array>();
     for (const hash of hashes) {
       const url = urls.get(hash);
-      if (url === undefined) throw new Error(`no download URL for chunk ${hash}`);
+      if (url === undefined)
+        throw new Error(`no download URL for chunk ${hash}`);
       const res = await fetchImpl(url);
-      if (!res.ok) throw new Error(`chunk ${hash} download failed (${String(res.status)})`);
+      if (!res.ok)
+        throw new Error(
+          `chunk ${hash} download failed (${String(res.status)})`,
+        );
       const bytes = new Uint8Array(await res.arrayBuffer());
-      if (hashChunk(bytes) !== hash) throw new Error(`chunk ${hash} failed its integrity check`);
+      if (hashChunk(bytes) !== hash)
+        throw new Error(`chunk ${hash} failed its integrity check`);
       chunks.set(hash, bytes);
     }
 
-    return assembleFromChunks(manifest as ChunkManifest, (hash) => chunks.get(hash));
+    return assembleFromChunks(manifest as ChunkManifest, (hash) =>
+      chunks.get(hash),
+    );
   }
 
   /** Hydrate a cloud file into this Mac's Downloads folder. */
@@ -328,9 +446,23 @@ export class FilesService {
   /* ------------------------------ transfers ------------------------------ */
 
   snapshot(): TransfersUpdate {
-    const merged = [...this.localFailures.values(), ...this.transfers].sort(
-      (a, b) => b.startedAtMs - a.startedAtMs,
-    );
+    const agentRows = [...this.agentTransfers.values()].map((transfer) => ({
+      ...transfer,
+      // Agent fetches are cancellable while active (fetch.cancel), except in
+      // the brief window where a cancel is already in flight.
+      cancellable:
+        !ACTIVE_STATES.has(transfer.state) ||
+        !this.pendingCancels.has(transfer.id),
+    }));
+    const localIds = new Set([
+      ...agentRows.map((transfer) => transfer.id),
+      ...this.localFailures.keys(),
+    ]);
+    const merged = [
+      ...agentRows,
+      ...this.localFailures.values(),
+      ...this.transfers.filter((transfer) => !localIds.has(transfer.id)),
+    ].sort((a, b) => b.startedAtMs - a.startedAtMs);
     return { transfers: merged, declined: this.declined };
   }
 
@@ -340,7 +472,43 @@ export class FilesService {
     try {
       this.transfers = await this.deps.client.listTransfers();
       // A control-plane transfer supersedes the local failure it replaced.
-      for (const transfer of this.transfers) this.localFailures.delete(transfer.id);
+      for (const transfer of this.transfers)
+        this.localFailures.delete(transfer.id);
+      // Another device may have cancelled a fetch WE are running: if its
+      // durable row came back cancelled while our agent row is still active,
+      // stop the fetch on the computer and settle locally — otherwise the
+      // agent keeps downloading and the eventual fetch.done is orphaned.
+      for (const transfer of this.transfers) {
+        const local = this.agentTransfers.get(transfer.id);
+        if (transfer.state === "cancelled") {
+          this.durableCancels.delete(transfer.id);
+          if (
+            local !== undefined &&
+            ACTIVE_STATES.has(local.state) &&
+            !this.pendingCancels.has(transfer.id)
+          ) {
+            this.pendingCancels.add(transfer.id);
+            this.updateAgentRow(transfer.id, { state: "cancelled" });
+            this.abortAgentWork(transfer.id);
+            this.enqueueAgentTask(transfer.id, async () => {
+              await this.deps.agent
+                .ctl({ t: "fetch.cancel", fetchId: transfer.id })
+                .catch(() => undefined);
+            });
+          }
+          continue;
+        }
+        // A previous /cancel attempt may have failed while offline. Keep the
+        // durable intent and retry it whenever a refresh confirms the row is
+        // still active; do not leave a fetching row stranded after restart.
+        if (this.durableCancels.has(transfer.id)) {
+          if (ACTIVE_STATES.has(transfer.state)) {
+            void this.requestDurableCancel(transfer.id).catch(() => undefined);
+          } else {
+            this.durableCancels.delete(transfer.id);
+          }
+        }
+      }
     } catch (err) {
       if (!(err instanceof FilesUnavailableError)) throw err;
       // No Files API on this control plane — keep whatever we know locally.
@@ -354,22 +522,59 @@ export class FilesService {
       this.push();
       return;
     }
+    const agentRow = this.agentTransfers.get(id);
+    if (agentRow !== undefined) {
+      if (ACTIVE_STATES.has(agentRow.state)) {
+        // The visible queued row can predate its durable control-plane id.
+        // Record only local intent here; startCloudFetch carries it to the
+        // real id when createTransfer returns.
+        if (this.pendingTransferIds.has(id)) {
+          this.pendingCancels.add(id);
+          this.updateAgentRow(id, { state: "cancelled" });
+          return;
+        }
+        // Active: cancel the fetch ON the computer, and move the durable row
+        // to cancelled via the /cancel route (NOT reportTransfer — its
+        // transition gates aren't built for it). The fetch.failed(sentinel)
+        // that follows settles the local row as "cancelled".
+        this.pendingCancels.add(id);
+        this.updateAgentRow(id, { state: "cancelled" });
+        this.abortAgentWork(id);
+        try {
+          await this.deps.agent.ctl({ t: "fetch.cancel", fetchId: id });
+        } catch {
+          // Best effort — the agent may have already finished; the control
+          // row still moves to cancelled below.
+        }
+        this.durableCancels.add(id);
+        await this.requestDurableCancel(id);
+        return;
+      }
+      // Settled: dismiss the local row.
+      await this.agentTransferTails.get(id)?.catch(() => undefined);
+      this.agentTransfers.delete(id);
+      this.lastAgentProgressPushMs.delete(id);
+      this.pendingCancels.delete(id);
+      this.push();
+      return;
+    }
     await this.deps.client.cancelTransfer(id);
     await this.refreshTransfers();
   }
 
-  /** True when a cloud fetch could be created right now (§8.6 routing input). */
+  /** True when a cloud fetch could be created right now (§8.6 routing input)
+   *  — the AGENT is what fetches now, so its link is the availability. */
   cloudAvailable(): boolean {
-    return this.deps.client.configured();
+    return this.deps.agent.connected() && this.deps.client.configured();
   }
 
   /**
-   * Hand an ELIGIBLE download to the cloud fetcher.
+   * Hand an ELIGIBLE download to the account's computer via `fetch.public`.
    *
-   * Returns true only when the control plane has accepted the transfer — the
-   * caller keeps its local download running until then, and abandons it only
-   * on a true. A failure is still visible either way: it becomes a failed
-   * transfer rather than a silent no-op.
+   * Returns true only when the agent answered `fetch.started` — the caller
+   * keeps its local download running until then, and abandons it only on a
+   * true. A failure is still visible either way: it becomes a failed
+   * transfer row rather than a silent no-op.
    */
   async startCloudFetch(args: {
     url: string;
@@ -378,29 +583,406 @@ export class FilesService {
     totalBytes: number;
   }): Promise<boolean> {
     const now = (this.deps.now ?? Date.now)();
+    const pendingId = `agent-${randomUUID()}`;
+    const row: Transfer = {
+      id: pendingId,
+      url: args.url,
+      destPath: args.destPath,
+      state: "queued",
+      receivedBytes: 0,
+      totalBytes: Math.max(0, args.totalBytes),
+      originDeviceId: this.deps.deviceId,
+      error: null,
+      startedAtMs: now,
+      updatedAtMs: now,
+    };
+    this.agentTransfers.set(pendingId, row);
+    this.pendingTransferIds.add(pendingId);
+    this.push();
+
+    let transfer: Transfer;
     try {
-      const transfer = await this.deps.client.createTransfer(args.url, args.destPath);
-      this.transfers = [transfer, ...this.transfers.filter((t) => t.id !== transfer.id)];
-      this.push();
-      await this.refreshTransfers();
-      return true;
+      transfer = await this.deps.client.createTransfer(
+        args.url,
+        args.destPath,
+        args.totalBytes > 0 ? args.totalBytes : undefined,
+      );
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const id = `local-${randomUUID()}`;
-      this.localFailures.set(id, {
-        id,
-        url: args.url,
-        destPath: args.destPath,
-        state: "failed",
-        receivedBytes: 0,
-        totalBytes: Math.max(0, args.totalBytes),
-        originDeviceId: this.deps.deviceId,
-        error: `Couldn't start the cloud download — ${message}`.slice(0, 500),
-        startedAtMs: now,
-        updatedAtMs: now,
-      });
+      const cancelled = this.isAgentCancelled(pendingId);
+      this.pendingTransferIds.delete(pendingId);
+      this.pendingCancels.delete(pendingId);
+      this.agentTransfers.delete(pendingId);
+      if (cancelled) {
+        this.push();
+        return false;
+      }
+      row.state = "failed";
+      row.error = `Couldn't queue the fetch — ${
+        err instanceof Error ? err.message : String(err)
+      }`.slice(0, 500);
+      row.updatedAtMs = (this.deps.now ?? Date.now)();
+      this.localFailures.set(pendingId, row);
       this.push();
       return false;
+    }
+
+    const id = transfer.id;
+    const cancelledBeforeId = this.isAgentCancelled(pendingId);
+    this.pendingTransferIds.delete(pendingId);
+    this.pendingCancels.delete(pendingId);
+    this.agentTransfers.delete(pendingId);
+    this.agentTransfers.set(id, transfer);
+    if (cancelledBeforeId) {
+      this.pendingCancels.add(id);
+      this.updateAgentRow(id, { state: "cancelled" });
+      this.durableCancels.add(id);
+      await this.requestDurableCancel(id).catch(() => undefined);
+      this.pendingCancels.delete(id);
+      return false;
+    }
+    this.push();
+
+    const fail = async (message: string): Promise<false> => {
+      const current = this.agentTransfers.get(id);
+      try {
+        const updated = await this.deps.client.reportTransfer(id, {
+          state: "failed",
+          receivedBytes: current?.receivedBytes ?? 0,
+          error: `Couldn't start the fetch — ${message}`.slice(0, 500),
+        });
+        this.agentTransfers.set(id, updated);
+      } catch {
+        this.settleAgentRow(id, {
+          state: "failed",
+          error: `Couldn't start the fetch — ${message}`.slice(0, 500),
+        });
+      }
+      this.push();
+      return false;
+    };
+
+    try {
+      const updated = await this.deps.client.reportTransfer(id, {
+        state: "fetching",
+        receivedBytes: 0,
+      });
+      if (this.isAgentCancelled(id)) return false;
+      this.agentTransfers.set(id, updated);
+      this.push();
+    } catch (err) {
+      if (this.isAgentCancelled(id)) return false;
+      return fail(err instanceof Error ? err.message : String(err));
+    }
+
+    if (this.isAgentCancelled(id)) return false;
+
+    let response: AgentCtlResponse | null;
+    try {
+      // The timeout is the version-skew guard: an old agent runs the fetch
+      // INSIDE dispatch and answers fetch.done first, which would leave this
+      // promise waiting forever. Ten seconds without fetch.started ⇒ treat
+      // as unsupported and keep the local download.
+      response = await withTimeout(
+        this.deps.agent.ctl({
+          t: "fetch.public",
+          fetchId: id,
+          url: args.url,
+          destPath: args.destPath,
+        }),
+        FETCH_START_TIMEOUT_MS,
+      );
+    } catch (err) {
+      if (this.isAgentCancelled(id)) return false;
+      return fail(err instanceof Error ? err.message : String(err));
+    }
+    if (this.isAgentCancelled(id)) return false;
+    if (response === null) return fail("the agent gave no answer");
+    if (response.t === "error") return fail(response.message);
+    if (response.t !== "fetch.started")
+      return fail(`unexpected answer ${response.t}`);
+    if (response.fetchId !== id)
+      return fail("the agent returned the wrong fetch id");
+    return true;
+  }
+
+  /** Fold one unsolicited agent event into the matching durable transfer. */
+  private onAgentEvent(event: AgentCtlResponse): void {
+    if (
+      event.t !== "fetch.progress" &&
+      event.t !== "fetch.done" &&
+      event.t !== "fetch.failed"
+    ) {
+      return;
+    }
+    const id = event.fetchId;
+    const row = this.agentTransfers.get(id);
+    if (row === undefined) return;
+    // A cancelled fetch's terminal event: settle "cancelled", drop the
+    // matching /cancel report to the tail, and stop. (fetch.done after a
+    // cancel means the file exists on the computer but is deliberately NOT
+    // mirrored into Files — documented on the class.)
+    if (
+      this.pendingCancels.has(id) &&
+      (event.t === "fetch.failed" || event.t === "fetch.done")
+    ) {
+      this.pendingCancels.delete(id);
+      this.settleAgentRow(id, { state: "cancelled" });
+      return;
+    }
+    if (!ACTIVE_STATES.has(row.state)) return;
+    // A fetch.failed carrying the cancellation sentinel that raced ahead of
+    // our own cancelTransfer bookkeeping: still show it as cancelled.
+    if (event.t === "fetch.failed" && event.error === FETCH_CANCELLED_ERROR) {
+      this.pendingCancels.delete(id);
+      this.settleAgentRow(id, { state: "cancelled" });
+      this.durableCancels.add(id);
+      void this.requestDurableCancel(id).catch(() => undefined);
+      return;
+    }
+    if (
+      event.url !== row.url ||
+      (event.t !== "fetch.progress" && event.path !== row.destPath)
+    ) {
+      this.settleAgentRow(id, {
+        state: "failed",
+        error: "Agent fetch event did not match its transfer.",
+      });
+      this.enqueueAgentTask(id, async () => {
+        await this.reportAgentFailure(
+          id,
+          "Agent fetch event did not match its transfer.",
+        );
+      });
+      return;
+    }
+    if (event.t === "fetch.progress") {
+      row.receivedBytes = event.received;
+      row.totalBytes = event.total;
+      row.updatedAtMs = (this.deps.now ?? Date.now)();
+      const nowMs = (this.deps.now ?? Date.now)();
+      const lastPush = this.lastAgentProgressPushMs.get(id) ?? 0;
+      if (nowMs - lastPush >= AGENT_PROGRESS_PUSH_MS) {
+        this.lastAgentProgressPushMs.set(id, nowMs);
+        this.push();
+        this.enqueueAgentTask(id, async () => {
+          try {
+            const updated = await this.deps.client.reportTransfer(id, {
+              state: "fetching",
+              receivedBytes: event.received,
+            });
+            if (this.isAgentCancelled(id)) return;
+            this.agentTransfers.set(id, updated);
+            this.push();
+          } catch {
+            // A later heartbeat or terminal report retries the durable state.
+          }
+        });
+      }
+      return;
+    }
+    if (event.t === "fetch.done") {
+      this.updateAgentRow(id, { state: "storing", receivedBytes: event.bytes });
+      this.enqueueAgentTask(id, async () => this.storeAgentFetch(id, event));
+      return;
+    }
+    this.settleAgentRow(id, {
+      state: "failed",
+      error: event.error.slice(0, 500),
+    });
+    this.enqueueAgentTask(id, async () => {
+      await this.reportAgentFailure(id, event.error);
+    });
+  }
+
+  private updateAgentRow(id: string, patch: Partial<Transfer>): void {
+    const row = this.agentTransfers.get(id);
+    if (row === undefined) return;
+    Object.assign(row, patch, { updatedAtMs: (this.deps.now ?? Date.now)() });
+    this.push();
+  }
+
+  private settleAgentRow(id: string, patch: Partial<Transfer>): void {
+    this.updateAgentRow(id, patch);
+  }
+
+  private isAgentCancelled(id: string): boolean {
+    return (
+      this.pendingCancels.has(id) ||
+      this.agentTransfers.get(id)?.state === "cancelled"
+    );
+  }
+
+  private abortAgentWork(id: string): void {
+    this.agentStoreCancels.get(id)?.abort();
+  }
+
+  /** Attempt the durable /cancel exactly once at a time. Failures keep the
+   * intent in durableCancels; refreshTransfers will retry after connectivity
+   * returns instead of silently abandoning the control-plane row. */
+  private requestDurableCancel(id: string): Promise<void> {
+    const existing = this.durableCancelTasks.get(id);
+    if (existing !== undefined) return existing;
+    const task = this.deps.client
+      .cancelTransfer(id)
+      .then((updated) => {
+        if (updated !== null) {
+          const index = this.transfers.findIndex(
+            (transfer) => transfer.id === id,
+          );
+          if (index >= 0) this.transfers[index] = updated;
+        }
+        this.durableCancels.delete(id);
+      })
+      .finally(() => {
+        if (this.durableCancelTasks.get(id) === task) {
+          this.durableCancelTasks.delete(id);
+        }
+      });
+    this.durableCancelTasks.set(id, task);
+    return task;
+  }
+
+  private enqueueAgentTask(id: string, task: () => Promise<void>): void {
+    const previous = this.agentTransferTails.get(id) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(task);
+    this.agentTransferTails.set(id, next);
+    void next
+      .catch(() => undefined)
+      .then(() => {
+        if (this.agentTransferTails.get(id) === next)
+          this.agentTransferTails.delete(id);
+      });
+  }
+
+  /** Store a completed agent fetch in the canonical Files data plane before
+   * declaring its durable transfer complete. */
+  private async storeAgentFetch(
+    id: string,
+    event: Extract<AgentCtlResponse, { t: "fetch.done" }>,
+  ): Promise<void> {
+    const controller = new AbortController();
+    this.agentStoreCancels.set(id, controller);
+    try {
+      if (this.isAgentCancelled(id)) return;
+      const storing = await this.deps.client.reportTransfer(id, {
+        state: "storing",
+        receivedBytes: event.bytes,
+      });
+      if (this.isAgentCancelled(id)) return;
+      this.agentTransfers.set(id, storing);
+      this.push();
+
+      if (event.manifest === undefined) {
+        throw new Error("agent completed the fetch without a chunk manifest");
+      }
+      if (event.manifest.totalBytes !== event.bytes) {
+        throw new Error(
+          "agent manifest size does not match the fetched byte count",
+        );
+      }
+      const created = await this.deps.client.createFromManifest({
+        path: event.path,
+        manifest: event.manifest,
+        contentType: contentTypeFor(event.path),
+      });
+      if (this.isAgentCancelled(id)) return;
+      await this.uploadAgentChunks(
+        event.path,
+        event.manifest,
+        created.missing,
+        controller.signal,
+      );
+      if (this.isAgentCancelled(id)) return;
+      await this.deps.client.completeUpload(created.file.id);
+      if (this.isAgentCancelled(id)) return;
+      const completed = await this.deps.client.reportTransfer(id, {
+        state: "completed",
+        receivedBytes: event.bytes,
+      });
+      if (this.isAgentCancelled(id)) return;
+      this.agentTransfers.set(id, completed);
+      this.push();
+      this.deps.emitChanged({ path: dirname(event.path) });
+    } catch (err) {
+      if (this.isAgentCancelled(id) || controller.signal.aborted) return;
+      await this.reportAgentFailure(
+        id,
+        err instanceof Error ? err.message : String(err),
+      );
+    } finally {
+      if (this.agentStoreCancels.get(id) === controller) {
+        this.agentStoreCancels.delete(id);
+      }
+      if (this.agentTransfers.get(id)?.state === "cancelled") {
+        this.pendingCancels.delete(id);
+      }
+    }
+  }
+
+  private async reportAgentFailure(id: string, reason: string): Promise<void> {
+    const message = reason.slice(0, 500);
+    const row = this.agentTransfers.get(id);
+    try {
+      const failed = await this.deps.client.reportTransfer(id, {
+        state: "failed",
+        receivedBytes: row?.receivedBytes ?? 0,
+        error: message,
+      });
+      this.agentTransfers.set(id, failed);
+      this.push();
+    } catch {
+      this.settleAgentRow(id, { state: "failed", error: message });
+    }
+  }
+
+  /** Upload only the content-addressed chunks the control plane is missing.
+   * Each bounded chunk is read over vfs and verified before its presigned PUT. */
+  private async uploadAgentChunks(
+    filePath: string,
+    manifest: ChunkManifest,
+    missing: string[],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (missing.length === 0) return;
+    const urls = await this.deps.client.presignChunkUploads(missing);
+    const fetchImpl = this.deps.fetchImpl ?? fetch;
+    const cancelled = (): boolean => signal?.aborted === true;
+    for (const hash of missing) {
+      if (cancelled()) return;
+      const chunk = manifest.chunks.find(
+        (candidate) => candidate.hash === hash,
+      );
+      if (chunk === undefined)
+        throw new Error(`chunk ${hash} is not part of the fetched file`);
+      const response = await this.deps.agent.vfs({
+        t: "vfs.read",
+        path: filePath,
+        offset: chunk.offset,
+        length: chunk.length,
+      });
+      if (cancelled()) return;
+      if (response.t === "error") {
+        throw new Error(`reading fetched chunk ${hash}: ${response.message}`);
+      }
+      if (response.t !== "vfs.data" || response.offset !== chunk.offset) {
+        throw new Error(`agent returned the wrong data for chunk ${hash}`);
+      }
+      const bytes = fromBase64(response.dataB64);
+      if (bytes.byteLength !== chunk.length || hashChunk(bytes) !== hash) {
+        throw new Error(`fetched chunk ${hash} failed its integrity check`);
+      }
+      const url = urls.get(hash);
+      if (url === undefined) continue; // the store acquired it meanwhile
+      const copy = new Uint8Array(bytes.byteLength);
+      copy.set(bytes);
+      const uploaded = await fetchImpl(url, {
+        method: "PUT",
+        headers: { "content-type": "application/octet-stream" },
+        body: new Blob([copy]),
+        signal,
+      });
+      if (!uploaded.ok)
+        throw new Error(`chunk upload failed (${String(uploaded.status)})`);
     }
   }
 
@@ -416,7 +998,9 @@ export class FilesService {
     if (this.timer !== null) return;
     this.timer = setInterval(() => {
       this.tick += 1;
-      const active = this.transfers.some((transfer) => ACTIVE_STATES.has(transfer.state));
+      const active = this.transfers.some((transfer) =>
+        ACTIVE_STATES.has(transfer.state),
+      );
       if (!active && this.tick % IDLE_REFRESH_TICKS !== 0) return;
       void this.refreshTransfers().catch(() => {
         // Transient control-plane trouble; the next tick tries again.
@@ -426,6 +1010,7 @@ export class FilesService {
   }
 
   stop(): void {
+    this.unsubAgentEvents();
     if (this.timer === null) return;
     clearInterval(this.timer);
     this.timer = null;
@@ -439,7 +1024,8 @@ export class FilesService {
 
   private requirePath(filePath: string): string {
     const normalized = normalizeVfsPath(filePath);
-    if (normalized === null || normalized === "/") throw new Error(`invalid file path "${filePath}"`);
+    if (normalized === null || normalized === "/")
+      throw new Error(`invalid file path "${filePath}"`);
     return normalized;
   }
 
@@ -476,8 +1062,11 @@ export class FilesService {
     const urls = await this.deps.client.presignChunkUploads(missing);
     const fetchImpl = this.deps.fetchImpl ?? fetch;
     for (const hash of missing) {
-      const chunk = manifest.chunks.find((candidate) => candidate.hash === hash);
-      if (chunk === undefined) throw new Error(`chunk ${hash} is not part of this upload`);
+      const chunk = manifest.chunks.find(
+        (candidate) => candidate.hash === hash,
+      );
+      if (chunk === undefined)
+        throw new Error(`chunk ${hash} is not part of this upload`);
       const url = urls.get(hash);
       if (url === undefined) {
         // The store took this chunk between the manifest write and now — the
@@ -496,7 +1085,8 @@ export class FilesService {
         headers: { "content-type": "application/octet-stream" },
         body,
       });
-      if (!res.ok) throw new Error(`chunk upload failed (${String(res.status)})`);
+      if (!res.ok)
+        throw new Error(`chunk upload failed (${String(res.status)})`);
       // One PUT stores every occurrence of this hash, so all of them count.
       onStored?.(chunkBytes(manifest, hash));
     }
@@ -506,7 +1096,8 @@ export class FilesService {
 /** Every byte one hash accounts for in a manifest — a chunk can repeat. */
 function chunkBytes(manifest: ChunkManifest, hash: string): number {
   return manifest.chunks.reduce(
-    (sum, candidate) => (candidate.hash === hash ? sum + candidate.length : sum),
+    (sum, candidate) =>
+      candidate.hash === hash ? sum + candidate.length : sum,
     0,
   );
 }
@@ -517,7 +1108,10 @@ async function uniqueSavePath(candidate: string): Promise<string> {
   const ext = path.extname(candidate);
   const stem = path.basename(candidate, ext);
   for (let attempt = 0; attempt < 500; attempt++) {
-    const target = attempt === 0 ? candidate : path.join(dir, `${stem} (${String(attempt)})${ext}`);
+    const target =
+      attempt === 0
+        ? candidate
+        : path.join(dir, `${stem} (${String(attempt)})${ext}`);
     try {
       await statFile(target);
     } catch {

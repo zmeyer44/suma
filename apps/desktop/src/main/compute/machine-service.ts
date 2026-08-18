@@ -9,7 +9,12 @@
 import { clearInterval, setInterval } from "node:timers";
 import type { MachineStatus } from "../../shared/ipc";
 import type { ControlClient } from "../control-client";
-import { localOnlyMachineStatus, presentMachineStatus } from "./machine-status";
+import {
+  localAwayMachineStatus,
+  localHomeMachineStatus,
+  localOnlyMachineStatus,
+  presentMachineStatus,
+} from "./machine-status";
 
 const POLL_MS = 15_000;
 
@@ -21,6 +26,15 @@ export interface MachineDeps {
   /** Called whenever a refresh learns the VM's agent address — the hook that
    *  retargets the agent link from the simulator to the real machine. */
   onAgentAddress?: (address: string) => void;
+  /** This installation's enrolled control-plane device id. */
+  controlDeviceId?: () => string | null;
+  /** Persisted local ownership, so a confirmed home Mac still works offline. */
+  knownLocalComputerRole?: () => "home" | "away" | null;
+  /** Gates the local simulator when the computer seat belongs elsewhere. */
+  onLocalComputerRole?: (role: "home" | "away" | "not-local") => void;
+  /** Local mode: whether the home Mac's relay socket is up (true for the
+   *  home device itself). Drives the away device's connect/nudge. */
+  onHomeOnline?: (online: boolean) => void;
   now?: () => number;
 }
 
@@ -38,13 +52,55 @@ export class MachineService {
   async refresh(): Promise<MachineStatus> {
     const client = this.deps.control();
     if (client === null) {
+      const knownRole = this.deps.knownLocalComputerRole?.() ?? null;
+      if (knownRole !== null) {
+        this.reachable = true;
+        this.deps.onLocalComputerRole?.(knownRole);
+        // Control unreachable: an away device cannot know home presence —
+        // offline is the honest answer until the poll succeeds.
+        this.deps.onHomeOnline?.(knownRole === "home");
+        this.setStatus(
+          knownRole === "home"
+            ? localHomeMachineStatus()
+            : localAwayMachineStatus(false),
+        );
+        return this.status();
+      }
       this.reachable = true;
       this.setStatus(localOnlyMachineStatus());
       return this.status();
     }
     try {
-      const { machine, events } = await client.getMachine();
-      if (typeof machine.agentAddress === "string" && machine.agentAddress.length > 0) {
+      const { mode, machine, events, homeDeviceId, homeOnline } =
+        await client.getMachine();
+      if (mode === "local") {
+        // Before the first enrollment there is no owner yet; this install is
+        // the provisional home. Once claimed, only that exact control device
+        // may keep using the in-process computer.
+        const currentDeviceId = this.deps.controlDeviceId?.() ?? null;
+        const isHome =
+          homeDeviceId === undefined ||
+          homeDeviceId === null ||
+          (currentDeviceId !== null && homeDeviceId === currentDeviceId);
+        this.reachable = true;
+        this.deps.onLocalComputerRole?.(isHome ? "home" : "away");
+        // The home Mac IS the computer — always online to itself. An away
+        // device reads the relay's presence answer.
+        const online = isHome || homeOnline === true;
+        this.deps.onHomeOnline?.(online);
+        this.setStatus(
+          isHome ? localHomeMachineStatus() : localAwayMachineStatus(online),
+        );
+        return this.status();
+      }
+      if (machine === null) {
+        throw new Error("control plane returned no cloud machine");
+      }
+      this.deps.onLocalComputerRole?.("not-local");
+      if (
+        typeof machine.agentAddress === "string" &&
+        machine.agentAddress.length > 0
+      ) {
         this.deps.onAgentAddress?.(machine.agentAddress);
       }
       let explanation: string | null = null;
@@ -63,6 +119,18 @@ export class MachineService {
         }),
       );
     } catch {
+      const knownRole = this.deps.knownLocalComputerRole?.() ?? null;
+      if (knownRole !== null) {
+        this.reachable = true;
+        this.deps.onLocalComputerRole?.(knownRole);
+        this.deps.onHomeOnline?.(knownRole === "home");
+        this.setStatus(
+          knownRole === "home"
+            ? localHomeMachineStatus()
+            : localAwayMachineStatus(false),
+        );
+        return this.status();
+      }
       // Control unreachable: keep the last-known status rather than invent
       // one; planeState() reports the compute plane down.
       this.reachable = false;
@@ -111,9 +179,17 @@ export class MachineService {
 
   /* ------------------------------ internals ------------------------------ */
 
-  private async transitionIf(fromState: string, to: string): Promise<MachineStatus> {
+  private async transitionIf(
+    fromState: string,
+    to: string,
+  ): Promise<MachineStatus> {
     const client = this.requireClient();
     await this.refresh();
+    if (this.current.machineId === null) {
+      throw new Error(
+        "this Mac is your computer — there is no cloud machine to transition",
+      );
+    }
     if (this.current.state !== fromState) return this.status(); // already on its way
     await client.transitionMachine(to);
     return this.refresh();
@@ -122,7 +198,9 @@ export class MachineService {
   private requireClient(): ControlClient {
     const client = this.deps.control();
     if (client === null) {
-      throw new Error("no cloud machine — Suma is running local-only without a control plane");
+      throw new Error(
+        "no cloud machine — Suma is running local-only without a control plane",
+      );
     }
     return client;
   }

@@ -23,7 +23,15 @@ import net from "node:net";
 import type { Duplex } from "node:stream";
 import { clearTimeout, setTimeout } from "node:timers";
 import { TextDecoder } from "node:util";
-import { parseCtlResponse, type AgentCtlRequest, type AgentCtlResponse } from "@suma/protocol";
+import {
+  CLOUD_ROOT,
+  parseCtlResponse,
+  parseVfsResponse,
+  type AgentCtlRequest,
+  type AgentCtlResponse,
+  type VfsRequest,
+  type VfsResponse,
+} from "@suma/protocol";
 
 /* ------------------------------------------------------------------ *
  * Framing (pure, unit-tested)
@@ -131,20 +139,36 @@ export interface AgentLink {
   openPty(ptyId: string, onData: (data: Buffer) => void): PtyChannel;
   /** Pipe one local socket over the agent's fwd/<port> channel. */
   forward(port: number, socket: Duplex): void;
+  /**
+   * One vfs request/response exchange. Always resolves a VfsResponse —
+   * protocol failures arrive as its `error` variant; only transport failure
+   * (link down, socket died) rejects. The vfs wire carries NO request ids:
+   * responses come back one-per-request in order, so implementations MUST
+   * serialize with a FIFO pending queue.
+   */
+  vfs(request: VfsRequest): Promise<VfsResponse>;
+  /** Display label for the vfs root ("~/cloud" remote; absolute path in sim). */
+  vfsRootLabel(): string;
   stop(): void;
 }
 
 /** The control channel's wire name (@suma/protocol agent.ts `parseChannel`). */
 const CTL_CHANNEL = "ctl";
 
-/** Response frame type each ctl request awaits; absent ⇒ fire-and-forget. */
-const CTL_RESPONSE_TYPE: Partial<Record<AgentCtlRequest["t"], AgentCtlResponse["t"]>> = {
+/** The vfs channel's wire name. */
+const VFS_CHANNEL = "vfs";
+
+/** Response frame type each ctl request awaits; absent ⇒ fire-and-forget.
+ *  Exported: RelayAgentClient runs the same FIFO over a different wire.
+ *  `fetch.public` terminates on `fetch.started` — the fetch itself runs as a
+ *  background task and reports through unsolicited events. */
+export const CTL_RESPONSE_TYPE: Partial<Record<AgentCtlRequest["t"], AgentCtlResponse["t"]>> = {
   "pty.spawn": "pty.spawned",
   "pty.attach": "pty.attached",
   "pty.list": "pty.listing",
   "job.set": "job.ack",
   "ports.list": "ports",
-  "fetch.public": "fetch.done",
+  "fetch.public": "fetch.started",
 };
 
 interface PendingCtl {
@@ -179,6 +203,11 @@ export class TcpAgentClient implements AgentLink {
   private readonly pending: PendingCtl[] = [];
   private readonly connectionListeners = new Set<(up: boolean) => void>();
   private readonly ctlEventListeners = new Set<(event: AgentCtlResponse) => void>();
+  private vfsSocket: net.Socket | null = null;
+  private readonly pendingVfs: Array<{
+    resolve: (response: VfsResponse) => void;
+    reject: (err: Error) => void;
+  }> = [];
 
   constructor(url: string) {
     const { host, port } = parseAgentUrl(url);
@@ -246,6 +275,11 @@ export class TcpAgentClient implements AgentLink {
   forward(port: number, local: Duplex): void {
     const channel = `fwd/${port}`;
     const socket = this.openChannel();
+    // Announce the stream with an empty OPEN frame so the agent dials the
+    // port immediately — a server-first protocol (or a refused dial) would
+    // otherwise wait for the browser's first bytes. One connection per
+    // forward, so the bare channel name is the stream identity here.
+    socket.write(encodeFrame(channel, Buffer.alloc(0)));
     const decoder = new FrameDecoder();
     socket.on("data", (chunk) => {
       let frames: AgentFrame[];
@@ -272,6 +306,21 @@ export class TcpAgentClient implements AgentLink {
     local.on("error", closeBoth);
   }
 
+  async vfs(request: VfsRequest): Promise<VfsResponse> {
+    if (this.stopped || !this.up) {
+      throw new Error("suma-agent unreachable — the machine may be waking or offline");
+    }
+    const socket = this.vfsSocket ?? this.openVfsChannel();
+    socket.write(encodeFrame(VFS_CHANNEL, JSON.stringify(request)));
+    return new Promise<VfsResponse>((resolve, reject) => {
+      this.pendingVfs.push({ resolve, reject });
+    });
+  }
+
+  vfsRootLabel(): string {
+    return CLOUD_ROOT;
+  }
+
   stop(): void {
     this.stopped = true;
     if (this.retryTimer !== null) {
@@ -279,6 +328,7 @@ export class TcpAgentClient implements AgentLink {
       this.retryTimer = null;
     }
     this.ctlSocket?.destroy();
+    this.vfsSocket?.destroy();
     this.failPending(new Error("agent client stopped"));
   }
 
@@ -292,6 +342,55 @@ export class TcpAgentClient implements AgentLink {
   private openChannel(): net.Socket {
     const socket = net.connect(this.port, this.host);
     socket.on("error", () => socket.destroy());
+    return socket;
+  }
+
+  /**
+   * The dedicated vfs connection, opened lazily on first use. The vfs wire
+   * has no request ids — the agent answers every frame, in order, on the
+   * same channel — so correctness rests on strict FIFO. Any desync (a frame
+   * that fails to parse, or a response with nothing waiting) is
+   * unrecoverable by inspection: kill the socket, reject the queue, and let
+   * the next call reopen.
+   */
+  private openVfsChannel(): net.Socket {
+    const socket = this.openChannel();
+    this.vfsSocket = socket;
+    const decoder = new FrameDecoder();
+    socket.on("data", (chunk) => {
+      let frames: AgentFrame[];
+      try {
+        frames = decoder.push(chunk);
+      } catch {
+        socket.destroy();
+        return;
+      }
+      for (const frame of frames) {
+        if (frame.channel !== VFS_CHANNEL) continue;
+        const head = this.pendingVfs.shift();
+        if (head === undefined) {
+          socket.destroy(); // response with no request in flight — desync
+          return;
+        }
+        let response: VfsResponse;
+        try {
+          response = parseVfsResponse(frame.payload.toString("utf8"));
+        } catch {
+          head.reject(new Error("unparseable vfs response — channel reset"));
+          socket.destroy();
+          return;
+        }
+        head.resolve(response);
+      }
+    });
+    const teardown = (): void => {
+      if (this.vfsSocket === socket) this.vfsSocket = null;
+      for (const pending of this.pendingVfs.splice(0)) {
+        pending.reject(new Error("vfs channel lost"));
+      }
+    };
+    socket.on("close", teardown);
+    socket.on("error", teardown);
     return socket;
   }
 

@@ -16,6 +16,8 @@ describe("buildSpaceEgressConfig", () => {
       policy: "suma-ip",
       siteBypass: [],
       mediaBypass: true,
+      checkoutBypass: true,
+      detectedCheckoutHosts: [],
       temporaryDirectOverride: false,
     });
   });
@@ -30,6 +32,22 @@ describe("buildSpaceEgressConfig", () => {
     expect(config.siteBypass).toEqual(["bank.example"]);
     expect(config.mediaBypass).toBe(false);
     expect(config.temporaryDirectOverride).toBe(true);
+  });
+
+  it("reads a workspace stored before checkoutBypass existed as bypass-on", () => {
+    // Absent must not read as off: those workspaces would silently break every
+    // hosted checkout in a proxied space.
+    const config = buildSpaceEgressConfig("s1", "suma-ip", { siteBypass: [], mediaBypass: true }, false);
+    expect(config.checkoutBypass).toBe(true);
+    expect(
+      buildSpaceEgressConfig("s1", "suma-ip", { siteBypass: [], mediaBypass: true, checkoutBypass: false }, false)
+        .checkoutBypass,
+    ).toBe(false);
+  });
+
+  it("carries the session's detected checkout hosts", () => {
+    const config = buildSpaceEgressConfig("s1", "suma-ip", null, false, ["buy.maticrobots.com"]);
+    expect(config.detectedCheckoutHosts).toEqual(["buy.maticrobots.com"]);
   });
 });
 
@@ -58,6 +76,8 @@ describe("egressStatusFor (§8.4 fail-closed matrix)", () => {
       gateway: "up",
       temporaryDirectOverride: false,
       mediaBypass: true,
+      checkoutBypass: true,
+      detectedCheckoutHosts: [],
       siteBypass: ["cdn.example"],
       failClosed: false,
       vpnActive: false,

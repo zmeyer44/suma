@@ -26,17 +26,24 @@
 //!    network can see, from a request the user can aim.
 //! 3. **A size cap**, so a hostile or broken server cannot fill the volume.
 //!
-//! Dev-phase limitation: plain `http://` only. TLS for `https://` presigned
-//! URLs arrives with the Phase 3 client stack; pulling a TLS dependency in
-//! early just for this fetcher is not worth the surface. The wire protocol
-//! (progress/done/error) is final either way.
+//! `https://` rides rustls (ring provider, webpki roots) — presigned URLs
+//! are https by construction, so the fetcher would be decorative without it.
+//! Redirects are followed to a small bound with every hop re-checked against
+//! the target policy, and a downgrade hop (`https → http`) is refused: a
+//! redirect is the server's suggestion, not an exemption from the rules the
+//! first URL passed. Chunked transfer remains unsupported — a response
+//! without Content-Length is refused, not guessed at.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
+use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{bail, Context};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{lookup_host, TcpStream};
+use tokio_rustls::TlsConnector;
 
 use crate::chunker::{chunk_file, Manifest};
 use crate::proto::AgentCtlResponse;
@@ -44,12 +51,14 @@ use crate::proto::AgentCtlResponse;
 /// What a fetch is allowed to know. No headers — see module docs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchSpec {
+    /// Stable caller-provided correlation id (normally the Files transfer id).
+    pub fetch_id: String,
     pub url: String,
     /// Where the bytes land, as an already-confined host path. Nothing here
     /// re-checks it: `dispatch` builds every real spec from
     /// `VfsRoot::resolve_new_file`, so the path is inside `~/cloud` before it
-    /// reaches this module. Construct one some other way and `File::create`
-    /// below will write wherever you pointed it.
+    /// reaches this module. Construct one some other way and the create-new
+    /// open below will write wherever you pointed it.
     pub dest_path: PathBuf,
 }
 
@@ -75,6 +84,10 @@ const PROGRESS_STRIDE: u64 = 64 * 1024;
 /// or lies about Content-Length, must not be able to fill it.
 pub const MAX_FETCH_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
+/// Redirect hops one fetch will follow before refusing. Five covers every
+/// real CDN chain; an endless loop is a server bug or a trap either way.
+const MAX_REDIRECTS: u32 = 5;
+
 /// Settings `fetch_public` fixes at their production values. Tests vary them
 /// to exercise the refusal paths against a loopback server without weakening
 /// what ships — the same split as `Policy::permissive_for_local` in
@@ -82,6 +95,9 @@ pub const MAX_FETCH_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 struct FetchOptions {
     max_bytes: u64,
     allow_private_targets: bool,
+    /// TLS config override — tests inject one trusting a loopback test CA.
+    /// `None` ships: the shared webpki-roots config.
+    tls_config: Option<Arc<rustls::ClientConfig>>,
 }
 
 impl Default for FetchOptions {
@@ -89,6 +105,105 @@ impl Default for FetchOptions {
         FetchOptions {
             max_bytes: MAX_FETCH_BYTES,
             allow_private_targets: false,
+            tls_config: None,
+        }
+    }
+}
+
+/// The production TLS client config: webpki roots, no client auth. Built
+/// once — root parsing is not free and every fetch would repeat it.
+fn shared_tls_config() -> Arc<rustls::ClientConfig> {
+    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    Arc::clone(CONFIG.get_or_init(|| {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scheme {
+    Http,
+    Https,
+}
+
+impl Scheme {
+    fn default_port(self) -> u16 {
+        match self {
+            Scheme::Http => 80,
+            Scheme::Https => 443,
+        }
+    }
+}
+
+/// One resolved fetch destination — the unit the redirect loop iterates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Target {
+    scheme: Scheme,
+    host: String,
+    port: u16,
+    path: String,
+}
+
+impl Target {
+    /// The Host header value: port included only when non-default, matching
+    /// what browsers send and what virtual hosts expect.
+    fn host_header(&self) -> String {
+        if self.port == self.scheme.default_port() {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+}
+
+/// A plain or TLS-wrapped connection, one read/write surface for the rest of
+/// the fetcher. Both variants are `Unpin`, so delegation is direct.
+enum MaybeTls {
+    Plain(TcpStream),
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+}
+
+impl AsyncRead for MaybeTls {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            MaybeTls::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            MaybeTls::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for MaybeTls {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            MaybeTls::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            MaybeTls::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            MaybeTls::Plain(s) => Pin::new(s).poll_flush(cx),
+            MaybeTls::Tls(s) => Pin::new(s.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            MaybeTls::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            MaybeTls::Tls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
         }
     }
 }
@@ -108,27 +223,47 @@ async fn fetch_with(
     options: &FetchOptions,
     emit: &mut (dyn FnMut(AgentCtlResponse) + Send),
 ) -> anyhow::Result<FetchOutcome> {
-    let (host, port, path) = parse_http_url(&spec.url)?;
+    let mut target = parse_url(&spec.url)?;
+    let mut hops: u32 = 0;
 
-    let mut stream = connect_permitted(&host, port, options).await?;
-    // Safe to interpolate: `parse_http_url` has rejected every control
-    // character, so neither component can close this head or open a new one.
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: suma-agent\r\n\r\n"
-    );
-    stream.write_all(request.as_bytes()).await?;
+    // The redirect loop. Every hop is a fresh URL from the SERVER, so every
+    // hop re-earns what the first URL earned: control-character validation
+    // (in `resolve_redirect`), the literal-host policy, and the post-DNS
+    // private-address filter (both in `connect_target`).
+    let (head, mut body_start, mut stream) = loop {
+        let mut stream = connect_target(&target, options).await?;
+        // Safe to interpolate: every component has been rejected for control
+        // characters, so nothing can close this head or open a new one.
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: suma-agent\r\n\r\n",
+            target.path,
+            target.host_header(),
+        );
+        stream.write_all(request.as_bytes()).await?;
 
-    let (head, mut body_start) = read_response_head(&mut stream).await?;
-    let status = head
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .unwrap_or("");
-    if status != "200" {
-        bail!("fetch failed: upstream answered {status}");
-    }
+        let (head, body_start) = read_response_head(&mut stream).await?;
+        let status = head
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .unwrap_or("")
+            .to_string();
+        match status.as_str() {
+            "200" => break (head, body_start, stream),
+            "301" | "302" | "303" | "307" | "308" => {
+                hops += 1;
+                if hops > MAX_REDIRECTS {
+                    bail!("fetch refused: more than {MAX_REDIRECTS} redirects");
+                }
+                let location = header_value(&head, "location")
+                    .context("redirect without a Location header")?;
+                target = resolve_redirect(&target, &location)?;
+            }
+            other => bail!("fetch failed: upstream answered {other}"),
+        }
+    };
     let total = content_length(&head)
-        .context("dev fetcher requires Content-Length (no chunked transfer)")?;
+        .context("fetcher requires Content-Length (no chunked transfer)")?;
     if total > options.max_bytes {
         bail!(
             "fetch refused: {total} bytes exceeds the {} byte limit for one fetch",
@@ -136,7 +271,10 @@ async fn fetch_with(
         );
     }
 
-    let mut file = tokio::fs::File::create(&spec.dest_path)
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&spec.dest_path)
         .await
         .with_context(|| format!("creating {}", spec.dest_path.display()))?;
 
@@ -170,6 +308,7 @@ async fn fetch_with(
         if received - last_emit >= PROGRESS_STRIDE || received >= total {
             last_emit = received;
             emit(AgentCtlResponse::FetchProgress {
+                fetch_id: spec.fetch_id.clone(),
                 url: spec.url.clone(),
                 received,
                 total,
@@ -205,6 +344,28 @@ async fn fetch_with(
     })
 }
 
+/// Resolve and dial, refusing private space at both steps; wraps in TLS for
+/// https targets.
+async fn connect_target(target: &Target, options: &FetchOptions) -> anyhow::Result<MaybeTls> {
+    let stream = connect_permitted(&target.host, target.port, options).await?;
+    match target.scheme {
+        Scheme::Http => Ok(MaybeTls::Plain(stream)),
+        Scheme::Https => {
+            let config = options
+                .tls_config
+                .clone()
+                .unwrap_or_else(shared_tls_config);
+            let name = rustls::pki_types::ServerName::try_from(target.host.clone())
+                .with_context(|| format!("{} is not a valid TLS server name", target.host))?;
+            let tls = TlsConnector::from(config)
+                .connect(name, stream)
+                .await
+                .with_context(|| format!("TLS handshake with {}", target.host))?;
+            Ok(MaybeTls::Tls(Box::new(tls)))
+        }
+    }
+}
+
 /// Resolve and dial, refusing private space at both steps.
 async fn connect_permitted(
     host: &str,
@@ -228,9 +389,44 @@ async fn connect_permitted(
     bail!("connecting to {host}:{port}")
 }
 
-/// Minimal `http://host[:port]/path` parser — enough for the dev fetcher,
-/// with an explicit refusal (not a silent downgrade) for anything else.
-fn parse_http_url(url: &str) -> anyhow::Result<(String, u16, String)> {
+/// Where a redirect points, against the hop it came from. A `Location` is
+/// server-controlled input: it gets the same validation the original URL got,
+/// plus the downgrade rule — a fetch that started encrypted must not be
+/// talked into plaintext (`https → http` refused; `http → https` welcome).
+fn resolve_redirect(from: &Target, location: &str) -> anyhow::Result<Target> {
+    let next = if location.starts_with("http://") || location.starts_with("https://") {
+        parse_url(location).context("redirect Location is not a fetchable URL")?
+    } else if location.starts_with('/') && !location.starts_with("//") {
+        // Root-relative: same scheme/host/port, new path. The path is
+        // interpolated into the next request line, so it gets the same
+        // control-character refusals a whole URL gets.
+        if let Some(bad) = location
+            .bytes()
+            .find(|b| b.is_ascii_control() || *b == 0x7f)
+        {
+            bail!("redirect Location contains a control character (0x{bad:02x})");
+        }
+        if location.contains(' ') {
+            bail!("redirect Location contains a space");
+        }
+        Target {
+            path: location.to_string(),
+            ..from.clone()
+        }
+    } else {
+        // Protocol-relative (`//host/…`) and path-relative forms are refused:
+        // rare from real CDNs, and ambiguity is not worth resolving here.
+        bail!("redirect Location {location:?} is neither absolute http(s) nor root-relative");
+    };
+    if from.scheme == Scheme::Https && next.scheme == Scheme::Http {
+        bail!("redirect refused: https must not downgrade to http");
+    }
+    Ok(next)
+}
+
+/// `http(s)://host[:port]/path` parser, with an explicit refusal (not a
+/// silent downgrade) for anything else.
+fn parse_url(url: &str) -> anyhow::Result<Target> {
     // First, before anything is split out and interpolated anywhere: a URL
     // carrying CR, LF, NUL, or any other control character is refused whole.
     if let Some(bad) = url.bytes().find(|b| b.is_ascii_control() || *b == 0x7f) {
@@ -241,10 +437,11 @@ fn parse_http_url(url: &str) -> anyhow::Result<(String, u16, String)> {
     if url.contains(' ') {
         bail!("URL contains a space; refusing to fetch it");
     }
-    if url.starts_with("https://") {
-        bail!("https is not supported by the dev fetcher yet (TLS arrives with the Phase 3 transport stack)");
-    }
-    let Some(rest) = url.strip_prefix("http://") else {
+    let (scheme, rest) = if let Some(rest) = url.strip_prefix("http://") {
+        (Scheme::Http, rest)
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        (Scheme::Https, rest)
+    } else {
         bail!("fetch.public accepts http(s) URLs only");
     };
     let (authority, path) = match rest.find('/') {
@@ -263,20 +460,37 @@ fn parse_http_url(url: &str) -> anyhow::Result<(String, u16, String)> {
             .context("bracketed IPv6 host is not closed")?;
         let port = match rest.strip_prefix(':') {
             Some(p) => p.parse::<u16>().context("bad port in URL")?,
-            None if rest.is_empty() => 80,
+            None if rest.is_empty() => scheme.default_port(),
             None => bail!("unexpected characters after the IPv6 host"),
         };
         (host, port)
     } else {
         match authority.rsplit_once(':') {
             Some((h, p)) => (h, p.parse::<u16>().context("bad port in URL")?),
-            None => (authority, 80),
+            None => (authority, scheme.default_port()),
         }
     };
     if host.is_empty() {
         bail!("URL has no host");
     }
-    Ok((host.to_string(), port, path.to_string()))
+    Ok(Target {
+        scheme,
+        host: host.to_string(),
+        port,
+        path: path.to_string(),
+    })
+}
+
+/// One header's value from a response head, case-insensitive.
+fn header_value(head: &str, name: &str) -> Option<String> {
+    head.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if key.trim().eq_ignore_ascii_case(name) {
+            Some(value.trim().to_string())
+        } else {
+            None
+        }
+    })
 }
 
 /* ------------------------------------------------------------------ *
@@ -373,7 +587,9 @@ fn content_length(head: &str) -> Option<u64> {
     })
 }
 
-async fn read_response_head(stream: &mut TcpStream) -> anyhow::Result<(String, Vec<u8>)> {
+async fn read_response_head<S: AsyncRead + Unpin>(
+    stream: &mut S,
+) -> anyhow::Result<(String, Vec<u8>)> {
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {
@@ -461,6 +677,7 @@ mod tests {
         let (addr, _) = serve_once(body.clone()).await;
         let dest = temp_file("ok");
         let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
             url: format!("http://127.0.0.1:{}/data.bin", addr.port()),
             dest_path: dest.clone(),
         };
@@ -492,35 +709,265 @@ mod tests {
         std::fs::remove_file(&dest).unwrap();
     }
 
-    #[tokio::test]
-    async fn refuses_https_rather_than_silently_downgrading() {
-        let spec = FetchSpec {
-            url: "https://example.com/f".into(),
-            dest_path: temp_file("https"),
-        };
-        let mut emit = |_resp: AgentCtlResponse| {};
-        let err = fetch_public(&spec, &mut emit).await.unwrap_err();
-        assert!(err.to_string().contains("https"), "{err}");
-    }
-
     #[test]
-    fn parses_http_urls() {
+    fn parses_http_and_https_urls() {
         assert_eq!(
-            parse_http_url("http://example.com/a/b?c=d").unwrap(),
-            ("example.com".into(), 80, "/a/b?c=d".into())
+            parse_url("http://example.com/a/b?c=d").unwrap(),
+            Target {
+                scheme: Scheme::Http,
+                host: "example.com".into(),
+                port: 80,
+                path: "/a/b?c=d".into()
+            }
         );
         assert_eq!(
-            parse_http_url("http://127.0.0.1:8080").unwrap(),
-            ("127.0.0.1".into(), 8080, "/".into())
+            parse_url("http://127.0.0.1:8080").unwrap(),
+            Target {
+                scheme: Scheme::Http,
+                host: "127.0.0.1".into(),
+                port: 8080,
+                path: "/".into()
+            }
         );
-        assert!(parse_http_url("ftp://example.com/x").is_err());
-        assert!(parse_http_url("http://").is_err());
+        // https defaults to 443, and the Host header hides default ports.
+        let https = parse_url("https://cdn.example.com/big.bin").unwrap();
+        assert_eq!(https.scheme, Scheme::Https);
+        assert_eq!(https.port, 443);
+        assert_eq!(https.host_header(), "cdn.example.com");
+        assert_eq!(
+            parse_url("https://cdn.example.com:8443/x")
+                .unwrap()
+                .host_header(),
+            "cdn.example.com:8443"
+        );
+        assert!(parse_url("ftp://example.com/x").is_err());
+        assert!(parse_url("http://").is_err());
         // Percent-encoded CRLF is *not* an injection — it stays three literal
         // characters in the path — so it must still be fetchable.
         assert_eq!(
-            parse_http_url("http://example.com/a%0d%0ab").unwrap().2,
+            parse_url("http://example.com/a%0d%0ab").unwrap().path,
             "/a%0d%0ab"
         );
+    }
+
+    /// One-shot server answering a 302 to `location`.
+    async fn serve_redirect_once(location: String) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut req = [0u8; 2048];
+            let _ = stream.read(&mut req).await;
+            let head = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n"
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn follows_a_redirect_hop_to_the_real_body() {
+        let body = b"the real payload".to_vec();
+        let (final_addr, _) = serve_once(body.clone()).await;
+        let hop =
+            serve_redirect_once(format!("http://127.0.0.1:{}/real.bin", final_addr.port())).await;
+
+        let dest = temp_file("redirected");
+        let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
+            url: format!("http://127.0.0.1:{}/start", hop.port()),
+            dest_path: dest.clone(),
+        };
+        let mut emit = |_resp: AgentCtlResponse| {};
+        let outcome = fetch_with(&spec, &local_options(), &mut emit)
+            .await
+            .unwrap();
+        assert_eq!(outcome.bytes, body.len() as u64);
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        std::fs::remove_file(&dest).unwrap();
+    }
+
+    #[tokio::test]
+    async fn refuses_endless_redirects_and_unpermitted_hops() {
+        // A server that redirects to itself forever.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut req = [0u8; 2048];
+                let _ = stream.read(&mut req).await;
+                let head = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{}/again\r\nContent-Length: 0\r\n\r\n",
+                    addr.port()
+                );
+                let _ = stream.write_all(head.as_bytes()).await;
+            }
+        });
+        let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
+            url: format!("http://127.0.0.1:{}/loop", addr.port()),
+            dest_path: temp_file("loop"),
+        };
+        let mut emit = |_resp: AgentCtlResponse| {};
+        let err = fetch_with(&spec, &local_options(), &mut emit)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("redirects"), "{err}");
+
+        // Under the SHIPPED policy, a hop into private space is refused even
+        // though the first URL would have been public: the hop's target is
+        // checked exactly like a first URL. (The redirect server itself is
+        // loopback, so point the test at the resolver instead: a private
+        // Location must fail the same check_target_host the original passed.)
+        let hop = serve_redirect_once("http://169.254.169.254/latest/meta-data".into()).await;
+        let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
+            url: format!("http://127.0.0.1:{}/start", hop.port()),
+            dest_path: temp_file("ssrf-hop"),
+        };
+        let options = FetchOptions {
+            allow_private_targets: false,
+            ..FetchOptions::default()
+        };
+        // The FIRST connect fails on loopback policy before any redirect —
+        // which is itself the assertion that hops get no special treatment:
+        // resolve_redirect + connect_target run the same policy, tested
+        // directly below and in `redirects_resolve_strictly`.
+        let err = fetch_with(&spec, &options, &mut emit)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("private or local"), "{err}");
+        // And the hop-target check in isolation:
+        let from = parse_url("http://example.com/a").unwrap();
+        let hop_target = resolve_redirect(&from, "http://169.254.169.254/meta").unwrap();
+        assert!(
+            check_target_host(&hop_target.host, &options).is_err(),
+            "metadata hop must be refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn https_fetches_over_tls_against_an_injected_test_ca() {
+        // A throwaway CA + a localhost server cert signed by it. The client
+        // trusts ONLY this CA via FetchOptions.tls_config — the shipped
+        // webpki-roots path is untouched.
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        let server_key = rcgen::KeyPair::generate().unwrap();
+        let server_cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .signed_by(&server_key, &ca_cert, &ca_key)
+            .unwrap();
+
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![server_cert.der().clone()],
+                rustls::pki_types::PrivateKeyDer::try_from(server_key.serialize_der()).unwrap(),
+            )
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+
+        let body = b"encrypted payload".to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = body.clone();
+        tokio::spawn(async move {
+            // Serves every connection: the second fetch below must reach the
+            // TLS handshake (and fail THERE), not a dead socket.
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(mut tls) = acceptor.accept(tcp).await else {
+                    continue; // handshake refused by an untrusting client
+                };
+                let mut req = [0u8; 2048];
+                let _ = tls.read(&mut req).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                    served.len()
+                );
+                let _ = tls.write_all(head.as_bytes()).await;
+                let _ = tls.write_all(&served).await;
+                tls.shutdown().await.ok();
+            }
+        });
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca_cert.der().clone()).unwrap();
+        let client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+        let dest = temp_file("tls");
+        let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
+            url: format!("https://localhost:{}/enc.bin", addr.port()),
+            dest_path: dest.clone(),
+        };
+        let options = FetchOptions {
+            allow_private_targets: true,
+            tls_config: Some(Arc::new(client_config)),
+            ..FetchOptions::default()
+        };
+        let mut emit = |_resp: AgentCtlResponse| {};
+        let outcome = fetch_with(&spec, &options, &mut emit).await.unwrap();
+        assert_eq!(outcome.bytes, body.len() as u64);
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+        std::fs::remove_file(&dest).unwrap();
+
+        // The same server WITHOUT the injected trust is refused: the shipped
+        // config does not know this CA.
+        let spec2 = FetchSpec {
+            fetch_id: "fetch-test-2".into(),
+            url: format!("https://localhost:{}/enc.bin", addr.port()),
+            dest_path: temp_file("tls-untrusted"),
+        };
+        let untrusting = FetchOptions {
+            allow_private_targets: true,
+            ..FetchOptions::default()
+        };
+        let err = fetch_with(&spec2, &untrusting, &mut emit).await.unwrap_err();
+        assert!(err.to_string().contains("TLS"), "{err}");
+    }
+
+    #[test]
+    fn redirects_resolve_strictly() {
+        let from = parse_url("https://cdn.example.com/start").unwrap();
+
+        // Absolute https and root-relative are accepted.
+        let absolute = resolve_redirect(&from, "https://other.example.com/next").unwrap();
+        assert_eq!(absolute.host, "other.example.com");
+        let relative = resolve_redirect(&from, "/moved/here?sig=1").unwrap();
+        assert_eq!(relative.host, "cdn.example.com");
+        assert_eq!(relative.scheme, Scheme::Https);
+        assert_eq!(relative.path, "/moved/here?sig=1");
+
+        // A downgrade is refused; an upgrade is welcome.
+        let err = resolve_redirect(&from, "http://cdn.example.com/plain").unwrap_err();
+        assert!(err.to_string().contains("downgrade"), "{err}");
+        let http_from = parse_url("http://example.com/a").unwrap();
+        assert_eq!(
+            resolve_redirect(&http_from, "https://example.com/a")
+                .unwrap()
+                .scheme,
+            Scheme::Https
+        );
+
+        // Protocol-relative, path-relative, and injected forms are refused.
+        for bad in ["//evil.example.com/x", "relative/path", "/a\r\nX: 1", "/a b"] {
+            assert!(resolve_redirect(&from, bad).is_err(), "{bad:?}");
+        }
     }
 
     /// A literal CRLF in the URL is header injection and request smuggling
@@ -534,6 +981,7 @@ mod tests {
             addr.port()
         );
         let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
             url: smuggled,
             dest_path: temp_file("crlf"),
         };
@@ -556,9 +1004,9 @@ mod tests {
             "http://example.com/\x7f",
             "http://example.com/a\tb",
         ] {
-            assert!(parse_http_url(url).is_err(), "{url:?} must be refused");
+            assert!(parse_url(url).is_err(), "{url:?} must be refused");
         }
-        assert!(parse_http_url("http://exa mple.com/").is_err());
+        assert!(parse_url("http://exa mple.com/").is_err());
     }
 
     #[tokio::test]
@@ -581,6 +1029,7 @@ mod tests {
             "build-server",      // bare LAN name
         ] {
             let spec = FetchSpec {
+                fetch_id: "fetch-test".into(),
                 url: format!("http://{host}/latest/meta-data/"),
                 dest_path: temp_file("private"),
             };
@@ -600,6 +1049,7 @@ mod tests {
         assert!(ip_is_private("127.0.0.1".parse().unwrap()));
         assert!(ip_is_private("::ffff:127.0.0.1".parse().unwrap()));
         let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
             // `localhost.` has a dot, so only the resolved address gives it
             // away.
             url: "http://localhost./x".to_string(),
@@ -628,6 +1078,7 @@ mod tests {
         let (addr, _) = serve_once(body.clone()).await;
         let dest = temp_file("toobig");
         let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
             url: format!("http://127.0.0.1:{}/big.bin", addr.port()),
             dest_path: dest.clone(),
         };
@@ -644,6 +1095,7 @@ mod tests {
         let (addr, _) = serve_once_declaring(body, Some(1024)).await;
         let dest = temp_file("liar");
         let spec = FetchSpec {
+            fetch_id: "fetch-test".into(),
             url: format!("http://127.0.0.1:{}/big.bin", addr.port()),
             dest_path: dest.clone(),
         };

@@ -14,8 +14,11 @@ import {
   useState,
   type CSSProperties,
 } from "react";
+import type { WorkspaceFile } from "../../../shared/ipc";
 import { cn } from "../lib/cn";
-import { ideBuffers } from "../lib/ide";
+import { formatBytes } from "../lib/format";
+import { getIdeBuffer, setIdeBuffer } from "../lib/ide";
+import { IdeAudioPlayer } from "./IdeAudioPlayer";
 import { useSumaStore } from "../store";
 
 /**
@@ -26,6 +29,10 @@ import { useSumaStore } from "../store";
  * document while typing (re-rendering `File` with new contents would fight
  * it), and the buffers must survive this page unmounting on tab switches.
  * The store carries only the file LIST, the active path, and dirty booleans.
+ *
+ * Images and audio are the non-text things the pane renders: main sniffs both
+ * and sends an image as a data URL, audio as a suma-workspace:// stream URL.
+ * Neither takes a buffer, so neither can be dirty or saved.
  *
  * Theming: syntax colors come from the library's own Shiki theme pair
  * (pierre-dark/pierre-light) following the chrome's data-theme, while the
@@ -53,7 +60,9 @@ function readAppThemeType(): "dark" | "light" {
 function useAppThemeType(): "dark" | "light" {
   const [themeType, setThemeType] = useState(readAppThemeType);
   useEffect(() => {
-    const observer = new MutationObserver(() => setThemeType(readAppThemeType()));
+    const observer = new MutationObserver(() =>
+      setThemeType(readAppThemeType()),
+    );
     observer.observe(document.documentElement, {
       attributes: true,
       attributeFilter: ["data-theme"],
@@ -67,16 +76,54 @@ function basename(path: string): string {
   return path.split("/").at(-1) ?? path;
 }
 
-interface LoadedFile {
-  path: string;
-  contents: string;
-  unreadable: boolean;
+/** "image/png" → "PNG"; the caption wants the format, not the media type. */
+function formatLabel(mime: string): string {
+  return (mime.split("/").at(-1) ?? mime).replace("x-", "").toUpperCase();
+}
+
+function unreadableNotice(
+  file: Extract<WorkspaceFile, { kind: "unreadable" }>,
+): string {
+  if (file.reason === "too-large")
+    return `${file.path} is too large to open here.`;
+  if (file.reason === "unsupported") return `${file.path} is not a file.`;
+  return `${file.path} is binary — nothing to show.`;
+}
+
+/** Read-only image view: fits the pane, with format/size/dimensions beneath. */
+function ImageView({
+  file,
+}: {
+  file: Extract<WorkspaceFile, { kind: "image" }>;
+}) {
+  const [dimensions, setDimensions] = useState<string | null>(null);
+  return (
+    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 p-6">
+      <img
+        src={file.dataUrl}
+        alt={basename(file.path)}
+        onLoad={(e) =>
+          setDimensions(
+            `${e.currentTarget.naturalWidth}×${e.currentTarget.naturalHeight}`,
+          )
+        }
+        className="max-h-full min-h-0 max-w-full rounded-md object-contain"
+      />
+      <p className="shrink-0 text-[11px] text-faint">
+        {[formatLabel(file.mime), dimensions, formatBytes(file.bytes)]
+          .filter((part) => part !== null)
+          .join(" · ")}
+      </p>
+    </div>
+  );
 }
 
 export function IdeEditor() {
   const openFiles = useSumaStore((s) => s.ideOpenFiles);
   const activeFile = useSumaStore((s) => s.ideActiveFile);
   const dirty = useSumaStore((s) => s.ideDirty);
+  const workspaceKey = useSumaStore((s) => s.workspaceKey);
+  const workspaceRevision = useSumaStore((s) => s.workspaceRevision);
   const setIdeActiveFile = useSumaStore((s) => s.setIdeActiveFile);
   const closeIdeFile = useSumaStore((s) => s.closeIdeFile);
   const setIdeFileDirty = useSumaStore((s) => s.setIdeFileDirty);
@@ -84,50 +131,50 @@ export function IdeEditor() {
   const saveIdeFile = useSumaStore((s) => s.saveIdeFile);
 
   const themeType = useAppThemeType();
-  const [loaded, setLoaded] = useState<LoadedFile | null>(null);
+  const [loaded, setLoaded] = useState<WorkspaceFile | null>(null);
 
   useEffect(() => {
+    setLoaded(null);
     if (activeFile === null) {
-      setLoaded(null);
       return;
     }
     // An existing buffer wins over disk — it may hold unsaved edits.
-    const buffer = ideBuffers.get(activeFile);
+    const buffer = getIdeBuffer(workspaceKey, activeFile);
     if (buffer !== undefined) {
-      setLoaded({ path: activeFile, contents: buffer.current, unreadable: false });
+      setLoaded({ path: activeFile, kind: "text", contents: buffer.current });
       return;
     }
     let cancelled = false;
     void readIdeFile(activeFile).then((file) => {
       if (cancelled || file === undefined) return;
-      if (!file.unreadable) {
-        ideBuffers.set(activeFile, {
+      if (file.kind === "text") {
+        setIdeBuffer(workspaceKey, activeFile, {
           saved: file.contents,
           current: file.contents,
         });
       }
-      setLoaded({
-        path: activeFile,
-        contents: file.contents,
-        unreadable: file.unreadable,
-      });
+      setLoaded(file);
     });
     return () => {
       cancelled = true;
     };
-  }, [activeFile, readIdeFile]);
+  }, [activeFile, readIdeFile, workspaceKey, workspaceRevision]);
 
   const save = useCallback(
     async (path: string): Promise<void> => {
-      const buffer = ideBuffers.get(path);
+      const buffer = getIdeBuffer(workspaceKey, path);
       if (buffer === undefined || buffer.current === buffer.saved) return;
       const contents = buffer.current;
       if (await saveIdeFile(path, contents)) {
         buffer.saved = contents;
-        setIdeFileDirty(path, buffer.current !== contents);
+        // A save started just before a workspace switch must not clear the
+        // dirty flag for an unrelated file with the same relative path.
+        if (useSumaStore.getState().workspaceKey === workspaceKey) {
+          setIdeFileDirty(path, buffer.current !== contents);
+        }
       }
     },
-    [saveIdeFile, setIdeFileDirty],
+    [saveIdeFile, setIdeFileDirty, workspaceKey],
   );
   const saveRef = useRef(save);
   saveRef.current = save;
@@ -138,7 +185,7 @@ export function IdeEditor() {
   dirtyRef.current = (file) => {
     const path = file.cacheKey;
     if (typeof path !== "string") return;
-    const buffer = ideBuffers.get(path);
+    const buffer = getIdeBuffer(workspaceKey, path);
     if (buffer === undefined) return;
     buffer.current = file.contents;
     setIdeFileDirty(path, buffer.current !== buffer.saved);
@@ -235,16 +282,26 @@ export function IdeEditor() {
           <p className="p-4 text-[12px] text-faint">
             No file open — pick one in the explorer.
           </p>
-        ) : loaded === null ? null : loaded.unreadable ? (
+        ) : loaded === null ? null : loaded.kind === "image" ? (
+          <ImageView
+            key={`${workspaceKey}:${workspaceRevision}:${loaded.path}`}
+            file={loaded}
+          />
+        ) : loaded.kind === "audio" ? (
+          <IdeAudioPlayer
+            key={`${workspaceKey}:${workspaceRevision}:${loaded.path}`}
+            file={loaded}
+          />
+        ) : loaded.kind === "unreadable" ? (
           <p className="p-4 text-[12px] text-faint">
-            {loaded.path} is binary or too large to edit here.
+            {unreadableNotice(loaded)}
           </p>
         ) : (
           <EditProvider createEditor={createEditor}>
             <File
               // Keyed per path: each file gets a fresh Editor; the buffer map
               // preserves its text across switches.
-              key={loaded.path}
+              key={`${workspaceKey}:${workspaceRevision}:${loaded.path}`}
               file={{
                 name: loaded.path,
                 contents: loaded.contents,

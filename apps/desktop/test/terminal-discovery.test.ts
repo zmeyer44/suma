@@ -6,6 +6,7 @@
  * points the desktop at the VM the control plane reports.
  */
 
+import os from "node:os";
 import { describe, expect, it } from "vitest";
 import type { AgentCtlRequest, AgentCtlResponse } from "@suma/protocol";
 import type { Duplex } from "node:stream";
@@ -43,6 +44,12 @@ class FakeLink implements AgentLink {
     return { write: () => undefined, close: () => undefined };
   }
   forward(_port: number, _socket: Duplex): void {}
+  async vfs(): Promise<never> {
+    throw new Error("the fake link has no filesystem");
+  }
+  vfsRootLabel(): string {
+    return "~/cloud";
+  }
   stop(): void {}
 }
 
@@ -113,7 +120,9 @@ describe("TerminalService.discover", () => {
 
 describe("SimAgent pty.list", () => {
   it("mirrors the Rust agent's listing contract", async () => {
-    const sim = new SimAgent();
+    // Explicit temp root: the default is ~/Suma, and a unit test must not
+    // plant product folders on the machine running it.
+    const sim = new SimAgent({ root: () => os.tmpdir() });
     const spawned = await sim.ctl({ t: "pty.spawn", ptyId: "sim-1", cols: 80, rows: 24 });
     expect(spawned?.t).toBe("pty.spawned");
     const listing = await sim.ctl({ t: "pty.list" });

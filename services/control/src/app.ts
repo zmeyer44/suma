@@ -225,6 +225,9 @@ const signupSchema = z.object({
   homeRegion: z.string().min(2).max(16).optional(),
   /** Required in deployments where the invite gate is on (§11). */
   inviteCode: z.string().min(1).max(128).optional(),
+  /** "cloud" (default) provisions a VM; "local" records that the user
+   *  dedicated their first Mac as the computer — no VM is created. */
+  computeMode: z.enum(["cloud", "local"]).optional(),
 });
 
 const mintInvitesSchema = z.object({
@@ -452,6 +455,10 @@ const transferProgressSchema = z
   })
   .strict();
 
+const deviceTransferProgressSchema = transferProgressSchema
+  .omit({ transferId: true })
+  .strict();
+
 const auditQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
   // Keyset cursor: the id of the last entry on the previous page.
@@ -623,6 +630,10 @@ export function createApp(
   // Vended inference (src/inference.ts). Default CLOSED (no upstream key);
   // deployed entrypoints pass inferenceOptionsFromEnv.
   inferenceOptions: InferenceOptions = INFERENCE_DISABLED,
+  // Home-machine relay presence (src/relay.ts) — lets /v1/machine tell an
+  // away device whether the home Mac's socket is up. Absent (tests,
+  // embedded) ⇒ reported offline, which is the honest unknown.
+  relayPresence?: { homeOnline(userId: string): boolean },
 ): Hono<AuthEnv> {
   const app = new Hono<AuthEnv>();
 
@@ -1043,6 +1054,7 @@ export function createApp(
       }
     };
 
+    const computeMode = body.computeMode ?? "cloud";
     const [user] = await db
       .insert(users)
       .values({
@@ -1050,6 +1062,7 @@ export function createApp(
         displayName: body.displayName ?? null,
         homeRegion: body.homeRegion ?? "iad",
         features: [...DEFAULT_ACCOUNT_FEATURES],
+        computeMode,
       })
       .returning();
     if (!user) {
@@ -1075,34 +1088,41 @@ export function createApp(
       })
       .returning();
 
-    const [machine] = await db
-      .insert(machines)
-      .values({
-        userId: user.id,
-        state: "provisioning",
-        region: user.homeRegion,
-        cpuKind: DEFAULT_MACHINE_SPEC.cpuKind,
-        cpus: DEFAULT_MACHINE_SPEC.cpus,
-        memoryMb: DEFAULT_MACHINE_SPEC.memoryMb,
-      })
-      .returning();
-    if (!space || !machine) return c.json({ error: "internal" }, 500);
-
-    const provisioned = await sandbox.provision({
-      userId: user.id,
-      machineId: machine.id,
-      region: machine.region,
-      spec: DEFAULT_MACHINE_SPEC,
-    });
-    if (provisioned.agentAddress !== null) {
-      const [addressed] = await db
-        .update(machines)
-        .set({ agentAddress: provisioned.agentAddress })
-        .where(eq(machines.id, machine.id))
+    // Local mode: the user's first Mac IS the computer — no machines row,
+    // nothing to provision. The home device is recorded at enrollment.
+    let machine = null;
+    if (computeMode === "cloud") {
+      const [inserted] = await db
+        .insert(machines)
+        .values({
+          userId: user.id,
+          state: "provisioning",
+          region: user.homeRegion,
+          cpuKind: DEFAULT_MACHINE_SPEC.cpuKind,
+          cpus: DEFAULT_MACHINE_SPEC.cpus,
+          memoryMb: DEFAULT_MACHINE_SPEC.memoryMb,
+        })
         .returning();
-      if (addressed) Object.assign(machine, addressed);
+      if (!inserted) return c.json({ error: "internal" }, 500);
+      machine = inserted;
+
+      const provisioned = await sandbox.provision({
+        userId: user.id,
+        machineId: machine.id,
+        region: machine.region,
+        spec: DEFAULT_MACHINE_SPEC,
+      });
+      if (provisioned.agentAddress !== null) {
+        const [addressed] = await db
+          .update(machines)
+          .set({ agentAddress: provisioned.agentAddress })
+          .where(eq(machines.id, machine.id))
+          .returning();
+        if (addressed) Object.assign(machine, addressed);
+      }
     }
-    await audit(user.id, "account.created", { email: user.email });
+    if (!space) return c.json({ error: "internal" }, 500);
+    await audit(user.id, "account.created", { email: user.email, computeMode });
 
     // Signed bootstrap token (did = sub): unforgeable from a known userId,
     // lets the first device enroll before it has a device credential. The
@@ -1302,6 +1322,25 @@ export function createApp(
       })
       .returning();
     if (!device) return c.json({ error: "internal" }, 500);
+    // Local compute mode: the first enrolled device becomes the home
+    // machine. The isNull guard makes it first-wins — a racing second
+    // enroll cannot steal the seat.
+    let isHomeMachine = false;
+    const [claimed] = await db
+      .update(users)
+      .set({ homeDeviceId: device.id })
+      .where(
+        and(
+          eq(users.id, userId),
+          eq(users.computeMode, "local"),
+          isNull(users.homeDeviceId),
+        ),
+      )
+      .returning({ id: users.id });
+    if (claimed) {
+      isHomeMachine = true;
+      await audit(userId, "device.homeMachine", { deviceId: device.id }, device.id);
+    }
     await audit(
       userId,
       "device.enrolled",
@@ -1309,7 +1348,10 @@ export function createApp(
       device.id,
     );
     // Device-bound token: dies with the device on revocation (see auth.ts).
-    return c.json({ device, hubToken: hubTokenFor(userId, device.id) }, 201);
+    return c.json(
+      { device, hubToken: hubTokenFor(userId, device.id), isHomeMachine },
+      201,
+    );
   });
 
   v1.get("/devices", async (c) => {
@@ -1617,14 +1659,35 @@ export function createApp(
       .select()
       .from(machines)
       .where(eq(machines.userId, userId));
-    if (!machine) return c.json({ error: "not_found" }, 404);
+    if (!machine) {
+      // Local mode has no machines row by design — answer 200 with the mode
+      // so the desktop can tell "your Mac is the computer" from "control
+      // plane down" (a real 404 stays a cloud-mode bug signal).
+      const [user] = await db
+        .select({
+          computeMode: users.computeMode,
+          homeDeviceId: users.homeDeviceId,
+        })
+        .from(users)
+        .where(eq(users.id, userId));
+      if (user && user.computeMode === "local") {
+        return c.json({
+          mode: "local",
+          machine: null,
+          events: [],
+          homeDeviceId: user.homeDeviceId,
+          homeOnline: relayPresence?.homeOnline(userId) ?? false,
+        });
+      }
+      return c.json({ error: "not_found" }, 404);
+    }
     const events = await db
       .select()
       .from(machineEvents)
       .where(eq(machineEvents.machineId, machine.id))
       .orderBy(desc(machineEvents.createdAt))
       .limit(20);
-    return c.json({ machine, events });
+    return c.json({ mode: "cloud", machine, events });
   });
 
   v1.post(
@@ -2955,6 +3018,104 @@ export function createApp(
     },
   );
 
+  /** Apply a progress report after its caller has been authenticated. Both
+   * the capability route (direct agents) and the device route (the desktop
+   * relaying unsolicited agent events) use this exact transition gate. */
+  const updateTransferProgress = async (
+    userId: string,
+    body: z.infer<typeof transferProgressSchema>,
+  ): Promise<Response> => {
+    const [transfer] = await db
+      .select()
+      .from(transfers)
+      .where(
+        and(eq(transfers.id, body.transferId), eq(transfers.userId, userId)),
+      );
+    if (!transfer)
+      return Response.json({ error: "not_found" }, { status: 404 });
+
+    const from = transfer.state as (typeof TRANSFER_STATES)[number];
+    if (isTerminalTransfer(from)) {
+      return Response.json(
+        { error: "transfer_terminal", state: from },
+        { status: 409 },
+      );
+    }
+    if (!canTransferTransition(from, body.state)) {
+      return Response.json(
+        { error: "illegal_transition", from, to: body.state },
+        { status: 409 },
+      );
+    }
+    // A total the creating device took from Content-Length is fixed: letting
+    // the VM restate it would let a transfer redefine the quota it was
+    // admitted against.
+    if (
+      body.totalBytes !== undefined &&
+      transfer.totalBytes > 0 &&
+      body.totalBytes !== transfer.totalBytes
+    ) {
+      return Response.json(
+        {
+          error: "out_of_range",
+          field: "totalBytes",
+          reason: "total_changed",
+        },
+        { status: 400 },
+      );
+    }
+    const totalBytes =
+      transfer.totalBytes > 0 ? transfer.totalBytes : (body.totalBytes ?? 0);
+    // Progress is a counter, not a gauge: a decrease is a corrupt report.
+    if (body.receivedBytes < transfer.receivedBytes) {
+      return Response.json(
+        {
+          error: "out_of_range",
+          field: "receivedBytes",
+          reason: "decreased",
+        },
+        { status: 400 },
+      );
+    }
+    if (totalBytes > 0 && body.receivedBytes > totalBytes) {
+      return Response.json(
+        {
+          error: "out_of_range",
+          field: "receivedBytes",
+          reason: "exceeds_total",
+        },
+        { status: 400 },
+      );
+    }
+
+    const [updated] = await db
+      .update(transfers)
+      .set({
+        state: body.state,
+        receivedBytes: body.receivedBytes,
+        totalBytes,
+        error: body.error ?? null,
+        updatedAt: new Date(),
+        // The stored URL is kept only while the fetch can still use it. Once
+        // the transfer stops moving, what remains is a link that may be
+        // bearer authority over someone else's object, sitting in a row with
+        // no expiry — so it is truncated to the part the UI needs.
+        ...(isTerminalTransfer(body.state)
+          ? { url: redactTransferUrl(transfer.url) }
+          : {}),
+      })
+      // Conditional on the state we validated against, so two concurrent
+      // reports cannot interleave into an illegal move.
+      .where(and(eq(transfers.id, transfer.id), eq(transfers.state, from)))
+      .returning();
+    if (!updated)
+      return Response.json(
+        { error: "conflict", from, to: body.state },
+        { status: 409 },
+      );
+    return Response.json({ transfer: transferView(updated) });
+  };
+
   // Agent-authenticated progress. The caller is inside the user's VM, so every
   // number is bounded and every illegal move is refused rather than stored.
   v1.post(
@@ -2965,93 +3126,22 @@ export function createApp(
       const refusal = transferReportRefusal(agent.caps);
       if (refusal)
         return c.json({ error: "capability_refused", reason: refusal }, 403);
-      const body = c.req.valid("json");
-      const [transfer] = await db
-        .select()
-        .from(transfers)
-        .where(
-          and(
-            eq(transfers.id, body.transferId),
-            eq(transfers.userId, agent.userId),
-          ),
-        );
-      if (!transfer) return c.json({ error: "not_found" }, 404);
-
-      const from = transfer.state as (typeof TRANSFER_STATES)[number];
-      if (isTerminalTransfer(from)) {
-        return c.json({ error: "transfer_terminal", state: from }, 409);
-      }
-      if (!canTransferTransition(from, body.state)) {
-        return c.json(
-          { error: "illegal_transition", from, to: body.state },
-          409,
-        );
-      }
-      // A total the creating device took from Content-Length is fixed: letting
-      // the VM restate it would let a transfer redefine the quota it was
-      // admitted against.
-      if (
-        body.totalBytes !== undefined &&
-        transfer.totalBytes > 0 &&
-        body.totalBytes !== transfer.totalBytes
-      ) {
-        return c.json(
-          {
-            error: "out_of_range",
-            field: "totalBytes",
-            reason: "total_changed",
-          },
-          400,
-        );
-      }
-      const totalBytes =
-        transfer.totalBytes > 0 ? transfer.totalBytes : (body.totalBytes ?? 0);
-      // Progress is a counter, not a gauge: a decrease is a corrupt report.
-      if (body.receivedBytes < transfer.receivedBytes) {
-        return c.json(
-          {
-            error: "out_of_range",
-            field: "receivedBytes",
-            reason: "decreased",
-          },
-          400,
-        );
-      }
-      if (totalBytes > 0 && body.receivedBytes > totalBytes) {
-        return c.json(
-          {
-            error: "out_of_range",
-            field: "receivedBytes",
-            reason: "exceeds_total",
-          },
-          400,
-        );
-      }
-
-      const [updated] = await db
-        .update(transfers)
-        .set({
-          state: body.state,
-          receivedBytes: body.receivedBytes,
-          totalBytes,
-          error: body.error ?? null,
-          updatedAt: new Date(),
-          // The stored URL is kept only while the fetch can still use it. Once
-          // the transfer stops moving, what remains is a link that may be
-          // bearer authority over someone else's object, sitting in a row with
-          // no expiry — so it is truncated to the part the UI needs.
-          ...(isTerminalTransfer(body.state)
-            ? { url: redactTransferUrl(transfer.url) }
-            : {}),
-        })
-        // Conditional on the state we validated against, so two concurrent
-        // reports cannot interleave into an illegal move.
-        .where(and(eq(transfers.id, transfer.id), eq(transfers.state, from)))
-        .returning();
-      if (!updated)
-        return c.json({ error: "conflict", from, to: body.state }, 409);
-      return c.json({ transfer: transferView(updated) });
+      return updateTransferProgress(agent.userId, c.req.valid("json"));
     },
+  );
+
+  // Device-authenticated relay for agent events. The desktop owns the live
+  // mux connection in both cloud and local modes, so it is the component that
+  // can durably report those events when the agent has no control-plane token.
+  v1.post(
+    "/files/transfers/:id/progress",
+    zValidator("param", idParamSchema),
+    zValidator("json", deviceTransferProgressSchema),
+    async (c) =>
+      updateTransferProgress(c.get("userId"), {
+        transferId: c.req.valid("param").id,
+        ...c.req.valid("json"),
+      }),
   );
 
   v1.post(

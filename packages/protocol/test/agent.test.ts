@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CAPABILITIES,
   CTL_CAPABILITY,
+  FETCH_CANCELLED_ERROR,
   TERMINAL_CAPABILITIES,
   accruedCostUsd,
   checkCapability,
@@ -11,6 +12,7 @@ import {
   hourlyRateUsd,
   parseChannel,
   parseCtlRequest,
+  parseCtlResponse,
   type CapabilityClaims,
   type LifecycleInputs,
   type ProcessTreeInfo,
@@ -68,6 +70,69 @@ describe("capability tokens (I-2: VM compromise is worthless beyond the VM)", ()
   });
 });
 
+describe("ctl fetch/watch wire shapes", () => {
+  it("round-trips fetch.started, fetch.failed, and vfs.changed", () => {
+    const samples = [
+      {
+        t: "fetch.started",
+        fetchId: "fetch-1",
+        url: "https://cdn.example.com/a.bin",
+        path: "/Downloads/a.bin",
+      },
+      {
+        t: "fetch.failed",
+        fetchId: "fetch-1",
+        url: "https://cdn.example.com/a.bin",
+        path: "/Downloads/a.bin",
+        error: "fetch truncated: got 5 of 10 bytes",
+      },
+      { t: "vfs.changed" },
+      { t: "vfs.changed", paths: ["/notes/a.txt", "/empty/"] },
+    ];
+    for (const sample of samples) {
+      expect(parseCtlResponse(JSON.stringify(sample))).toEqual(sample);
+    }
+  });
+
+  it("fetch.done carries the agent's manifest instead of stripping it", () => {
+    const done = {
+      t: "fetch.done",
+      fetchId: "fetch-1",
+      url: "https://cdn.example.com/a.bin",
+      path: "/Downloads/a.bin",
+      bytes: 5,
+      manifest: {
+        fileHash: "b".repeat(64),
+        totalBytes: 5,
+        chunks: [{ hash: "a".repeat(64), offset: 0, length: 5 }],
+      },
+    };
+    const parsed = parseCtlResponse(JSON.stringify(done));
+    expect(parsed).toEqual(done);
+    // Old agents that send no manifest still parse.
+    const { manifest: _dropped, ...bare } = done;
+    expect(parseCtlResponse(JSON.stringify(bare))).toEqual(bare);
+  });
+
+  it("parses fetch.cancel and exposes the cancelled sentinel", () => {
+    const cancel = parseCtlRequest(
+      JSON.stringify({ t: "fetch.cancel", fetchId: "fetch-1" }),
+    );
+    expect(cancel).toEqual({ t: "fetch.cancel", fetchId: "fetch-1" });
+    // Same fetchId validation as fetch.public.
+    expect(() =>
+      parseCtlRequest(JSON.stringify({ t: "fetch.cancel", fetchId: "" })),
+    ).toThrow();
+    expect(() =>
+      parseCtlRequest(JSON.stringify({ t: "fetch.cancel", fetchId: "has spaces" })),
+    ).toThrow();
+    // Cancelling is scoped by the fetch grant.
+    expect(CTL_CAPABILITY["fetch.cancel"]).toBe("fetch.public");
+    // The sentinel a cancelled fetch reports.
+    expect(FETCH_CANCELLED_ERROR).toBe("cancelled by the user");
+  });
+});
+
 describe("mux channels (Appendix C)", () => {
   it("parses the documented channel names", () => {
     expect(parseChannel("ctl")).toEqual({ kind: "ctl" });
@@ -75,10 +140,24 @@ describe("mux channels (Appendix C)", () => {
     expect(parseChannel("log")).toEqual({ kind: "log" });
     expect(parseChannel("pty/abc123")).toEqual({ kind: "pty", id: "abc123" });
     expect(parseChannel("fwd/3000")).toEqual({ kind: "fwd", port: 3000 });
+    // Stream-id form (the relay carries many forwards on one connection).
+    expect(parseChannel("fwd/3000/s-1")).toEqual({ kind: "fwd", port: 3000, id: "s-1" });
   });
 
   it("rejects malformed or out-of-range channels", () => {
-    for (const bad of ["", "nope", "pty/", "pty", "fwd/0", "fwd/70000", "fwd/abc", "fwd"]) {
+    for (const bad of [
+      "",
+      "nope",
+      "pty/",
+      "pty",
+      "fwd/0",
+      "fwd/70000",
+      "fwd/abc",
+      "fwd",
+      "fwd/3000/", // empty stream id
+      "fwd/80abc", // strict port — no parseInt truncation (matches Rust)
+      "fwd/80abc/s-1",
+    ]) {
       expect(parseChannel(bad), bad).toBeNull();
     }
   });
@@ -92,7 +171,14 @@ describe("mux channels (Appendix C)", () => {
     expect(() => parseCtlRequest(JSON.stringify({ t: "nope" }))).toThrow();
     // Only public/presigned URLs — the shape refuses anything that isn't a URL.
     expect(() =>
-      parseCtlRequest(JSON.stringify({ t: "fetch.public", url: "not a url", destPath: "/x" })),
+      parseCtlRequest(
+        JSON.stringify({
+          t: "fetch.public",
+          fetchId: "fetch-1",
+          url: "not a url",
+          destPath: "/x",
+        }),
+      ),
     ).toThrow();
   });
 
@@ -103,12 +189,26 @@ describe("mux channels (Appendix C)", () => {
     // attacker-chosen header — or a second request entirely.
     const smuggle = "http://host/x HTTP/1.1\r\nCookie: stolen\r\n\r\nGET /admin";
     expect(() =>
-      parseCtlRequest(JSON.stringify({ t: "fetch.public", url: smuggle, destPath: "/x" })),
+      parseCtlRequest(
+        JSON.stringify({
+          t: "fetch.public",
+          fetchId: "fetch-1",
+          url: smuggle,
+          destPath: "/x",
+        }),
+      ),
     ).toThrow();
     // Percent-encoded CRLF is not an injection and stays allowed.
     const encoded = "https://example.com/a%0d%0ab";
     expect(
-      parseCtlRequest(JSON.stringify({ t: "fetch.public", url: encoded, destPath: "/x" })).t,
+      parseCtlRequest(
+        JSON.stringify({
+          t: "fetch.public",
+          fetchId: "fetch-1",
+          url: encoded,
+          destPath: "/x",
+        }),
+      ).t,
     ).toBe("fetch.public");
   });
 });

@@ -14,7 +14,14 @@ function stateLabel(item: DownloadItemInfo, movedToCloud: boolean): { text: stri
     case "progressing":
       return { text: downloadProgress(item.receivedBytes, item.totalBytes).label, className: "text-muted" };
     case "completed":
-      return { text: formatBytes(item.receivedBytes), className: "text-faint" };
+      // cloudPath = the finished file was also mirrored onto the account's
+      // computer (cloud mode) — the one detail worth a word here.
+      return item.cloudPath !== undefined
+        ? {
+            text: `${formatBytes(item.receivedBytes)} · also on your computer`,
+            className: "text-faint",
+          }
+        : { text: formatBytes(item.receivedBytes), className: "text-faint" };
     case "cancelled":
       // The local download was stopped because the cloud is fetching it — say
       // that, rather than leaving a bare "Cancelled" the user did not do.
@@ -35,10 +42,13 @@ const TRANSFER_LABELS: Readonly<Record<Transfer["state"], string>> = {
   cancelled: "Cancelled",
 };
 
-function TransferRow({ transfer }: { transfer: Transfer }) {
+function TransferRow({ transfer }: { transfer: Transfer & { cancellable?: boolean } }) {
   const cancelTransfer = useSumaStore((s) => s.cancelTransfer);
   const active =
     transfer.state === "queued" || transfer.state === "fetching" || transfer.state === "storing";
+  // Cancellable is true for active fetches; false only in the brief window
+  // where a cancel is already in flight (the button would be a no-op).
+  const cancellable = transfer.cancellable !== false;
   const progress = downloadProgress(transfer.receivedBytes, transfer.totalBytes);
   const host = hostOf(transfer.url);
 
@@ -63,7 +73,9 @@ function TransferRow({ transfer }: { transfer: Transfer }) {
             </span>
           ) : null}
         </span>
-        {active || transfer.state === "failed" ? (
+        {active && !cancellable ? (
+          <span className="shrink-0 text-[10.5px] text-faint">Cancelling…</span>
+        ) : active || transfer.state === "failed" ? (
           <Button
             size="sm"
             variant={transfer.state === "failed" ? "secondary" : "danger"}

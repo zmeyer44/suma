@@ -82,8 +82,41 @@ export function localOnlyMachineStatus(): MachineStatus {
   return {
     machineId: null,
     state: "suspended",
-    spec: { cpus: DEFAULT_MACHINE_SPEC.cpus, memoryMb: DEFAULT_MACHINE_SPEC.memoryMb },
-    reason: "No cloud machine — Suma is running local-only without a control plane.",
+    spec: {
+      cpus: DEFAULT_MACHINE_SPEC.cpus,
+      memoryMb: DEFAULT_MACHINE_SPEC.memoryMb,
+    },
+    reason:
+      "No cloud machine — Suma is running local-only without a control plane.",
+    hourlyRate: "",
+    accruedUsd: 0,
+    reconstructed: false,
+  };
+}
+
+/** Local compute mode: this Mac IS the computer — by choice, not absence. */
+export function localHomeMachineStatus(): MachineStatus {
+  return {
+    machineId: null,
+    state: "running",
+    spec: { cpus: 0, memoryMb: 0 },
+    reason: "This Mac is your computer — your files live in its Suma folder.",
+    hourlyRate: "",
+    accruedUsd: 0,
+    reconstructed: false,
+  };
+}
+
+/** Local compute mode, seen from a device that is NOT the home Mac. That Mac
+ *  is reached over the relay — `homeOnline` says whether it is currently up. */
+export function localAwayMachineStatus(homeOnline: boolean): MachineStatus {
+  return {
+    machineId: null,
+    state: homeOnline ? "running" : "suspended",
+    spec: { cpus: 0, memoryMb: 0 },
+    reason: homeOnline
+      ? "Connected to your computer — another Mac. Your files and shells live there."
+      : "Your computer is offline. Suma will reconnect when it's back online.",
     hourlyRate: "",
     accruedUsd: 0,
     reconstructed: false,
@@ -101,16 +134,22 @@ export interface PresentMachineArgs {
 
 export function presentMachineStatus(args: PresentMachineArgs): MachineStatus {
   const { machine, latestEvent, lifecycleExplanation, nowMs } = args;
-  const state: MachineState = (MACHINE_STATES as readonly string[]).includes(machine.state)
+  const state: MachineState = (MACHINE_STATES as readonly string[]).includes(
+    machine.state,
+  )
     ? (machine.state as MachineState)
     : "error";
   // Cost of the current awake stretch (since the last transition into an
   // awake state). The billing aggregate across stretches lives on the control
   // plane (§11) — this meter is the live "why is it costing money right now".
   const transitionMs =
-    machine.lastTransitionAt === null ? Number.NaN : Date.parse(machine.lastTransitionAt);
+    machine.lastTransitionAt === null
+      ? Number.NaN
+      : Date.parse(machine.lastTransitionAt);
   const awakeMs =
-    isAwakeState(state) && Number.isFinite(transitionMs) ? Math.max(0, nowMs - transitionMs) : 0;
+    isAwakeState(state) && Number.isFinite(transitionMs)
+      ? Math.max(0, nowMs - transitionMs)
+      : 0;
   return {
     machineId: machine.id,
     state,

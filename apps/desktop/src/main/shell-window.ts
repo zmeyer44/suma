@@ -19,7 +19,11 @@ import {
   type WebContents,
 } from "electron";
 import type { ContentBounds } from "../shared/ipc";
-import { DEFAULT_SPLIT_RATIO, paneBoundsFor, type PaneRegion } from "../shared/pane-layout";
+import {
+  DEFAULT_SPLIT_RATIO,
+  paneBoundsFor,
+  type PaneRegion,
+} from "../shared/pane-layout";
 import type { SelectionRect } from "../shared/selection";
 import { selectionToolbarBounds } from "./selection-core";
 import {
@@ -50,6 +54,13 @@ function backgroundFor(dark: boolean): string {
  * and tinted by the wallpaper rather than a plain frosted white.
  */
 const VIBRANCY_MATERIAL = "sidebar" as const;
+
+/**
+ * Height of the tab strip (TabStrip.tsx), used only to guess the content hole
+ * before the renderer has measured and reported its own. The renderer's report
+ * is the source of truth the moment it arrives.
+ */
+const STRIP_H = 40;
 
 /**
  * The floating overlay (OverlayStack.tsx): a transparent WebContentsView
@@ -94,7 +105,10 @@ export function savePreviewBounds(
     x: Math.max(hole.x, hole.x + hole.width - width - SAVE_PREVIEW_MARGIN),
     y: hole.y + SAVE_PREVIEW_MARGIN,
     width,
-    height: Math.min(stackHeight, Math.max(hole.height - SAVE_PREVIEW_MARGIN * 2, 0)),
+    height: Math.min(
+      stackHeight,
+      Math.max(hole.height - SAVE_PREVIEW_MARGIN * 2, 0),
+    ),
   };
 }
 
@@ -167,8 +181,9 @@ export class ShellWindow {
       minHeight: 600,
       title: "Suma",
       titleBarStyle: "hiddenInset",
-      // Center the traffic lights in the 48px tab strip (TabStrip.tsx).
-      trafficLightPosition: { x: 18, y: 17 },
+      // Center the traffic lights in the 40px tab strip (TabStrip.tsx) — the
+      // same offset Chrome uses, since the strip is now the same height.
+      trafficLightPosition: { x: 14, y: 14 },
       // The window exists before the renderer has read its theme, so it opens
       // on whatever this Mac asks for — the same thing lib/theme.ts will pick.
       backgroundColor: backgroundFor(this.darkBackground),
@@ -433,7 +448,7 @@ export class ShellWindow {
     if (hole === null) {
       // Before the renderer's first report: below where the strip will be.
       const { width, height } = this.window.getContentBounds();
-      hole = { x: 0, y: 48, width, height: Math.max(height - 48, 0) };
+      hole = { x: 0, y: STRIP_H, width, height: Math.max(height - STRIP_H, 0) };
     }
     const bounds = savePreviewBounds(
       hole,
@@ -477,7 +492,7 @@ export class ShellWindow {
   private pipHole(): ContentBounds {
     if (this.lastContentBounds !== null) return this.lastContentBounds;
     const { width, height } = this.window.getContentBounds();
-    return { x: 0, y: 48, width, height: Math.max(height - 48, 0) };
+    return { x: 0, y: STRIP_H, width, height: Math.max(height - STRIP_H, 0) };
   }
 
   /** Show the player (placing it bottom-right on first use) and top it. */
@@ -688,12 +703,17 @@ export class ShellWindow {
   }
 
   private applyTabBounds(): void {
-    for (const [view, region] of this.tabViews) this.applyBoundsTo(view, region);
+    for (const [view, region] of this.tabViews)
+      this.applyBoundsTo(view, region);
   }
 
   private applyBoundsTo(view: WebContentsView, region: PaneRegion): void {
     if (this.lastContentBounds === null || !this.wantsVisible.has(view)) return;
-    const bounds = paneBoundsFor(this.lastContentBounds, region, this.splitRatio);
+    const bounds = paneBoundsFor(
+      this.lastContentBounds,
+      region,
+      this.splitRatio,
+    );
     // A collapsed pane (window too narrow to split) hides rather than crushes —
     // and re-shows when widening resolves its pane again.
     if (bounds === null) {
@@ -710,7 +730,9 @@ export class ShellWindow {
       await this.chromeView.webContents.loadURL(devUrl);
       return;
     }
-    await this.chromeView.webContents.loadFile(path.join(dirname, "../renderer/index.html"));
+    await this.chromeView.webContents.loadFile(
+      path.join(dirname, "../renderer/index.html"),
+    );
   }
 
   private async loadSavePreview(): Promise<void> {

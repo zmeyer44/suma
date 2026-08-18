@@ -57,21 +57,34 @@ import { StatusPills } from "./StatusPills";
  * hover. The active tab is
  * a manila-folder silhouette — rounded top corners, sides tapering ~4°
  * outward, and concave bottom flares — drawn as an SVG path so it merges
- * seamlessly into the chrome panel below. Geometry and shading were sampled
- * frame-by-frame from the reference capture:
- *   top radius ≈ 0.28·H, flare radius ≈ 0.21·H, side taper ≈ 0.07·H,
- *   fill = panel color with a faint lighter wash at the top,
- *   and one uniform 1px highlight tracing the whole silhouette (it continues
- *   into the strip's bottom hairline, which is the panel's top edge).
+ * seamlessly into the chrome panel below. Shading was sampled frame-by-frame
+ * from the reference capture — fill = panel color with a faint lighter wash at
+ * the top, and one uniform 1px highlight tracing the whole silhouette (it
+ * continues into the strip's bottom hairline, which is the panel's top edge).
+ *
+ * The silhouette's proportions are:
+ *   top radius ≈ 0.35·H, flare radius ≈ 0.26·H, side taper ≈ 0.07·H.
+ * The two radii are opened up from what the capture measured (0.28·H / 0.21·H)
+ * so the corners ease in and out over most of the tab's height instead of
+ * turning over a short arc — at 34px a tighter radius reads as a hard corner.
+ * They are what is left of the height once both arcs are drawn that sets how
+ * much straight taper remains (DY below), so raising either one softens the
+ * whole outline rather than just its ends.
+ *
+ * The tab is 34px on a 40px strip — Chrome's own tab metrics, so a Suma
+ * window sitting beside a Chrome one has its tabs at the same height. Every
+ * other dimension in the strip is derived from those two: the folder's radii
+ * follow the ratios above, and the strip's 6px of headroom is what the
+ * inactive tabs' bottom gap is measured against.
  */
-const TAB_H = 40;
+const TAB_H = 34;
 const FLARE = 9;
-const RADIUS = 11;
-const TAPER = 3;
+const RADIUS = 12;
+const TAPER = 2.5;
 /** The active tab's silhouette, shared with the modal chrome (lib/folder). */
 const FOLDER = { h: TAB_H, flare: FLARE, radius: RADIUS, taper: TAPER };
 
-/** The folder-shaped backdrop behind the active tab; flares overflow 9px per side. */
+/** The folder-shaped backdrop behind the active tab; flares overflow FLARE per side. */
 function FolderShell() {
   const [ref, width] = useMeasuredWidth();
   const gradientId = useId();
@@ -84,7 +97,8 @@ function FolderShell() {
     <div
       ref={ref}
       aria-hidden="true"
-      className="pointer-events-none absolute -inset-x-[9px] bottom-0 h-[40px]"
+      className="pointer-events-none absolute bottom-0"
+      style={{ left: -FLARE, right: -FLARE, height: TAB_H }}
     >
       {width > 0 ? (
         <svg
@@ -124,8 +138,9 @@ function FolderShell() {
   );
 }
 
-const HOVER_H = 32;
-const HOVER_R = 9;
+const HOVER_H = 28;
+/** Same 0.35·H the folder's top corners use, at the raised fill's height. */
+const HOVER_R = 10;
 /** Visual gap between the active tab's silhouette and an adjacent raised fill. */
 const GAP = 5;
 
@@ -227,6 +242,26 @@ function HoverShell({ side }: { side: "left" | "right" }) {
 }
 
 /**
+ * Chrome's hairline between two adjacent inactive tabs. Inactive tabs are
+ * bare until hovered, so without it a row of them reads as one run of text —
+ * the line is what marks where one tab ends and the next begins.
+ *
+ * It is drawn on the RIGHT edge of the left tab of the pair, and that side is
+ * load-bearing: the line has to vanish while either neighbour is hovered (the
+ * raised fill runs to the tab's own edge, and a line hard against it reads as
+ * a border on the fill rather than as a divider), and CSS can look forward to
+ * a next sibling — `:has(+ *:hover)` — but never back to a previous one.
+ */
+function TabSeparator() {
+  return (
+    <span
+      aria-hidden="true"
+      className="pointer-events-none absolute top-1/2 right-0 h-4 w-px -translate-y-1/2 bg-ink/15 transition-opacity duration-150 group-hover:opacity-0 [:has(+*:hover)>&]:opacity-0"
+    />
+  );
+}
+
+/**
  * A tab's origin — "" for an internal page (`suma://settings`), which has
  * none. Empty is exactly what ContinuityDot renders as a spacer and what
  * keeps the sync corpus from being consulted about a host called "settings".
@@ -282,15 +317,26 @@ function TabNavButton({
 }
 
 /**
- * Progressive nav reveal: bare at rest, reload alone once the tab is hovered,
- * and back/forward unfolding to its left when the pointer reaches the cluster.
- * `group/nav` wraps the *whole* cluster rather than the reload button, so
- * sliding onto an arrow keeps the arrows open — and since the cluster
- * collapses to zero width at rest, it can only be entered via the revealed
- * reload button. Each slot tweens with the grid 0fr→1fr trick, so the widths
- * follow their content instead of a hardcoded pixel value and everything
- * downstream (favicon, title, omnibox) slides rather than jumps. Directions
- * with no history are omitted entirely — never shown as dead affordances.
+ * The tab's favicon with its nav controls (back, forward, reload) folded in
+ * behind it: at rest the tab shows the bare mark, and hovering THE MARK
+ * unfolds every available control to its left in one motion, leaving the row
+ * reading like a toolbar — ⟨ ⟩ ⟳ favicon title.
+ *
+ * One reveal, on one target, rather than the reload button appearing on tab
+ * hover and the arrows then unfolding from it: two nested reveals cost two
+ * deliberate pointer moves to reach a button, and the controls' slot was
+ * showing on every pass across the tab. Hanging them off the mark instead
+ * spends nothing at rest, and the mark is the one part of a tab that never
+ * moves or changes size, so it is always where the pointer left it.
+ *
+ * `group/nav` wraps the controls AND the mark: the controls collapse to zero
+ * width at rest, so the mark is the only way in, and once they are out the
+ * pointer is still inside the group they belong to — the row can slide right
+ * from under the pointer without the hover dropping. The whole row tweens as
+ * one clip box with the grid 0fr→1fr trick, so its width follows its content
+ * instead of a hardcoded pixel value and everything downstream (title,
+ * omnibox) slides rather than jumps. Directions with no history are omitted
+ * entirely — never shown as dead affordances.
  *
  * Drawn by every tab that is a VISIBLE page — the active tab, and both panes
  * of a split. It is addressed to its own tab rather than to the active one,
@@ -302,40 +348,33 @@ function TabNavCluster({ tab }: { tab: TabInfo }) {
   const goForward = useSumaStore((s) => s.goForward);
   const reload = useSumaStore((s) => s.reload);
 
+  // -m-1 p-1: the mark is a 16px target, so the group's hover box is grown 4px
+  // on every side while its layout box stays exactly the mark.
   return (
-    <span className="no-drag group/nav flex shrink-0 items-center">
-      {tab.canGoBack || tab.canGoForward ? (
-        <span className="grid grid-cols-[0fr] opacity-0 transition-[grid-template-columns,opacity] duration-250 ease-out group-hover/nav:grid-cols-[1fr] group-hover/nav:opacity-100 group-focus-within/nav:grid-cols-[1fr] group-focus-within/nav:opacity-100">
-          {/* Spacing lives on clipped *content*, never as padding on the
-              clip box: padding does not shrink, so it would leave the
-              cluster a couple of px wide at rest — enough to catch a
-              hover and unfold the arrows without the reload button ever
-              being visible. */}
-          <span className="flex min-w-0 items-center gap-0.5 overflow-hidden">
-            {tab.canGoBack ? (
-              <TabNavButton label="Back" onClick={() => void goBack(tab.id)}>
-                <ChevronLeft className="size-3" aria-hidden="true" />
-              </TabNavButton>
-            ) : null}
-            {tab.canGoForward ? (
-              <TabNavButton
-                label="Forward"
-                onClick={() => void goForward(tab.id)}
-              >
-                <ChevronRight className="size-3" aria-hidden="true" />
-              </TabNavButton>
-            ) : null}
-            <span aria-hidden="true" className="w-0.5 shrink-0" />
-          </span>
-        </span>
-      ) : null}
-      <span className="grid grid-cols-[0fr] opacity-0 transition-[grid-template-columns,opacity] duration-200 ease-out group-hover:grid-cols-[1fr] group-hover:opacity-100 group-has-[:focus-visible]:grid-cols-[1fr] group-has-[:focus-visible]:opacity-100">
-        <span className="flex min-w-0 items-center overflow-hidden">
+    <span className="no-drag group/nav -m-1 flex shrink-0 items-center p-1">
+      <span className="grid grid-cols-[0fr] opacity-0 transition-[grid-template-columns,opacity] duration-200 ease-out group-hover/nav:grid-cols-[1fr] group-hover/nav:opacity-100 group-focus-within/nav:grid-cols-[1fr] group-focus-within/nav:opacity-100">
+        {/* Spacing lives on clipped *content*, never as padding on the clip
+            box: padding does not shrink, so it would leave the controls a
+            couple of px wide at rest — enough to catch a hover on the way
+            past and unfold them without the mark ever being pointed at. */}
+        <span className="flex min-w-0 items-center gap-0.5 overflow-hidden">
+          {tab.canGoBack ? (
+            <TabNavButton label="Back" onClick={() => void goBack(tab.id)}>
+              <ChevronLeft className="size-3" aria-hidden="true" />
+            </TabNavButton>
+          ) : null}
+          {tab.canGoForward ? (
+            <TabNavButton label="Forward" onClick={() => void goForward(tab.id)}>
+              <ChevronRight className="size-3" aria-hidden="true" />
+            </TabNavButton>
+          ) : null}
           <TabNavButton label="Reload" onClick={() => void reload(tab.id)}>
             <RotateCw className="size-2.5" aria-hidden="true" />
           </TabNavButton>
+          <span aria-hidden="true" className="w-1 shrink-0" />
         </span>
       </span>
+      <TabMark tab={tab} />
     </span>
   );
 }
@@ -565,11 +604,18 @@ function EgressBypassButton({ tab }: { tab: TabInfo }) {
  * room to add actions without the strip getting crowded.
  *
  * Hovering the dots swaps them for the actions IN PLACE: the button collapses
- * to zero width and the icons take over its slot, all inside one hover region
- * so the pointer is never between two states on the way in. The button
- * collapses rather than unmounting, so a click (which focuses it) can't strand
- * focus on a removed node — and focus anywhere in the group keeps the actions
- * out, which is what makes them reachable by keyboard and by tap at all.
+ * to zero width as the icons unfold into its slot, both tweening over the same
+ * 200ms so the swap reads as one control widening rather than two states
+ * trading places. It is the nav cluster's reveal (TabNavCluster) mirrored to
+ * the tab's other end — same clip-box trick, same timing, the dots playing the
+ * part the favicon plays there: the one thing on screen at rest, and the way
+ * in to everything behind it. The whole hover region is one group, so the
+ * pointer is never between two states on the way in.
+ *
+ * The button collapses rather than unmounting, so a click (which focuses it)
+ * can't strand focus on a removed node — and focus anywhere in the group keeps
+ * the actions out, which is what makes them reachable by keyboard and by tap
+ * at all.
  */
 function TabActions({ actions }: { actions: React.ReactNode[] }) {
   const items = actions.filter(Boolean);
@@ -582,12 +628,61 @@ function TabActions({ actions }: { actions: React.ReactNode[] }) {
         title="Tab actions"
         aria-label="Tab actions"
         onClick={(e) => e.stopPropagation()}
-        className="grid h-4 w-4 shrink-0 place-items-center overflow-hidden rounded text-faint transition-[width,opacity] duration-100 hover:bg-ink/12 hover:text-text group-hover/actions:pointer-events-none group-hover/actions:w-0 group-hover/actions:opacity-0"
+        className="grid h-4 w-4 shrink-0 place-items-center overflow-hidden rounded text-faint transition-[width,opacity] duration-200 ease-out hover:bg-ink/12 hover:text-text group-hover/actions:pointer-events-none group-hover/actions:w-0 group-hover/actions:opacity-0 group-focus-within/actions:pointer-events-none group-focus-within/actions:w-0 group-focus-within/actions:opacity-0"
       >
         <MoreHorizontal className="size-3 shrink-0" aria-hidden="true" />
       </button>
-      <span className="hidden shrink-0 items-center gap-0.5 group-hover/actions:flex group-has-[:focus]/actions:flex">
-        {items}
+      <span className="grid grid-cols-[0fr] opacity-0 transition-[grid-template-columns,opacity] duration-200 ease-out group-hover/actions:grid-cols-[1fr] group-hover/actions:opacity-100 group-focus-within/actions:grid-cols-[1fr] group-focus-within/actions:opacity-100">
+        {/* Spacing on the clipped content, not the clip box — padding does not
+            shrink, and a couple of px of residual width here would sit between
+            the dots and the close button as a permanent gap. */}
+        <span className="flex min-w-0 items-center gap-0.5 overflow-hidden">
+          {items}
+        </span>
+      </span>
+    </span>
+  );
+}
+
+/**
+ * The tab's trailing slot: its continuity dot at rest, its controls (the
+ * actions behind the dots, then close) once the tab is hovered or focused.
+ *
+ * The two are clip boxes that cross rather than a display swap — the dot's
+ * width tweens to zero over exactly the span the controls' width tweens open,
+ * so the title's truncation point travels instead of jumping, and the tab
+ * never flashes a frame with both or neither in it. Everything is mounted at
+ * every moment; only width and opacity move, which is also what lets the
+ * controls animate at all (`display` is not an animatable property).
+ *
+ * Hover OR :focus-visible on the tab, both sides in step: keyboard focus used
+ * to hide the dot without bringing the controls out, which left the tab's only
+ * keyboard route to close sitting inside `display: none`.
+ */
+function TabTrailing({
+  tab,
+  actions,
+}: {
+  tab: TabInfo;
+  /** Folded behind the three-dot button, in the order they should appear. */
+  actions: React.ReactNode[];
+}) {
+  // One flex item, not two: the tab's row is gap-2, so as siblings the two clip
+  // boxes kept a full gap between them — 8px of dead space trailing whichever
+  // one was collapsed to zero, which read as the close button floating away
+  // from the tab's edge.
+  return (
+    <span className="flex shrink-0 items-center">
+      <span className="grid grid-cols-[0fr] opacity-0 transition-[grid-template-columns,opacity] duration-200 ease-out group-hover:grid-cols-[1fr] group-hover:opacity-100 group-has-[:focus-visible]:grid-cols-[1fr] group-has-[:focus-visible]:opacity-100">
+        <span className="flex min-w-0 items-center gap-0.5 overflow-hidden">
+          <TabActions actions={actions} />
+          <TabCloseButton tab={tab} />
+        </span>
+      </span>
+      <span className="grid grid-cols-[1fr] transition-[grid-template-columns,opacity] duration-200 ease-out group-hover:grid-cols-[0fr] group-hover:opacity-0 group-has-[:focus-visible]:grid-cols-[0fr] group-has-[:focus-visible]:opacity-0">
+        <span className="flex min-w-0 items-center overflow-hidden">
+          <ContinuityDot host={tabHost(tab)} />
+        </span>
       </span>
     </span>
   );
@@ -597,6 +692,7 @@ function Tab({
   tab,
   iconOnly,
   activeSide,
+  separator = false,
   dragging = false,
   onActivate,
   onEditAddress,
@@ -606,6 +702,8 @@ function Tab({
   iconOnly?: boolean;
   /** Which side of this tab the active tab sits on, if directly adjacent. */
   activeSide: "left" | "right" | null;
+  /** Draw the divider on this tab's right edge — the next tab is inactive too. */
+  separator?: boolean;
   /** This tab is the one being dragged: it rides above the row, not with it. */
   dragging?: boolean;
   /** Select — routed through the strip so a drag doesn't read as a click. */
@@ -619,7 +717,6 @@ function Tab({
   const setTabPreviewHoverId = useSumaStore((s) => s.setTabPreviewHoverId);
   const clearTabPreviewHoverId = useSumaStore((s) => s.clearTabPreviewHoverId);
   const canBypassEgress = useCanBypassEgress(tab);
-  const host = tabHost(tab);
 
   // Beside the active tab the raised fill is drawn by HoverShell (its near
   // edge follows the folder silhouette); elsewhere it is a plain rounded rect.
@@ -627,11 +724,11 @@ function Tab({
   const inactiveShape =
     activeSide !== null
       ? "text-muted hover:text-text"
-      : "rounded-[9px] text-muted hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text";
+      : "rounded-[10px] text-muted hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text";
 
   const shape = tab.active
-    ? "z-10 h-[40px] pb-[5px] text-text"
-    : `mb-2 h-8 ${inactiveShape}`;
+    ? "z-10 h-[34px] pb-[4px] text-text"
+    : `mb-1.5 h-7 ${inactiveShape}`;
 
   return (
     <div
@@ -661,9 +758,16 @@ function Tab({
           : "cursor-pointer touch-none",
         iconOnly
           ? "w-10 shrink-0 justify-center"
-          : tab.active
-            ? "min-w-[176px] max-w-[240px] flex-1 px-2.5"
-            : "min-w-[56px] max-w-[240px] flex-1 px-3",
+          : // Less padding on the trailing side than the leading one: that slot
+            // ends in a 16px button around a 12px glyph, so its own 2px inset
+            // already reads as part of the gap.
+            tab.active
+            ? "min-w-[176px] max-w-[240px] flex-1 pr-2 pl-2.5"
+            : // 88px floor: even with the title truncated to nothing, hover
+              // still needs pl-3 + 16px mark + two gap-2 + the unfolded
+              // controls (16px dots + gap-0.5 + 16px close) + pr-2 = 86px
+              // before the close button spills past the tab's edge.
+              "min-w-[88px] max-w-[240px] flex-1 pr-2 pl-3",
         shape,
       )}
     >
@@ -671,14 +775,21 @@ function Tab({
       {!tab.active && activeSide !== null ? (
         <HoverShell side={activeSide} />
       ) : null}
+      {separator ? <TabSeparator /> : null}
       <span
         className={cn(
           "relative flex min-w-0 items-center gap-2",
           !iconOnly && "flex-1 self-stretch",
         )}
       >
-        {tab.active ? <TabNavCluster tab={tab} /> : null}
-        <TabMark tab={tab} />
+        {/* A pinned tab is the mark and nothing else — 40px of slot has no
+            room to unfold controls into, and they would paint over the tabs
+            beside it. */}
+        {tab.active && iconOnly !== true ? (
+          <TabNavCluster tab={tab} />
+        ) : (
+          <TabMark tab={tab} />
+        )}
         {iconOnly ? null : (
           <>
             {tab.active ? (
@@ -688,23 +799,18 @@ function Tab({
                 <TabTitle tab={tab} />
               </span>
             )}
-            <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
-              <TabActions
-                actions={[
-                  canFavorite(tab) ? (
-                    <FavoriteToggleButton key="favorite" tab={tab} />
-                  ) : null,
-                  <SplitToggleButton key="split" tab={tab} />,
-                  canBypassEgress ? (
-                    <EgressBypassButton key="egress" tab={tab} />
-                  ) : null,
-                ]}
-              />
-              <TabCloseButton tab={tab} />
-            </span>
-            <span className="shrink-0 group-has-[:focus-visible]:hidden group-hover:hidden">
-              <ContinuityDot host={host} />
-            </span>
+            <TabTrailing
+              tab={tab}
+              actions={[
+                canFavorite(tab) ? (
+                  <FavoriteToggleButton key="favorite" tab={tab} />
+                ) : null,
+                <SplitToggleButton key="split" tab={tab} />,
+                canBypassEgress ? (
+                  <EgressBypassButton key="egress" tab={tab} />
+                ) : null,
+              ]}
+            />
           </>
         )}
       </span>
@@ -739,7 +845,6 @@ function SplitPane({
   const setTabPreviewHoverId = useSumaStore((s) => s.setTabPreviewHoverId);
   const clearTabPreviewHoverId = useSumaStore((s) => s.clearTabPreviewHoverId);
   const canBypassEgress = useCanBypassEgress(tab);
-  const host = tabHost(tab);
 
   return (
     <span
@@ -763,25 +868,19 @@ function SplitPane({
       )}
     >
       <TabNavCluster tab={tab} />
-      <TabMark tab={tab} />
       <ActiveTabLabel tab={tab} onEdit={onEditAddress} />
-      <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
-        <TabActions
-          actions={[
-            canFavorite(tab) ? (
-              <FavoriteToggleButton key="favorite" tab={tab} />
-            ) : null,
-            ...extraActions,
-            canBypassEgress ? (
-              <EgressBypassButton key="egress" tab={tab} />
-            ) : null,
-          ]}
-        />
-        <TabCloseButton tab={tab} />
-      </span>
-      <span className="shrink-0 group-has-[:focus-visible]:hidden group-hover:hidden">
-        <ContinuityDot host={host} />
-      </span>
+      <TabTrailing
+        tab={tab}
+        actions={[
+          canFavorite(tab) ? (
+            <FavoriteToggleButton key="favorite" tab={tab} />
+          ) : null,
+          ...extraActions,
+          canBypassEgress ? (
+            <EgressBypassButton key="egress" tab={tab} />
+          ) : null,
+        ]}
+      />
     </span>
   );
 }
@@ -834,7 +933,7 @@ function SplitTab({
       // Two panes' worth of row: flex-[2] against the single tabs' flex-1, so
       // a split takes twice the share of whatever space the row has.
       className={cn(
-        "no-drag relative flex h-[40px] min-w-[264px] max-w-[520px] flex-[2] items-center px-1 pb-[5px] text-text",
+        "no-drag relative flex h-[34px] min-w-[264px] max-w-[520px] flex-[2] items-center px-1 pb-[4px] text-text",
         dragging
           ? "z-30 cursor-grabbing touch-none"
           : "z-10 cursor-pointer touch-none",
@@ -885,14 +984,14 @@ function NewTabCluster() {
   return (
     <div
       data-flip-id="__new-tab"
-      className="no-drag group/new mb-2 ml-1 flex shrink-0 items-center"
+      className="no-drag group/new mb-1.5 ml-1 flex shrink-0 items-center"
     >
       <button
         type="button"
         title="New tab (⌘T)"
         aria-label="New tab"
         onClick={() => void createTab()}
-        className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-[9px] text-faint hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text"
+        className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-[10px] text-faint hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text"
       >
         <Plus className="size-3.5" aria-hidden="true" />
       </button>
@@ -911,7 +1010,7 @@ function NewTabCluster() {
         title="New terminal — a shell on your Suma machine"
         aria-label="New terminal"
         onClick={() => void newTerminal()}
-        className="pointer-events-none grid size-8 shrink-0 -translate-x-2 scale-90 cursor-pointer place-items-center rounded-[9px] text-faint opacity-0 transition-[opacity,translate,scale] duration-200 ease-out group-hover/new:pointer-events-auto group-hover/new:translate-x-0 group-hover/new:scale-100 group-hover/new:opacity-100 hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text focus-visible:pointer-events-auto focus-visible:translate-x-0 focus-visible:scale-100 focus-visible:opacity-100"
+        className="pointer-events-none grid size-7 shrink-0 -translate-x-2 scale-90 cursor-pointer place-items-center rounded-[10px] text-faint opacity-0 transition-[opacity,translate,scale] duration-200 ease-out group-hover/new:pointer-events-auto group-hover/new:translate-x-0 group-hover/new:scale-100 group-hover/new:opacity-100 hover:bg-gradient-to-b hover:from-ink/[0.05] hover:to-ink/[0.10] hover:text-text focus-visible:pointer-events-auto focus-visible:translate-x-0 focus-visible:scale-100 focus-visible:opacity-100"
       >
         <SquareTerminal className="size-3.5" aria-hidden="true" />
       </button>
@@ -970,7 +1069,7 @@ function ActiveTabUrl({ tab, onEdit }: { tab: TabInfo; onEdit: () => void }) {
         onEdit();
       }}
       onDoubleClick={(e) => e.stopPropagation()}
-      className="pointer-events-none absolute inset-x-0 inset-y-[4px] flex w-full min-w-0 cursor-text items-center rounded-[7px] px-1.5 text-left font-mono text-[11.5px] text-muted opacity-0 transition-opacity duration-150 hover:bg-ink/8 hover:text-text focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none group-hover:pointer-events-auto group-hover:opacity-100"
+      className="pointer-events-none absolute inset-x-0 inset-y-[3px] flex w-full min-w-0 cursor-pointer items-center rounded-[7px] px-1.5 text-left font-mono text-[11.5px] text-muted opacity-0 transition-opacity duration-150 hover:bg-ink/8 hover:text-text focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none group-hover:pointer-events-auto group-hover:opacity-100"
     >
       <span className="min-w-0 truncate">
         {shown.length > 0 ? (
@@ -1643,9 +1742,19 @@ export function TabStrip() {
     if (i === activeIndex - 1) return "right";
     return null;
   };
+  // The divider is a property of the SEAM between two inactive tabs, drawn by
+  // the one on its left (TabSeparator). Nothing is drawn while a drag is live:
+  // the carried tab rides out of its slot on a transform, so the seams it is
+  // part of are not where layout says they are.
+  const separatorAfter = (i: number): boolean => {
+    const here = view[i];
+    const next = view[i + 1];
+    if (drag !== null || here === undefined || next === undefined) return false;
+    return !here.active && !next.active;
+  };
 
   return (
-    <div className="drag-region relative flex h-12 shrink-0 items-end bg-[linear-gradient(180deg,var(--color-strip-deep)_0%,var(--color-strip)_100%)]">
+    <div className="drag-region relative flex h-10 shrink-0 items-end bg-[linear-gradient(180deg,var(--color-strip-deep)_0%,var(--color-strip)_100%)]">
       {drag !== null && contentBounds !== null ? (
         <SplitDropZones
           bounds={contentBounds}
@@ -1668,7 +1777,7 @@ export function TabStrip() {
         className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-chrome-edge"
       />
       {/* pl clears the macOS traffic lights */}
-      <div className="flex min-w-0 flex-1 items-end gap-1.5 pr-2.5 pl-[84px]">
+      <div className="flex min-w-0 flex-1 items-end gap-1.5 pr-2.5 pl-[94px]">
         {/* Lingering over the tab row (not the utility cluster) slides the
             preview shelf open under the strip — lib/tab-preview owns the
             hover intent shared with the shelf itself. */}
@@ -1687,6 +1796,7 @@ export function TabStrip() {
                 tab={first}
                 iconOnly={item.pinned}
                 activeSide={sideOf(i)}
+                separator={separatorAfter(i)}
                 dragging={drag?.id === item.id}
                 onActivate={() => activate(first.id)}
                 onEditAddress={() => editAddress(first.id)}
@@ -1708,7 +1818,7 @@ export function TabStrip() {
           <NewTabCluster />
         </div>
 
-        <div className="no-drag mb-2 flex h-8 shrink-0 items-center gap-1.5">
+        <div className="no-drag mb-1.5 flex h-7 shrink-0 items-center gap-1.5">
           <StatusPills />
           {/* The chat toggle sits at the right end of the strip, above the
               sidebar it opens. It stays lit while the sidebar is open — the

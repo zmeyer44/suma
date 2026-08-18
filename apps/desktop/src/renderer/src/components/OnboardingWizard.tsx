@@ -1,7 +1,21 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Fingerprint, KeyRound, Link2, Mail, Shield } from "lucide-react";
+import {
+  Check,
+  Cloud,
+  Fingerprint,
+  KeyRound,
+  Laptop,
+  Link2,
+  Mail,
+  Shield,
+} from "lucide-react";
 import type { EnrollmentStatus } from "../../../shared/ipc";
 import { cn } from "../lib/cn";
+import {
+  deriveOnboardingStep,
+  onboardingSteps,
+  type OnboardingStep,
+} from "../lib/onboarding-steps";
 import { useSumaStore } from "../store";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
@@ -12,21 +26,17 @@ const EMAIL_RE = /^\S+@\S+\.\S+$/;
 
 type Busy = "none" | "signup" | "device" | "passkey" | "link";
 
-type StepName = "account" | "credential" | "recovery";
-
-const STEPS: StepName[] = ["account", "credential", "recovery"];
-
 /* ── Layout pieces ──────────────────────────────────────────────────────── */
 
 /** "STEP 2 OF 3" plus the segmented rail beside it. */
-function StepRail({ index }: { index: number }) {
+function StepRail({ steps, index }: { steps: OnboardingStep[]; index: number }) {
   return (
     <div className="flex items-center gap-3.5">
       <span className="text-[10px] font-semibold tracking-[0.16em] text-faint uppercase">
-        Step {index + 1} of {STEPS.length}
+        Step {index + 1} of {steps.length}
       </span>
       <span className="flex items-center gap-1.5" aria-hidden="true">
-        {STEPS.map((name, i) => (
+        {steps.map((name, i) => (
           <span
             key={name}
             className={cn(
@@ -249,6 +259,12 @@ export function OnboardingWizard() {
   const [accountMode, setAccountMode] = useState<"create" | "link">("create");
   const [linkCode, setLinkCode] = useState("");
   const [deviceName, setDeviceName] = useState("");
+  /** Where the account's computer lives — rides the signup POST, so the
+   *  computer step must precede it. Cloud is the recommended default. */
+  const [computeChoice, setComputeChoice] = useState<"cloud" | "local">("cloud");
+  /** The account form validated and the user continued to the computer step.
+   *  Component-local on purpose: a restart before signup resumes at account. */
+  const [accountConfirmed, setAccountConfirmed] = useState(false);
   /** Which credential the step-2 tiles have selected; the device key is the
    *  default path, passkey is opt-in. */
   const [credentialChoice, setCredentialChoice] = useState<
@@ -262,19 +278,20 @@ export function OnboardingWizard() {
   const [copied, setCopied] = useState(false);
 
   const credentialDone = auth.state === "enrolled" && auth.passkeyRegistered;
-  const step: StepName | null =
-    auth.state === "unenrolled"
-      ? "account"
-      : !credentialDone
-        ? "credential"
-        : recoveryCode !== null
-          ? "recovery"
-          : null;
+  const localOnly = auth.controlUrl === null;
+  const step = deriveOnboardingStep({
+    authState: auth.state,
+    credentialDone,
+    recoveryCodeShowing: recoveryCode !== null,
+    accountConfirmed,
+    localOnly,
+    accountMode,
+  });
+  const steps = onboardingSteps({ localOnly, accountMode });
 
   // Only this component knows its full visibility (the recovery step depends
   // on component-local state); App raises the chrome view off this flag.
   const visible = authKnown && !dismissed && step !== null;
-  const localOnly = auth.controlUrl === null;
   // Once a recovery code exists it MUST be shown and saved — no way out.
   const canDismiss = step !== "recovery" && recoveryCode === null;
 
@@ -303,7 +320,7 @@ export function OnboardingWizard() {
 
   if (!visible || step === null) return null;
 
-  const stepIndex = STEPS.indexOf(step);
+  const stepIndex = steps.indexOf(step);
 
   const captureRecovery = (status: EnrollmentStatus | undefined) => {
     const code = status?.recoveryCode;
@@ -312,15 +329,47 @@ export function OnboardingWizard() {
     }
   };
 
+  /**
+   * Continue off the account form. Against a control plane this only
+   * validates and advances to the computer step — the signup POST needs the
+   * compute choice. Local-only keeps signing up right here (there is no
+   * computer to choose).
+   */
   const submitAccount = async () => {
     const addr = email.trim();
     if (!EMAIL_RE.test(addr) || busy !== "none") return;
+    if (!localOnly) {
+      setNotice(null);
+      setAccountConfirmed(true);
+      return;
+    }
     setBusy("signup");
     const status = await signup(
       addr,
       displayName.trim() || undefined,
       inviteCode.trim() || undefined,
     );
+    captureRecovery(status);
+    setBusy("none");
+  };
+
+  /** The computer step's primary: create the account with the chosen mode. */
+  const submitComputer = async () => {
+    const addr = email.trim();
+    if (!EMAIL_RE.test(addr) || busy !== "none") return;
+    setBusy("signup");
+    setNotice(null);
+    const status = await signup(
+      addr,
+      displayName.trim() || undefined,
+      inviteCode.trim() || undefined,
+      computeChoice,
+    );
+    if (status === undefined) {
+      setNotice(
+        "Couldn't create the account — check the invite code and try again.",
+      );
+    }
     captureRecovery(status);
     setBusy("none");
   };
@@ -424,16 +473,20 @@ export function OnboardingWizard() {
         localOnly
         ? "Create your account"
         : "How do you want to start?"
-      : step === "credential"
-        ? "What should unlock this Mac?"
-        : "Save your recovery code";
+      : step === "computer"
+        ? "Where should your computer live?"
+        : step === "credential"
+          ? "What should unlock this Mac?"
+          : "Save your recovery code";
 
   const blurb =
     step === "account"
       ? "One account, every Mac. Your spaces are end-to-end encrypted — Suma's servers never see your keys."
-      : step === "credential"
-        ? "This credential wraps the keys that unlock your spaces. It is registered on this Mac only; other Macs enroll with their own."
-        : "If you lose every enrolled Mac, this code is the only way back into your encrypted spaces. Suma cannot show it again.";
+      : step === "computer"
+        ? "Every device you enroll sees the same files, downloads, and terminal — this is where they actually live."
+        : step === "credential"
+          ? "This credential wraps the keys that unlock your spaces. It is registered on this Mac only; other Macs enroll with their own."
+          : "If you lose every enrolled Mac, this code is the only way back into your encrypted spaces. Suma cannot show it again.";
 
   /** The one primary action, per step — the footer button and Enter both run it. */
   const primary: { label: string; disabled: boolean; run: () => void } =
@@ -449,21 +502,27 @@ export function OnboardingWizard() {
             disabled: linkCode.trim().length === 0 || busy !== "none",
             run: () => void submitLink(),
           }
-      : step === "credential"
+      : step === "computer"
         ? {
-            label:
-              busy === "device"
-                ? "Registering…"
-                : busy === "passkey"
-                  ? "Waiting for your passkey…"
-                  : "Secure this Mac",
+            label: busy === "signup" ? "Setting up your computer…" : "Create my computer",
             disabled: busy !== "none",
-            run: () =>
-              void (credentialChoice === "passkey"
-                ? registerWithPasskey()
-                : registerWithDeviceKey()),
+            run: () => void submitComputer(),
           }
-        : { label: "Finish setup", disabled: !savedConfirmed, run: finish };
+        : step === "credential"
+          ? {
+              label:
+                busy === "device"
+                  ? "Registering…"
+                  : busy === "passkey"
+                    ? "Waiting for your passkey…"
+                    : "Secure this Mac",
+              disabled: busy !== "none",
+              run: () =>
+                void (credentialChoice === "passkey"
+                  ? registerWithPasskey()
+                  : registerWithDeviceKey()),
+            }
+          : { label: "Finish setup", disabled: !savedConfirmed, run: finish };
 
   return (
     /* z-40, the overlay layer — NOT above it. The screen lives in #root while
@@ -481,7 +540,7 @@ export function OnboardingWizard() {
         className="flex min-w-0 flex-1 justify-center overflow-y-auto"
       >
         <div className="flex w-full max-w-[620px] flex-col px-10 pt-[54px] pb-10">
-          <StepRail index={stepIndex} />
+          <StepRail steps={steps} index={stepIndex} />
 
           <h1 className="mt-7 text-[27px] leading-[1.15] font-semibold tracking-[-0.02em] text-text">
             {headline}
@@ -608,6 +667,35 @@ export function OnboardingWizard() {
             </>
           ) : null}
 
+          {step === "computer" ? (
+            <div className="mt-7 grid grid-cols-2 gap-3">
+              <ChoiceCard
+                selected={computeChoice === "cloud"}
+                onSelect={() => setComputeChoice("cloud")}
+                title="Cloud computer"
+                note="Recommended"
+                icon={<Cloud className="size-3.5" />}
+                points={[
+                  "A private Linux machine, reachable from every Mac",
+                  "Files and downloads follow you everywhere",
+                  "Suspends when idle — no cost while asleep",
+                ]}
+              />
+              <ChoiceCard
+                selected={computeChoice === "local"}
+                onSelect={() => setComputeChoice("local")}
+                title="This Mac"
+                note="Keep everything here"
+                icon={<Laptop className="size-3.5" />}
+                points={[
+                  "Your files live in a Suma folder on this Mac",
+                  "No cloud machine is created",
+                  "Access from other devices comes later",
+                ]}
+              />
+            </div>
+          ) : null}
+
           {step === "credential" ? (
             <>
               {auth.email !== null ? (
@@ -696,6 +784,18 @@ export function OnboardingWizard() {
                 variant="ghost"
                 size="xl"
                 onClick={() => setAccountMode("create")}
+              >
+                Back
+              </Button>
+            ) : null}
+            {step === "computer" ? (
+              <Button
+                variant="ghost"
+                size="xl"
+                onClick={() => {
+                  setAccountConfirmed(false);
+                  setNotice(null);
+                }}
               >
                 Back
               </Button>

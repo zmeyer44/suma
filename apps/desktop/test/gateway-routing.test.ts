@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   GatewayOriginRouter,
   isDeviceLocalCookieName,
+  isLoopbackHost,
   responseIsBrowserChallenge,
   routingDomainForHost,
   urlLooksLikeBrowserChallenge,
@@ -33,6 +34,29 @@ describe("GatewayOriginRouter", () => {
     expect(routingDomainForHost("login.service.example.com")).toBe(
       "example.com",
     );
+  });
+
+  it("routes loopback hosts native so dev servers never reach the gateway", () => {
+    const router = new GatewayOriginRouter();
+    for (const host of [
+      "localhost",
+      "app.localhost",
+      "127.0.0.1",
+      "127.1.2.3",
+      "[::1]",
+      "::1",
+      "0.0.0.0",
+    ]) {
+      expect(isLoopbackHost(host)).toBe(true);
+      expect(router.routeForHost(host)).toBe("native");
+    }
+    // Loopback must never be persisted as a promoted transport domain.
+    expect(router.promote("localhost")).toEqual({ domain: "", changed: false });
+    expect(router.promotedDomains()).toEqual([]);
+    // Non-loopback lookalikes stay on their normal routes.
+    expect(isLoopbackHost("localhost.example.com")).toBe(false);
+    expect(isLoopbackHost("127.0.0.1.example.com")).toBe(false);
+    expect(router.routeForHost("localhost.example.com")).toBe("structured");
   });
 });
 

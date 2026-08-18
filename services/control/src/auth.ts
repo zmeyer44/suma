@@ -97,70 +97,86 @@ export interface AuthEnv {
   };
 }
 
+/** The identity a verified bearer token establishes. */
+export interface AuthenticatedDevice {
+  userId: string;
+  /** Null for user-scoped bootstrap tokens (JWS did===sub, or bare stub). */
+  deviceId: string | null;
+}
+
+/**
+ * Verify one bearer token (the raw token, no "Bearer " prefix) against the
+ * signing keys and the users/devices tables. This is the WHOLE of bearer
+ * verification — `bearerAuth` wraps it for HTTP routes, and the relay's WS
+ * upgrade calls it directly (an upgrade has no Hono context).
+ */
+export async function authenticateToken(
+  db: Db,
+  token: string | null,
+  signing: SigningKeys | undefined,
+): Promise<AuthenticatedDevice | null> {
+  // Device-JWT path first: a compact JWS has two dots. This covers both
+  // device tokens (did = a device id) and signed bootstrap tokens
+  // (did = sub, minted at signup so the first device can enroll without the
+  // unsigned stub — unforgeable from a known userId).
+  if (token !== null && signing !== undefined && token.split(".").length === 3) {
+    const result = await verifyDeviceToken(signing.verifyKey, token, Math.floor(Date.now() / 1000));
+    if (!result.ok || !UUID_RE.test(result.claims.sub) || !UUID_RE.test(result.claims.did)) {
+      return null;
+    }
+    const [user] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.id, result.claims.sub));
+    if (!user) return null;
+    if (result.claims.did === result.claims.sub) {
+      // Bootstrap self-token: no device bound yet.
+      return { userId: user.id, deviceId: null };
+    }
+    const [device] = await db
+      .select({ userId: devices.userId, revokedAt: devices.revokedAt })
+      .from(devices)
+      .where(eq(devices.id, result.claims.did));
+    if (device && device.userId === user.id && device.revokedAt === null) {
+      return { userId: user.id, deviceId: result.claims.did };
+    }
+    return null;
+  }
+
+  // Unsigned dev/bootstrap stub. Rejected outright once real signing keys
+  // are configured (envProvided) — a production control plane must never
+  // accept a guessable, unsigned credential (mirrors the hub's gate).
+  const claims = token === null ? null : parseHubToken(`Bearer ${token}`);
+  if (claims) {
+    if (signing !== undefined && signing.envProvided) return null;
+    const [user] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.id, claims.userId));
+    if (!user) return null;
+    if (claims.deviceId !== null) {
+      const [device] = await db
+        .select({ userId: devices.userId, revokedAt: devices.revokedAt })
+        .from(devices)
+        .where(eq(devices.id, claims.deviceId));
+      if (!device || device.userId !== user.id || device.revokedAt !== null) {
+        return null;
+      }
+    }
+    return { userId: user.id, deviceId: claims.deviceId };
+  }
+  return null;
+}
+
 export function bearerAuth(db: Db, getSigning?: () => Promise<SigningKeys>): MiddlewareHandler<AuthEnv> {
   return async (c, next) => {
     const header = c.req.header("Authorization");
     const token = header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : null;
-
-    // Device-JWT path first: a compact JWS has two dots. This covers both
-    // device tokens (did = a device id) and signed bootstrap tokens
-    // (did = sub, minted at signup so the first device can enroll without the
-    // unsigned stub — unforgeable from a known userId).
-    if (token && getSigning && token.split(".").length === 3) {
-      const signing = await getSigning();
-      const result = await verifyDeviceToken(signing.verifyKey, token, Math.floor(Date.now() / 1000));
-      if (result.ok && UUID_RE.test(result.claims.sub) && UUID_RE.test(result.claims.did)) {
-        const [user] = await db
-          .select({ id: users.id })
-          .from(users)
-          .where(eq(users.id, result.claims.sub));
-        if (user) {
-          if (result.claims.did === result.claims.sub) {
-            // Bootstrap self-token: no device bound yet.
-            c.set("userId", user.id);
-            c.set("deviceId", null);
-            return next();
-          }
-          const [device] = await db
-            .select({ userId: devices.userId, revokedAt: devices.revokedAt })
-            .from(devices)
-            .where(eq(devices.id, result.claims.did));
-          if (device && device.userId === user.id && device.revokedAt === null) {
-            c.set("userId", user.id);
-            c.set("deviceId", result.claims.did);
-            return next();
-          }
-        }
-      }
-      return c.json({ error: "unauthorized" }, 401);
-    }
-
-    // Unsigned dev/bootstrap stub. Rejected outright once real signing keys
-    // are configured (envProvided) — a production control plane must never
-    // accept a guessable, unsigned credential (mirrors the hub's gate).
-    const claims = parseHubToken(header);
-    if (claims) {
-      if (getSigning && (await getSigning()).envProvided) {
-        return c.json({ error: "unauthorized" }, 401);
-      }
-      const [user] = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.id, claims.userId));
-      if (!user) return c.json({ error: "unauthorized" }, 401);
-      if (claims.deviceId !== null) {
-        const [device] = await db
-          .select({ userId: devices.userId, revokedAt: devices.revokedAt })
-          .from(devices)
-          .where(eq(devices.id, claims.deviceId));
-        if (!device || device.userId !== user.id || device.revokedAt !== null) {
-          return c.json({ error: "unauthorized" }, 401);
-        }
-      }
-      c.set("userId", user.id);
-      c.set("deviceId", claims.deviceId);
-      return next();
-    }
-    return c.json({ error: "unauthorized" }, 401);
+    const signing = getSigning === undefined ? undefined : await getSigning();
+    const identity = await authenticateToken(db, token, signing);
+    if (identity === null) return c.json({ error: "unauthorized" }, 401);
+    c.set("userId", identity.userId);
+    c.set("deviceId", identity.deviceId);
+    return next();
   };
 }

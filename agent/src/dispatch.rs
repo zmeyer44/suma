@@ -18,9 +18,62 @@ use crate::caps::{check_capability, required_capability, Capability, CapabilityC
 use crate::fetch::{fetch_public, FetchSpec};
 use crate::jobs::JobRegistry;
 use crate::ports::{list_ports, PortSource};
-use crate::proto::{AgentCtlRequest, AgentCtlResponse};
+use crate::proto::{AgentCtlRequest, AgentCtlResponse, FETCH_CANCELLED_ERROR};
 use crate::pty::{PtyManager, SpawnParams};
 use crate::vfs::VfsRoot;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::{Notify, Semaphore};
+
+/// Concurrent background fetches, agent-wide. Requests past the cap queue
+/// fairly on the semaphore rather than being refused — a third download is
+/// late, never lost.
+static FETCH_SEMAPHORE: Semaphore = Semaphore::const_new(2);
+static FETCH_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// A private sibling of the promised destination. The fetcher opens it with
+/// `create_new`; completion hard-links it into place, which is an atomic
+/// no-overwrite commit on every supported host filesystem.
+fn fetch_staging_path(target: &std::path::Path) -> std::path::PathBuf {
+    let sequence = FETCH_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    target.with_file_name(format!(
+        ".suma-fetch-{}-{nonce}-{sequence}.partial",
+        std::process::id()
+    ))
+}
+
+async fn commit_fetch(staging: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    let linked = tokio::fs::hard_link(staging, target).await;
+    let _ = tokio::fs::remove_file(staging).await;
+    linked
+}
+
+/// The connection's ctl event sender — how a handler (or a background task it
+/// spawned) puts an UNSOLICITED frame on the wire. Clonable so a spawned
+/// fetch outlives the dispatch call that started it.
+///
+/// Invariant: unsolicited frames must never be the `error` variant — the
+/// desktop's ctl FIFO resolves its pending head on any `error`, so a stray
+/// one would steal an unrelated request's response. Async failures use typed
+/// events (`fetch.failed`). Send failures are ignored: a closed receiver
+/// means the connection is gone, and there is no one left to tell.
+#[derive(Clone)]
+pub struct CtlEvents(pub tokio::sync::mpsc::UnboundedSender<AgentCtlResponse>);
+
+impl CtlEvents {
+    pub fn send(&self, response: AgentCtlResponse) {
+        debug_assert!(
+            !matches!(response, AgentCtlResponse::Error { .. }),
+            "unsolicited ctl frames must never be `error` (FIFO invariant)"
+        );
+        let _ = self.0.send(response);
+    }
+}
 
 /// Everything the ctl handlers operate on.
 pub struct AgentState {
@@ -59,6 +112,14 @@ pub fn check_pty_io(
     check_capability(claims, machine_id, Capability::PtyIo, now_seconds)
 }
 
+/// Authorize a `fwd/<port>` stream — dialing a loopback port inside this
+/// machine reaches whatever the user is running there, so it takes the same
+/// `ports.forward` capability the desktop's port UI already holds. Returns
+/// the refusal reason, or `None` when allowed.
+pub fn check_fwd(claims: &CapabilityClaims, machine_id: &str, now_seconds: i64) -> Option<String> {
+    check_capability(claims, machine_id, Capability::PortsForward, now_seconds)
+}
+
 /// Write one `pty/<id>` frame's payload to its PTY, after the capability
 /// check. Errors are the ctl `error` shape so a caller that has a response
 /// path can forward them verbatim.
@@ -69,29 +130,30 @@ pub fn pty_input(
     now_seconds: i64,
     pty_id: &str,
     data: &[u8],
-) -> Result<(), AgentCtlResponse> {
+) -> Result<(), Box<AgentCtlResponse>> {
     // I-2 enforcement point for the PTY channel. Nothing below this line runs
     // without a valid, in-window, machine-bound `pty.io` capability.
     if let Some(reason) = check_pty_io(claims, machine_id, now_seconds) {
-        return Err(error("capability_denied", reason));
+        return Err(Box::new(error("capability_denied", reason)));
     }
     state
         .ptys
         .write_input(pty_id, data)
-        .map_err(|e| error("pty_write_failed", e.to_string()))
+        .map_err(|e| Box::new(error("pty_write_failed", e.to_string())))
 }
 
-/// Handle one ctl request. Progress events (`fetch.progress`) go through
-/// `emit`; the returned value, if any, is the request's terminal response.
-/// `pty.resize` and `pty.kill` return nothing on success — exit is reported
-/// by the event pump as `pty.exited` when it happens, not synchronously.
+/// Handle one ctl request. Unsolicited events (`fetch.progress`,
+/// `fetch.done`, `fetch.failed`, `vfs.changed`) go through `events` — a
+/// clonable sender, because a background fetch outlives this call; the
+/// returned value, if any, is the request's terminal response. `pty.resize`
+/// and `pty.kill` return nothing on success.
 pub async fn dispatch(
     state: &mut AgentState,
     claims: &CapabilityClaims,
     machine_id: &str,
     now_seconds: i64,
     request: AgentCtlRequest,
-    emit: &mut (dyn FnMut(AgentCtlResponse) + Send),
+    events: &CtlEvents,
 ) -> Option<AgentCtlResponse> {
     // I-2 enforcement point. Nothing below this line runs without a valid,
     // in-window, machine-bound capability naming this exact operation.
@@ -161,7 +223,11 @@ pub async fn dispatch(
             Ok(ports) => AgentCtlResponse::Ports { ports },
             Err(e) => error("ports_list_failed", e.to_string()),
         }),
-        AgentCtlRequest::FetchPublic { url, dest_path } => {
+        AgentCtlRequest::FetchPublic {
+            fetch_id,
+            url,
+            dest_path,
+        } => {
             // `destPath` names a place in Suma Files (`/Downloads/big.zip`),
             // exactly as the control plane records it for a transfer, so it is
             // resolved against `~/cloud` with the traversal and symlink checks
@@ -174,26 +240,148 @@ pub async fn dispatch(
                 Ok(resolved) => resolved,
                 Err(reason) => return Some(error("vfs_path_refused", reason)),
             };
+            let staging = fetch_staging_path(&target);
             let spec = FetchSpec {
+                fetch_id: fetch_id.clone(),
                 url: url.clone(),
-                dest_path: target,
+                dest_path: staging.clone(),
             };
-            Some(match fetch_public(&spec, emit).await {
-                Ok(outcome) => AgentCtlResponse::FetchDone {
-                    url,
-                    // The Files path the caller asked for, not the host path it
-                    // landed on: where `~/cloud` sits in the VM is not the
-                    // caller's business, and a Files path is what a client can
-                    // do something with.
-                    path,
-                    bytes: outcome.bytes,
-                    // The manifest rides along so the control plane can record
-                    // the file's chunks without a second round trip (§8.6).
-                    manifest: Some(outcome.manifest),
-                },
-                Err(e) => error("fetch_failed", e.to_string()),
+            // The fetch runs as a background task: an 8 GiB download must not
+            // hold the state lock (it would freeze every connection's ctl and
+            // pty input), and the caller gets `fetch.started` NOW — awaiting
+            // `fetch.done` here would desync the client's ctl FIFO the moment
+            // a later request was answered first. Completion and failure are
+            // unsolicited events, correlated by fetchId.
+            let Some(cancel) = register_fetch(&fetch_id) else {
+                return Some(error(
+                    "fetch_exists",
+                    format!("fetch {fetch_id} is already active"),
+                ));
+            };
+            let events = events.clone();
+            let event_path = path.clone();
+            tokio::spawn(async move {
+                let mut emit = |resp: AgentCtlResponse| events.send(resp);
+                // select! wraps BOTH the queue wait and the download, so a
+                // cancel lands while the fetch is still waiting on a permit
+                // as readily as mid-transfer.
+                let run = async {
+                    let _permit = FETCH_SEMAPHORE
+                        .acquire()
+                        .await
+                        .expect("static semaphore is never closed");
+                    fetch_public(&spec, &mut emit).await
+                };
+                tokio::select! {
+                    outcome = run => match outcome {
+                        Ok(outcome) => match commit_fetch(&staging, &target).await {
+                            Ok(()) => {
+                                events.send(AgentCtlResponse::FetchDone {
+                                    fetch_id: spec.fetch_id.clone(),
+                                    url: spec.url.clone(),
+                                    // The Files path the caller asked for, not the host
+                                    // path it landed on: where `~/cloud` sits in the VM is
+                                    // not the caller's business, and a Files path is what
+                                    // a client can do something with.
+                                    path: event_path,
+                                    bytes: outcome.bytes,
+                                    // The manifest rides along so the control plane can
+                                    // record the file's chunks without a second round
+                                    // trip (§8.6).
+                                    manifest: Some(outcome.manifest),
+                                });
+                            }
+                            Err(e) => {
+                                events.send(AgentCtlResponse::FetchFailed {
+                                    fetch_id: spec.fetch_id.clone(),
+                                    url: spec.url.clone(),
+                                    path: event_path,
+                                    error: format!("committing fetched file: {e}"),
+                                });
+                            }
+                        },
+                        Err(e) => {
+                            // Remove only this fetch's private staging name, never
+                            // the promised destination (which may predate us).
+                            let _ = tokio::fs::remove_file(&staging).await;
+                            events.send(AgentCtlResponse::FetchFailed {
+                                fetch_id: spec.fetch_id.clone(),
+                                url: spec.url.clone(),
+                                path: event_path,
+                                error: e.to_string(),
+                            });
+                        }
+                    },
+                    _ = cancel.notified() => {
+                        // The download future is dropped mid-await; only its
+                        // private staging name needs cleaning.
+                        let _ = tokio::fs::remove_file(&staging).await;
+                        events.send(AgentCtlResponse::FetchFailed {
+                            fetch_id: spec.fetch_id.clone(),
+                            url: spec.url.clone(),
+                            path: event_path,
+                            error: FETCH_CANCELLED_ERROR.to_string(),
+                        });
+                    }
+                }
+                unregister_fetch(&spec.fetch_id, &cancel);
+            });
+            Some(AgentCtlResponse::FetchStarted {
+                fetch_id,
+                url,
+                path,
             })
         }
+        AgentCtlRequest::FetchCancel { fetch_id } => {
+            // Fire-and-forget, like pty.kill: no response frame. Unknown ids
+            // and double-cancels are silent no-ops — the caller learns the
+            // outcome from the fetch.failed(cancelled) event, or from the
+            // fetch having already settled.
+            cancel_fetch(&fetch_id);
+            None
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ *
+ * Running-fetch registry (cancellation)
+ * ------------------------------------------------------------------ */
+
+/// fetchId → cancel signal for every in-flight (or queued) fetch. A std
+/// Mutex, never held across an await — entries are inserted before the task
+/// spawns and removed on any terminal outcome.
+static FETCHES: std::sync::Mutex<Option<HashMap<String, Arc<Notify>>>> =
+    std::sync::Mutex::new(None);
+
+fn register_fetch(fetch_id: &str) -> Option<Arc<Notify>> {
+    let cancel = Arc::new(Notify::new());
+    let mut fetches = FETCHES.lock().expect("fetch registry poisoned");
+    let map = fetches.get_or_insert_with(HashMap::new);
+    if map.contains_key(fetch_id) {
+        return None;
+    }
+    map.insert(fetch_id.to_string(), Arc::clone(&cancel));
+    Some(cancel)
+}
+
+fn unregister_fetch(fetch_id: &str, cancel: &Arc<Notify>) {
+    let mut fetches = FETCHES.lock().expect("fetch registry poisoned");
+    if let Some(map) = fetches.as_mut() {
+        if map
+            .get(fetch_id)
+            .is_some_and(|registered| Arc::ptr_eq(registered, cancel))
+        {
+            map.remove(fetch_id);
+        }
+    }
+}
+
+fn cancel_fetch(fetch_id: &str) {
+    let fetches = FETCHES.lock().expect("fetch registry poisoned");
+    if let Some(cancel) = fetches.as_ref().and_then(|map| map.get(fetch_id)) {
+        // notify_waiters would miss a task not yet parked on notified();
+        // notify_one leaves a permit, so the signal is never lost.
+        cancel.notify_one();
     }
 }
 
@@ -236,8 +424,20 @@ mod tests {
         }
     }
 
-    fn no_events() -> impl FnMut(AgentCtlResponse) + Send {
-        |resp| panic!("unexpected event: {resp:?}")
+    /// A CtlEvents whose receiver the test can drain; `no_events()` keeps the
+    /// receiver alive so an unexpected send is observable rather than lost.
+    fn events() -> (
+        CtlEvents,
+        tokio::sync::mpsc::UnboundedReceiver<AgentCtlResponse>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (CtlEvents(tx), rx)
+    }
+
+    fn no_events() -> CtlEvents {
+        // The receiver is dropped on purpose: sends become no-ops, and the
+        // tests using this helper assert on the RETURNED response only.
+        events().0
     }
 
     #[tokio::test]
@@ -246,7 +446,7 @@ mod tests {
         let c = claims(vec![]); // nothing granted
         let req: AgentCtlRequest =
             serde_json::from_str(r#"{"t":"job.set","ptyId":"t1","enabled":true}"#).unwrap();
-        let resp = dispatch(&mut st, &c, "m-1", 1_100, req, &mut no_events())
+        let resp = dispatch(&mut st, &c, "m-1", 1_100, req, &no_events())
             .await
             .unwrap();
         match resp {
@@ -272,7 +472,7 @@ mod tests {
             "other-machine",
             1_100,
             req.clone(),
-            &mut no_events(),
+            &no_events(),
         )
         .await
         .unwrap();
@@ -282,7 +482,7 @@ mod tests {
                 if message == "token is bound to a different machine"
         ));
 
-        let resp = dispatch(&mut st, &c, "m-1", 9_999, req, &mut no_events())
+        let resp = dispatch(&mut st, &c, "m-1", 9_999, req, &no_events())
             .await
             .unwrap();
         assert!(matches!(
@@ -296,7 +496,7 @@ mod tests {
         let mut st = state();
         let c = claims(vec![Capability::PortsList]);
         let req: AgentCtlRequest = serde_json::from_str(r#"{"t":"ports.list"}"#).unwrap();
-        let resp = dispatch(&mut st, &c, "m-1", 1_100, req, &mut no_events())
+        let resp = dispatch(&mut st, &c, "m-1", 1_100, req, &no_events())
             .await
             .unwrap();
         match resp {
@@ -329,13 +529,13 @@ mod tests {
         )
         .unwrap();
         let c = claims(vec![Capability::PtySpawn, Capability::PtyIo]);
-        let spawned = dispatch(&mut st, &c, "m-1", 1_100, spawn, &mut no_events())
+        let spawned = dispatch(&mut st, &c, "m-1", 1_100, spawn, &no_events())
             .await
             .unwrap();
         assert!(matches!(spawned, AgentCtlResponse::PtySpawned { .. }));
 
         let list: AgentCtlRequest = serde_json::from_str(r#"{"t":"pty.list"}"#).unwrap();
-        let resp = dispatch(&mut st, &c, "m-1", 1_100, list.clone(), &mut no_events())
+        let resp = dispatch(&mut st, &c, "m-1", 1_100, list.clone(), &no_events())
             .await
             .unwrap();
         match resp {
@@ -354,10 +554,12 @@ mod tests {
         // Listing reveals what attach reveals, so it requires what attach
         // requires — pty.io, which these claims lack.
         let weak = claims(vec![Capability::PtySpawn]);
-        let denied = dispatch(&mut st, &weak, "m-1", 1_100, list, &mut no_events())
+        let denied = dispatch(&mut st, &weak, "m-1", 1_100, list, &no_events())
             .await
             .unwrap();
-        assert!(matches!(denied, AgentCtlResponse::Error { ref code, .. } if code == "capability_denied"));
+        assert!(
+            matches!(denied, AgentCtlResponse::Error { ref code, .. } if code == "capability_denied")
+        );
     }
 
     #[tokio::test]
@@ -367,7 +569,7 @@ mod tests {
         let req: AgentCtlRequest =
             serde_json::from_str(r#"{"t":"job.set","ptyId":"t1","enabled":true,"label":"run"}"#)
                 .unwrap();
-        let resp = dispatch(&mut st, &c, "m-1", 1_100, req, &mut no_events())
+        let resp = dispatch(&mut st, &c, "m-1", 1_100, req, &no_events())
             .await
             .unwrap();
         assert_eq!(
@@ -399,10 +601,13 @@ mod tests {
         /// refusal is the capability one and not an incidental failure.
         fn denied(st: &mut AgentState, c: &CapabilityClaims, mid: &str, now: i64) -> String {
             match pty_input(st, c, mid, now, "live-1", b"whoami\n") {
-                Err(AgentCtlResponse::Error { code, message }) => {
-                    assert_eq!(code, "capability_denied");
-                    message
-                }
+                Err(err) => match *err {
+                    AgentCtlResponse::Error { code, message } => {
+                        assert_eq!(code, "capability_denied");
+                        message
+                    }
+                    other => panic!("expected capability_denied, got {other:?}"),
+                },
                 other => panic!("expected capability_denied, got {other:?}"),
             }
         }
@@ -438,7 +643,10 @@ mod tests {
 
         // And a granted capability is still not a wildcard over the PTY table.
         match pty_input(&mut st, &c, "m-1", 1_100, "no-such-pty", b"x") {
-            Err(AgentCtlResponse::Error { code, .. }) => assert_eq!(code, "pty_write_failed"),
+            Err(err) => match *err {
+                AgentCtlResponse::Error { code, .. } => assert_eq!(code, "pty_write_failed"),
+                other => panic!("expected pty_write_failed, got {other:?}"),
+            },
             other => panic!("expected pty_write_failed, got {other:?}"),
         }
 
@@ -485,13 +693,14 @@ mod tests {
             "/".to_string(),
         ] {
             let req = AgentCtlRequest::FetchPublic {
+                fetch_id: "fetch-path-test".into(),
                 // Loopback, which the fetcher refuses before opening a socket:
                 // the path refusal is what this asserts, and a destination
                 // that slipped through would still touch no network.
                 url: "http://127.0.0.1:9/payload".into(),
                 dest_path: dest.clone(),
             };
-            let resp = dispatch(&mut st, &c, "m-1", 1_100, req, &mut no_events())
+            let resp = dispatch(&mut st, &c, "m-1", 1_100, req, &no_events())
                 .await
                 .unwrap();
             assert!(
@@ -503,28 +712,83 @@ mod tests {
         assert!(!outside_dir.join("payload").exists());
 
         // And a destination that stays inside the root gets past the path
-        // check to the fetch itself, which refuses this URL on its own terms.
+        // check: the response is `fetch.started`, and the fetcher's own
+        // refusal of this URL arrives as an async `fetch.failed` event.
         std::fs::create_dir_all(root.join("Downloads")).unwrap();
+        let (tx, mut rx) = events();
         let resp = dispatch(
             &mut st,
             &c,
             "m-1",
             1_100,
             AgentCtlRequest::FetchPublic {
+                fetch_id: "fetch-inside-test".into(),
                 url: "http://127.0.0.1:9/payload".into(),
                 dest_path: "/Downloads/big.zip".into(),
             },
-            &mut no_events(),
+            &tx,
         )
         .await
         .unwrap();
         assert!(
-            matches!(&resp, AgentCtlResponse::Error { code, .. } if code == "fetch_failed"),
+            matches!(&resp, AgentCtlResponse::FetchStarted { path, .. } if path == "/Downloads/big.zip"),
             "{resp:?}"
         );
+        let failed = rx.recv().await.expect("a fetch.failed event");
+        assert!(
+            matches!(&failed, AgentCtlResponse::FetchFailed { path, .. } if path == "/Downloads/big.zip"),
+            "{failed:?}"
+        );
+        assert!(!root.join("Downloads/big.zip").exists());
 
         std::fs::remove_dir_all(&outside_dir).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fetch_commit_preserves_an_existing_destination() {
+        let dir = temp_dir("fetch-commit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let staging = dir.join(".partial");
+        let target = dir.join("result.bin");
+        std::fs::write(&staging, b"incoming").unwrap();
+        std::fs::write(&target, b"original").unwrap();
+
+        assert!(commit_fetch(&staging, &target).await.is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+        assert!(
+            !staging.exists(),
+            "only the private staging file is cleaned up"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The cancel registry directly: `register_fetch` hands out a Notify,
+    /// `cancel_fetch` fires it (and survives arriving before the task parks —
+    /// notify_one leaves a permit), and unknown/removed ids are silent no-ops.
+    /// The full fetch→cancel→sentinel path over a real socket lives in the
+    /// desktop sim-fetch/relay tests, where a loopback target is permitted;
+    /// the shipped agent refuses loopback before a fetch could park.
+    #[tokio::test]
+    async fn cancel_registry_signals_once_and_ignores_unknowns() {
+        let cancel = register_fetch("f-1").expect("first registration succeeds");
+        assert!(
+            register_fetch("f-1").is_none(),
+            "duplicate active id refused"
+        );
+        // Signal before the task parks: notify_one stores a permit, so the
+        // later notified() returns immediately.
+        cancel_fetch("f-1");
+        tokio::time::timeout(std::time::Duration::from_millis(200), cancel.notified())
+            .await
+            .expect("a pre-parked cancel is still delivered");
+
+        // Unknown id: no panic, no effect.
+        cancel_fetch("never-existed");
+        unregister_fetch("f-1", &cancel);
+        // Double-unregister and post-unregister cancel are no-ops.
+        unregister_fetch("f-1", &cancel);
+        cancel_fetch("f-1");
     }
 
     #[tokio::test]
@@ -534,7 +798,7 @@ mod tests {
         let req: AgentCtlRequest =
             serde_json::from_str(r#"{"t":"pty.resize","ptyId":"t1","cols":5000,"rows":24}"#)
                 .unwrap();
-        let resp = dispatch(&mut st, &c, "m-1", 1_100, req, &mut no_events())
+        let resp = dispatch(&mut st, &c, "m-1", 1_100, req, &no_events())
             .await
             .unwrap();
         assert!(matches!(

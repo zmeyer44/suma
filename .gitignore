@@ -40,6 +40,7 @@ target/
 apps/desktop/build/*
 !apps/desktop/build/entitlements.*.plist
 !apps/desktop/build/icon.svg
+!apps/desktop/build/icon.png
 !apps/desktop/build/background.svg
 
 # Local copies of the desktop DMG served by the marketing site in dev

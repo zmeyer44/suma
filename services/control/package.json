@@ -14,13 +14,14 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
-    "@suma/config": "workspace:*",
-    "@suma/protocol": "workspace:*",
     "@hono/node-server": "^1.14.0",
     "@hono/zod-validator": "^0.4.2",
+    "@suma/config": "workspace:*",
+    "@suma/protocol": "workspace:*",
     "drizzle-orm": "^0.44.0",
     "hono": "^4.7.0",
     "postgres": "^3.4.0",
+    "ws": "^8.18.0",
     "zod": "^3.25.0"
   },
   "devDependencies": {
@@ -28,6 +29,7 @@
     "@suma/eslint-config": "workspace:*",
     "@suma/typescript-config": "workspace:*",
     "@types/node": "^22.15.0",
+    "@types/ws": "^8.18.0",
     "drizzle-kit": "^0.31.0",
     "eslint": "^9.39.1",
     "tsx": "^4.19.0",

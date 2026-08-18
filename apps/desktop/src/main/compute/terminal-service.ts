@@ -21,6 +21,13 @@ export interface TerminalDeps {
   control: () => ControlClient | null;
   emitData: (payload: { ptyId: string; data: string }) => void;
   emitUpdated: (terminals: TerminalInfo[]) => void;
+  /**
+   * Where a new shell starts when the caller names no directory — the active
+   * space's folder in the shared filesystem, pre-created so the spawn cannot
+   * land in a missing dir. null ⇒ let the agent pick its default (~/cloud on
+   * the VM, the sim root locally). Async: it may mkdir over the link first.
+   */
+  defaultCwd?: () => Promise<string | null>;
 }
 
 interface TerminalRecord {
@@ -90,6 +97,16 @@ export class TerminalService {
 
   async create(cwd?: string): Promise<TerminalInfo> {
     const ptyId = randomUUID();
+    if (cwd === undefined) {
+      // Terminal and explorer open onto the same tree: new shells start in
+      // the active space's folder when one is bound. Best-effort — a failed
+      // lookup falls back to the agent's own default rather than blocking.
+      try {
+        cwd = (await this.deps.defaultCwd?.()) ?? undefined;
+      } catch {
+        cwd = undefined;
+      }
+    }
     const response = await this.deps.link.ctl({
       t: "pty.spawn",
       ptyId,

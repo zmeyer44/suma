@@ -145,6 +145,8 @@ pub fn required_capability(req: &AgentCtlRequest) -> Capability {
         AgentCtlRequest::JobSet { .. } => Capability::PtySpawn,
         AgentCtlRequest::PortsList => Capability::PortsList,
         AgentCtlRequest::FetchPublic { .. } => Capability::FetchPublic,
+        // Cancelling is scoped by the same grant that starts a fetch.
+        AgentCtlRequest::FetchCancel { .. } => Capability::FetchPublic,
     }
 }
 

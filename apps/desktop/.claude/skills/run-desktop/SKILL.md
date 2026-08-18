@@ -123,3 +123,11 @@ pnpm dev   # electron-vite dev with HMR; opens the window. Ctrl-C to quit.
   from a previous driver run and kill it.
 - **Quit before relaunching.** Killing the tmux session kills the driver
   without flushing the app's debounced state writes; send `quit` first.
+- **Two instances at once (relay testing).** Dev builds honor `SUMA_USER_DATA`
+  (ignored when packaged): give each instance its own profile dir and
+  screenshot dir, e.g. session A `SUMA_USER_DATA=/tmp/suma-home
+  SCREENSHOT_DIR=/tmp/suma-shots-home`, session B `SUMA_USER_DATA=/tmp/suma-away
+  SCREENSHOT_DIR=/tmp/suma-shots-away`, both with the same `SUMA_CONTROL_URL`.
+  The single-instance lock lives under userData, so distinct dirs coexist.
+  Onboard A as local-mode (home), enroll B via an enrollment code — B becomes
+  the "away" device reaching A through the control plane relay.

@@ -19,6 +19,8 @@ const STATEMENTS: ReadonlyArray<string> = [
   )`,
   // Databases bootstrapped before Phase 2 lack the feature-flag column.
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS features text[] NOT NULL DEFAULT '{}'`,
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS compute_mode text NOT NULL DEFAULT 'cloud'`,
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS home_device_id uuid`,
   `CREATE TABLE IF NOT EXISTS invites (
     code text PRIMARY KEY,
     email text,

@@ -21,6 +21,13 @@ files:
   - out/**
   - "!out/**/*.map"
 
+# The bundle icon follows the macOS icon grid, which reserves an outer safe
+# area. The running app uses this full-bleed raster for its Dock slot so the
+# production footprint matches development; both derive from icon.svg.
+extraResources:
+  - from: build/icon.png
+    to: icon.png
+
 # node-pty ships a native addon and a spawn-helper binary that must live on
 # the real filesystem, not inside the asar; sherpa-onnx (the voice
 # assistant's on-device wake word) ships a native addon + dylibs the same way.

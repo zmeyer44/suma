@@ -5,15 +5,11 @@
  * macOS icon grid — rasterized to `build/icon.png` and `build/icon.icns` by
  * `scripts/build-icons.mjs`.
  *
- * A PACKAGED APP DOES NOT GO THROUGH HERE. macOS reads the bundle's .icns via
- * Info.plist before the app runs, which is the only way the icon is right in
- * the Finder, in Spotlight, and in the dock *while the app is still starting*.
- * Setting it from JS as well would leave two sources of truth and paper over a
- * packaging config that was wrong. So this runs in dev only, where there is no
- * bundle and Electron would otherwise show its own default icon.
- *
- * Packaging is not wired up yet (no electron-builder config in the repo); when
- * it is, point it at `build/icon.icns` and nothing here changes.
+ * Finder, Spotlight, and the pre-launch Dock icon use the bundle's .icns.
+ * macOS reserves an outer safe area around that asset, though, while a runtime
+ * Dock image fills its slot. We therefore install the same full-bleed PNG at
+ * runtime in both development and production. Both are generated from the
+ * same SVG, so this is presentation-specific, not two independent sources.
  */
 
 import { existsSync } from "node:fs";
@@ -24,8 +20,7 @@ import { nativeImage, type App } from "electron";
  * Where the 1024px raster can be, in order:
  *   1. `<app>/build/icon.png` relative to the built main bundle
  *      (`apps/desktop/out/main`) — a dev run.
- *   2. `<resources>/icon.png` in a packaged app, for platforms that have no
- *      bundle-level icon to read.
+ *   2. `<resources>/icon.png` in a packaged app.
  */
 export function appIconCandidates(
   mainDirname: string,
@@ -49,13 +44,22 @@ export function resolveAppIcon(candidates: string[]): string | null {
 }
 
 /**
- * Give a dev run the real dock icon. Silent when there is nothing to set: a
- * missing raster costs a wrong icon, and refusing to boot over cosmetics would
- * be the worse failure.
+ * Give development and production the same full-bleed Dock icon. Silent when
+ * there is nothing to set: a missing raster costs a wrong icon, and refusing
+ * to boot over cosmetics would be the worse failure.
  */
-export function applyDevDockIcon(electronApp: App, mainDirname: string): void {
-  if (process.platform !== "darwin" || electronApp.isPackaged) return;
-  const iconPath = resolveAppIcon(appIconCandidates(mainDirname));
+export function applyDockIcon(
+  electronApp: App,
+  mainDirname: string,
+  resourcesPath?: string,
+): void {
+  if (process.platform !== "darwin") return;
+  const iconPath = resolveAppIcon(
+    appIconCandidates(
+      mainDirname,
+      electronApp.isPackaged ? resourcesPath : undefined,
+    ),
+  );
   if (iconPath === null) return;
   const image = nativeImage.createFromPath(iconPath);
   if (image.isEmpty()) return;

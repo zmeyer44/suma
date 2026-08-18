@@ -4,6 +4,7 @@
  * IPC, and menu accelerators.
  */
 
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -19,10 +20,14 @@ import {
   type MenuItemConstructorOptions,
   type Session,
 } from "electron";
-import type { EventChannel, SumaEventMap } from "../shared/ipc";
+import type {
+  DownloadItemInfo,
+  EventChannel,
+  SumaEventMap,
+} from "../shared/ipc";
 import { settingsUrl } from "../shared/internal-pages";
 import type { SavedItem } from "../shared/saves";
-import { applyDevDockIcon } from "./app-icon";
+import { applyDockIcon } from "./app-icon";
 import { AuditService } from "./audit-service";
 import { TtsService } from "./audio/tts-service";
 import { AuthService } from "./auth-service";
@@ -78,6 +83,10 @@ import { VideosService } from "./videos/videos-service";
 import { registerCertificateErrorHandler } from "./security";
 import { ShellWindow } from "./shell-window";
 import { performSignOut } from "./sign-out";
+import { uploadFileToVfs } from "./files/vfs-upload";
+import { HomeAgentBridge } from "./compute/home-bridge";
+import { RelayAgentClient } from "./compute/relay-client";
+import { SpaceFsService, SPACE_DOWNLOADS_DIR } from "./space-fs";
 import { SpaceManager } from "./spaces";
 import { SyncService } from "./sync/service";
 import { isAllowedTabUrl, NEW_TAB_URL } from "./tab-policy";
@@ -85,7 +94,9 @@ import { TabManager } from "./tabs";
 import { UpdateService } from "./updates/update-service";
 import { VoiceService } from "./voice/voice-service";
 import { WebAuthnService } from "./webauthn";
-import { resolveWorkspaceRoot, WorkspaceFsService } from "./workspace-fs";
+import { resolveSimRoot } from "./compute/local-root";
+import { WorkspaceFsService } from "./workspace-fs";
+import { installWorkspaceMediaProtocol } from "./workspace-media";
 import { resetWorkspaceHlc, WorkspaceStore } from "./workspace-store";
 
 /**
@@ -94,10 +105,7 @@ import { resetWorkspaceHlc, WorkspaceStore } from "./workspace-store";
  * services through this binding rather than closing over one graph.
  */
 interface AppInstance {
-  emit: <C extends EventChannel>(
-    channel: C,
-    payload: SumaEventMap[C],
-  ) => void;
+  emit: <C extends EventChannel>(channel: C, payload: SumaEventMap[C]) => void;
   teardown: (opts: { leavingAccount: boolean }) => void;
   noteClientCertificate: (url: string) => void;
   newTab: () => void;
@@ -129,6 +137,15 @@ let quicDisabledAtStartup = false;
 if (app.isPackaged) {
   app.setName("Suma");
   app.setPath("userData", path.join(app.getPath("appData"), "Suma"));
+}
+
+// Dev-only: SUMA_USER_DATA points this instance at its own profile, so two
+// instances (a "home" and an "away" Mac) can run side by side on one
+// machine — the single-instance lock lives under userData. Gated on
+// !isPackaged so no environment can redirect a shipped build's profile.
+const userDataOverride = process.env["SUMA_USER_DATA"];
+if (!app.isPackaged && userDataOverride !== undefined && userDataOverride.length > 0) {
+  app.setPath("userData", path.resolve(userDataOverride));
 }
 
 if (!app.requestSingleInstanceLock()) {
@@ -212,7 +229,11 @@ async function bootstrap(): Promise<void> {
 
   // Before the window: the dock slot appears the moment the app activates, and
   // setting the icon after that shows Electron's default for a beat first.
-  applyDevDockIcon(app, path.dirname(fileURLToPath(import.meta.url)));
+  applyDockIcon(
+    app,
+    path.dirname(fileURLToPath(import.meta.url)),
+    process.resourcesPath,
+  );
 
   installChromeCsp(session.defaultSession);
   // Saved-video playback: suma-video:// streams the media cache into the PIP
@@ -223,6 +244,13 @@ async function bootstrap(): Promise<void> {
     session.defaultSession,
     path.join(userData, VIDEOS_DIRNAME),
   );
+  // The IDE half of suma://terminal (§8.5): explorer + editor over the same
+  // filesystem the shells run in, via the agent link's vfs channel. It is
+  // constructed out here (its audio protocol can only be handled once per
+  // session, while startServices runs again after a sign-out wipe) and bound
+  // to each account's link inside startServices.
+  const workspaceFs = new WorkspaceFsService();
+  installWorkspaceMediaProtocol(session.defaultSession, workspaceFs);
   const win = new ShellWindow();
   shell = win;
 
@@ -281,7 +309,7 @@ async function bootstrap(): Promise<void> {
   // Packaged builds start the check cadence; dev builds stay `unsupported`.
   updates.start();
 
-  live = await startServices({ userData, win, filesSession });
+  live = await startServices({ userData, win, filesSession, workspaceFs });
 }
 
 /**
@@ -293,8 +321,9 @@ async function startServices(ctx: {
   userData: string;
   win: ShellWindow;
   filesSession: Session;
+  workspaceFs: WorkspaceFsService;
 }): Promise<AppInstance> {
-  const { userData, win, filesSession } = ctx;
+  const { userData, win, filesSession, workspaceFs } = ctx;
   const device = await DeviceStore.load(userData);
   let computerName: string | null = null;
   if (process.platform === "darwin") {
@@ -420,21 +449,44 @@ async function startServices(ctx: {
   // created later by space creation or migration.
   spaces.onSessionCreated((ses) => webauthn.attachToSession(ses));
 
+  // Both late-bound to the agent link/space-folder services built further
+  // down; until then downloads land in this Mac's Downloads folder as ever.
+  let resolveDownloadsDir: ((spaceId: string) => string) | null = null;
+  let mirrorDownload: ((item: DownloadItemInfo) => Promise<void>) | null = null;
+  const initialEnrollment = device.enrollment();
+  let localComputerRole: "unknown" | "home" | "away" =
+    initialEnrollment.computeMode !== "local"
+      ? "home"
+      : initialEnrollment.isHomeMachine === true
+        ? "home"
+        : initialEnrollment.isHomeMachine === false
+          ? "away"
+          : "unknown";
+  let localComputerRoleAnnounced = false;
+  let lastComputeMode = device.enrollment().computeMode ?? null;
   const downloads = new DownloadManager({
     store,
     emit: (items) => emit("downloads:updated", items),
-    downloadsDir: () => app.getPath("downloads"),
+    downloadsDirFor: (spaceId) =>
+      resolveDownloadsDir?.(spaceId) ?? app.getPath("downloads"),
     // The completion card goes to the floating overlay, NOT the chrome: a
     // download finishes while the user is on a page, and the chrome renders
     // below the tab views, so a card drawn there would be invisible exactly
     // when it matters.
-    onCompleted: (item) => emitPreview("downloadOverlay:completed", item),
+    onCompleted: (item) => {
+      emitPreview("downloadOverlay:completed", item);
+      void mirrorDownload?.(item).catch(() => undefined);
+    },
   });
   spaces.onSessionCreated((ses, spaceId) => downloads.attachTo(ses, spaceId));
 
   // Auth and sync reference each other only through late-bound
   // closures; every callback fires after bootstrap completes, well after the
   // `sync` binding below is initialized.
+  // Late-bound: assigned once the agent link exists (auth is constructed
+  // first but only fires this on enrollment changes, post-bootstrap).
+  let notifyWorkspaceChanged: (() => void) | null = null;
+  let refreshMachineRole: (() => void) | null = null;
   const auth = new AuthService({
     device,
     store,
@@ -444,7 +496,31 @@ async function startServices(ctx: {
     controlUrl:
       process.env["SUMA_CONTROL_URL"] ??
       (app.isPackaged ? PROD_CONTROL_URL : null),
-    emitChanged: (status) => emit("auth:changed", status),
+    emitChanged: (status) => {
+      emit("auth:changed", status);
+      if (status.computeMode !== lastComputeMode) {
+        const enrollment = device.enrollment();
+        localComputerRole =
+          status.computeMode !== "local"
+            ? "home"
+            : enrollment.isHomeMachine === true
+              ? "home"
+              : enrollment.isHomeMachine === false
+                ? "away"
+                : "unknown";
+        lastComputeMode = status.computeMode;
+      } else if (status.computeMode === "local") {
+        const knownHome = device.enrollment().isHomeMachine;
+        if (knownHome !== null && knownHome !== undefined) {
+          localComputerRole = knownHome ? "home" : "away";
+        }
+      }
+      // Compute mode rides the enrollment record: choosing "This Mac" during
+      // onboarding (or a /v1/me backfill) can move the sim's root — tell the
+      // IDE to refetch. Late-bound: no-op until the link exists below.
+      notifyWorkspaceChanged?.();
+      refreshMachineRole?.();
+    },
     onTokenChanged: () => {
       sync.refreshAuth();
       gateway.refreshAuth();
@@ -472,6 +548,9 @@ async function startServices(ctx: {
   spaces.onSessionCreated((ses, spaceId) =>
     nativeRequestHeaders.attachTo(ses, spaceId),
   );
+  // Late-bound like notifyWorkspaceChanged: PortsService is constructed with
+  // the compute link far below, but loopback navigations can begin earlier.
+  let ensureLoopbackForward: ((port: number) => Promise<boolean>) | null = null;
   const gateway = new GatewayBackedService({
     getToken: () => auth.getToken(),
     gatewayUrl: process.env["SUMA_SESSION_GATEWAY_URL"] ?? null,
@@ -483,6 +562,8 @@ async function startServices(ctx: {
     },
     nativeFetchImpl: (ses, request) =>
       browserNativeFetch(ses, request, nativeRequestHeaders),
+    ensureLoopbackForward: (port) =>
+      ensureLoopbackForward?.(port) ?? Promise.resolve(false),
   });
   spaces.onSessionCreated((ses, spaceId) => gateway.attachTo(ses, spaceId));
 
@@ -610,14 +691,14 @@ async function startServices(ctx: {
 
   /* --------------------------- Voice assistant ---------------------------- */
 
-  // "Suma, …" — wake word + Gemini Live session in main; the overlay
-  // renderer (the same view that hosts the floating audio player, always
-  // alive and layered above the pages) owns the microphone, the speakers,
-  // and the HUD. Browser-tool permissions are the chat sidebar's own
-  // Assistant-page toggles, read per session. Credential order mirrors the
-  // chat assistant's: environment key, then a key stored on this Mac, then —
-  // with neither — a single-use Live token vended by the signed-in control
-  // plane, keyless on this machine.
+  // "Suma, …" — wake word + the chat sidebar's AI SDK agent loop with
+  // speech at both ends, all in main; the chrome renderer owns the
+  // microphone, the speakers, and the HUD. Browser-tool permissions are the
+  // chat sidebar's own Assistant-page toggles, read per session, and MODEL
+  // access is the chat sidebar's exact credential chain (env gateway key →
+  // stored Vercel key → the signed-in control plane's gateway proxy,
+  // keyless on this machine). The realtime TTS voice (Bland) uses the key
+  // Settings → Voice & audio stores, through TtsService.
   const voice = new VoiceService({
     userDataDir: userData,
     browser: { spaces, tabs },
@@ -625,31 +706,26 @@ async function startServices(ctx: {
       const info = chat.settings();
       return { model: info.model, tools: info.tools };
     },
-    vendedTokenAvailable: () => auth.controlClient() !== null,
-    vendedToken: async () => {
+    storedApiKey: () => tts.apiKeyFor("vercel"),
+    vendedGatewayAvailable: () => auth.controlClient() !== null,
+    vendedGatewayCredentials: async () => {
       const client = auth.controlClient();
       if (client === null) return null;
-      try {
-        const { token } = await client.mintVoiceToken(voice.settings().model);
-        return { token };
-      } catch (err) {
-        // Offline, an expired device token, or an operator with no Gemini
-        // key configured — all mean "no vended session right now", which the
-        // service reports as a recoverable error rather than a crash.
-        console.error("suma voice: could not mint a vended token:", err);
-        return null;
-      }
+      const token = await client.getToken();
+      return token === null ? null : { baseUrl: client.url, token };
     },
+    ttsApiKey: (provider) => tts.apiKeyFor(provider),
+    ttsKeyState: (provider) => tts.settings().keys[provider],
     emit: {
-      status: (status) => {
-        // Both surfaces: the overlay renders the HUD, the chrome's settings
-        // page shows a live status line.
-        emit("voice:statusChanged", status);
-        emitPreview("voice:statusChanged", status);
-      },
-      transcript: (event) => emitPreview("voice:transcript", event),
-      audioOut: (data) => emitPreview("voice:audioOut", { data }),
-      interrupted: () => emitPreview("voice:interrupted", undefined),
+      // All voice traffic lands in the CHROME now: the HUD is the tool
+      // rail's voice row (SideRail/RailVoice), which also owns the mic and
+      // the speakers — the rail column is outside the content hole, so it is
+      // always visible without raising anything. The settings page (also a
+      // chrome surface) reads the same status stream.
+      status: (status) => emit("voice:statusChanged", status),
+      transcript: (event) => emit("voice:transcript", event),
+      audioOut: (data) => emit("voice:audioOut", { data }),
+      interrupted: () => emit("voice:interrupted", undefined),
     },
   });
 
@@ -759,7 +835,8 @@ async function startServices(ctx: {
   const buzz = new BuzzService({
     relayUrl: () => nostr.buzzRelayUrl(),
     signAuth: (relayUrl, challenge) => nostr.signRelayAuth(relayUrl, challenge),
-    signMediaAuth: (sha256, serverHost) => nostr.signMediaAuth(sha256, serverHost),
+    signMediaAuth: (sha256, serverHost) =>
+      nostr.signMediaAuth(sha256, serverHost),
     emitChanged: (state) => emit("nostr:buzzAgentsChanged", state),
   });
 
@@ -779,7 +856,8 @@ async function startServices(ctx: {
       spaceId === null
         ? undefined
         : tabs.list(spaceId).find((entry) => entry.active);
-    if (tab === undefined) return failure("Nothing to save — open a page first.");
+    if (tab === undefined)
+      return failure("Nothing to save — open a page first.");
     if (tab.url === NEW_TAB_URL || !isAllowedTabUrl(tab.url)) {
       return failure("This page can't be saved — only web pages can.");
     }
@@ -875,35 +953,277 @@ async function startServices(ctx: {
   // to the real VM the moment the control plane reports its agent address
   // (machines row → /v1/machine → onAgentAddress below).
   const agentUrl = process.env["SUMA_AGENT_URL"] ?? null;
+  // The shared in-process computer. Hoisted out of the link because the
+  // relay role reconciler swaps the link between this sim (home role) and a
+  // RelayAgentClient (away role) — and the sim must SURVIVE those swaps: it
+  // owns the home Mac's live ptys and LocalVfs.
+  const sim =
+    agentUrl === null
+      ? new SimAgent({
+          // Provider, not a value: choosing "This Mac" mid-onboarding keeps
+          // the root at ~/Suma without a restart.
+          root: () => resolveSimRoot(),
+          available: () =>
+            device.enrollment().computeMode !== "local" ||
+            localComputerRole === "home",
+        })
+      : null;
   const link = new SwitchableAgentLink(
-    agentUrl === null ? new SimAgent() : new TcpAgentClient(agentUrl),
-    agentUrl,
+    sim ?? new TcpAgentClient(agentUrl as string),
+    agentUrl === null ? "sim" : agentUrl,
     agentUrl !== null,
   );
+  // Each space's folder in the shared filesystem (one folder per space).
+  const spaceFs = new SpaceFsService({
+    link,
+    store,
+    spaceName: (spaceId) => spaces.get(spaceId)?.name ?? null,
+  });
+  // Space scoping applies only when the link IS the account's computer: the
+  // remote VM, or local mode's ~/Suma. A dev run rooted at the repo (or a
+  // SUMA_WORKSPACE_ROOT override) stays unscoped — the IDE should show that
+  // folder itself, not plant space folders inside it.
+  const spaceScopeActive = (): boolean => {
+    if (link.kind === "remote") return true;
+    const override = process.env["SUMA_WORKSPACE_ROOT"];
+    if (override !== undefined && override.length > 0) return false;
+    return device.enrollment().computeMode === "local";
+  };
+  // The IDE's filesystem is whatever machine the link reaches — same tree
+  // the shells run in, scoped to the active space's folder. Rebind per
+  // account graph; the connection-change event tells the explorer to refetch
+  // when the transport underneath swaps.
+  workspaceFs.bind(link, () => {
+    const active = spaces.activeSpaceId;
+    if (active === null || !spaceScopeActive()) return "";
+    return spaceFs.folderFor(active);
+  });
+  const emitWorkspaceChanged = (connected: boolean): void => {
+    emit("workspace:changed", {
+      source: link.kind === "simulated" ? "sim" : "remote",
+      connected,
+      activeSpaceId: spaces.activeSpaceId,
+    });
+  };
+  link.onConnectionChanged(emitWorkspaceChanged);
+  notifyWorkspaceChanged = () => emitWorkspaceChanged(link.connected());
+  // Live tree: the machine says its files changed (vfs.changed from the sim
+  // watcher or the VM's digest scan), or a workspace IPC mutation just
+  // succeeded. Debounced here so event bursts cost one renderer refresh.
+  let filesChangedTimer: NodeJS.Timeout | null = null;
+  let filesChangedPaths: string[] | undefined;
+  const emitFilesChanged = (paths?: string[]): void => {
+    filesChangedPaths =
+      paths !== undefined && filesChangedPaths === undefined && filesChangedTimer === null
+        ? paths
+        : undefined; // merged bursts lose path detail — a re-list covers it
+    if (filesChangedTimer !== null) return;
+    filesChangedTimer = setTimeout(() => {
+      filesChangedTimer = null;
+      const payload = filesChangedPaths;
+      filesChangedPaths = undefined;
+      emit("workspace:filesChanged", payload === undefined ? {} : { paths: payload });
+    }, 500);
+    filesChangedTimer.unref();
+  };
+  link.onCtlEvent((event) => {
+    if (event.t === "vfs.changed") emitFilesChanged(event.paths);
+  });
+  // Folder maintenance rides the space roster: renames move the folder
+  // best-effort, removals drop only the binding, and an active-space move
+  // re-points the IDE. Diffed against a snapshot because onChanged carries
+  // no delta — and this way sync-driven changes from other devices count too.
+  // Downloads land on the account's computer. Local mode: saved straight
+  // into ~/Suma/<space>/Downloads (same disk, no copy). Cloud mode: saved
+  // locally as ever, then mirrored over vfs once complete — the local file
+  // is the source of truth and a failed mirror loses nothing.
+  resolveDownloadsDir = (spaceId) => {
+    if (
+      link.kind === "simulated" &&
+      spaceScopeActive() &&
+      localComputerRole === "home"
+    ) {
+      const dir = path.join(
+        resolveSimRoot(),
+        spaceFs.folderFor(spaceId),
+        SPACE_DOWNLOADS_DIR,
+      );
+      mkdirSync(dir, { recursive: true });
+      return dir;
+    }
+    return app.getPath("downloads");
+  };
+  mirrorDownload = async (item) => {
+    if (link.kind !== "remote" || !link.connected()) return;
+    if (item.savePath === "") return;
+    const destDir = await spaceFs.ensureDownloadsDir(item.spaceId);
+    const result = await uploadFileToVfs(
+      (request) => link.vfs(request),
+      item.savePath,
+      destDir,
+      path.basename(item.savePath),
+    );
+    if (result.ok && result.remotePath !== undefined) {
+      downloads.noteCloudMirror(item.id, result.remotePath);
+    }
+  };
+  let spaceNameSnapshot = new Map(spaces.list().map((s) => [s.id, s.name]));
+  let lastActiveSpaceId = spaces.activeSpaceId;
+  spaces.onChanged(() => {
+    const current = new Map(spaces.list().map((s) => [s.id, s.name]));
+    for (const [id, name] of current) {
+      const previous = spaceNameSnapshot.get(id);
+      if (previous !== undefined && previous !== name) {
+        void spaceFs.onSpaceRenamed(id, name).catch(() => undefined);
+      }
+    }
+    for (const id of spaceNameSnapshot.keys()) {
+      if (!current.has(id)) spaceFs.onSpaceRemoved(id);
+    }
+    spaceNameSnapshot = current;
+    if (spaces.activeSpaceId !== lastActiveSpaceId) {
+      lastActiveSpaceId = spaces.activeSpaceId;
+      emitWorkspaceChanged(link.connected());
+    }
+  });
 
+  // Assigned below, called from the machine service's role callback — the
+  // one place every role change (poll, offline fallback, mode flip) lands.
+  let applyRelayRole: (() => void) | null = null;
+  let relayClient: RelayAgentClient | null = null;
   const machines = new MachineService({
     control: () => auth.controlClient(),
+    controlDeviceId: () => device.enrollment().controlDeviceId,
+    onHomeOnline: (online) => {
+      // The 15s /v1/machine poll saw the home Mac's relay socket come up —
+      // skip the away client's backoff and dial now.
+      if (online) relayClient?.nudge();
+    },
+    knownLocalComputerRole: () => {
+      const enrollment = device.enrollment();
+      if (
+        enrollment.computeMode !== "local" ||
+        enrollment.isHomeMachine === null ||
+        enrollment.isHomeMachine === undefined
+      ) {
+        return null;
+      }
+      return enrollment.isHomeMachine ? "home" : "away";
+    },
     emit: (status) => {
       emit("machine:changed", status);
       pushHealth();
     },
     onAgentAddress: (address) => link.setTarget(`tcp://${address}`),
+    onLocalComputerRole: (role) => {
+      const next = role === "not-local" ? "unknown" : role;
+      const enrollment = device.enrollment();
+      if (
+        role !== "not-local" &&
+        enrollment.computeMode === "local" &&
+        enrollment.controlDeviceId !== null &&
+        enrollment.isHomeMachine !== (role === "home")
+      ) {
+        device.setEnrollment({ isHomeMachine: role === "home" });
+      }
+      const changed = next !== localComputerRole;
+      localComputerRole = next;
+      applyRelayRole?.();
+      if (!changed && localComputerRoleAnnounced) return;
+      localComputerRoleAnnounced = true;
+      emitWorkspaceChanged(link.connected());
+    },
   });
+  refreshMachineRole = () => void machines.refresh();
+
+  // Local-mode transports, reconciled from the computer role. Idempotent —
+  // every input change re-runs it, and it only touches what moved:
+  //   home  ⇒ the link stays on the shared sim, and a HomeAgentBridge keeps
+  //           an outbound socket to the relay serving the OTHER devices.
+  //   away  ⇒ the link becomes a RelayAgentClient through the control plane
+  //           to the home Mac; the sim is parked, never stopped.
+  //   else  ⇒ (cloud mode, local-only, signed out) both torn down, link on
+  //           the sim; "unknown" leaves everything as-is until the first
+  //           /v1/machine answer resolves it.
+  let homeBridge: HomeAgentBridge | null = null;
+  const relayToken = async (): Promise<string | null> =>
+    (await auth.controlClient()?.getToken()) ?? null;
+  applyRelayRole = () => {
+    if (sim === null) return; // SUMA_AGENT_URL pinned — the relay never applies
+    const enrollment = device.enrollment();
+    const localMode =
+      enrollment.computeMode === "local" &&
+      enrollment.controlUrl !== null &&
+      enrollment.controlDeviceId !== null;
+    if (localMode && localComputerRole === "home") {
+      if (relayClient !== null) {
+        relayClient.stop();
+        relayClient = null;
+      }
+      link.setLink(sim, "sim", { stopPrevious: false });
+      if (homeBridge === null) {
+        homeBridge = new HomeAgentBridge({
+          controlUrl: enrollment.controlUrl as string,
+          token: relayToken,
+          sim,
+        });
+      }
+      homeBridge.start();
+      return;
+    }
+    if (localMode && localComputerRole === "away") {
+      homeBridge?.stop();
+      if (relayClient === null) {
+        relayClient = new RelayAgentClient({
+          controlUrl: enrollment.controlUrl as string,
+          token: relayToken,
+        });
+      }
+      // stopPrevious: false — the outgoing link is the shared sim.
+      link.setLink(relayClient, "relay", { stopPrevious: false });
+      return;
+    }
+    if (localComputerRole === "unknown" && enrollment.computeMode === "local") {
+      return; // first /v1/machine answer will resolve the role
+    }
+    homeBridge?.stop();
+    homeBridge = null;
+    if (relayClient !== null) {
+      const outgoing = relayClient;
+      relayClient = null;
+      link.setLink(sim, "sim", { stopPrevious: false });
+      outgoing.stop();
+    }
+  };
+  applyRelayRole();
   const terminals = new TerminalService({
     link,
     control: () => auth.controlClient(),
     emitData: (payload) => emit("terminal:data", payload),
     emitUpdated: (list) => emit("terminal:updated", list),
+    // New shells start in the active space's folder — the same tree the
+    // explorer shows. The folder is created over the link first so the
+    // spawn cannot land in a missing directory.
+    defaultCwd: async () => {
+      const active = spaces.activeSpaceId;
+      if (active === null || !spaceScopeActive()) return null;
+      const folder = await spaceFs.ensureSpaceDir(active);
+      // Remote links speak `~`-rooted paths (both agents expand them):
+      // "~/cloud/…" on the VM, "~/Suma/…" over the relay — exactly what
+      // vfsRootLabel() reports for each.
+      return link.kind === "remote"
+        ? `${link.vfsRootLabel()}/${folder}`
+        : path.join(
+            resolveSimRoot(),
+            folder,
+          );
+    },
   });
   const ports = new PortsService({
     link,
     emit: (list) => emit("ports:updated", list),
   });
-  // The IDE half of suma://terminal (§8.5): explorer + editor over the same
-  // filesystem the (sim) shells run in.
-  const workspaceFs = new WorkspaceFsService(
-    resolveWorkspaceRoot(app.isPackaged),
-  );
+  ensureLoopbackForward = (port) => ports.ensureForward(port);
   const egress = new EgressService({
     spaces,
     store,
@@ -915,6 +1235,7 @@ async function startServices(ctx: {
     },
     emitBypassSuggested: (suggestion) =>
       emit("egress:bypassSuggested", suggestion),
+    emitCheckoutBypassed: (event) => emit("egress:checkoutBypassed", event),
   });
   spaces.onSessionCreated((ses, spaceId) => egress.attachTo(ses, spaceId));
   const audit = new AuditService(() => auth.controlClient());
@@ -938,6 +1259,15 @@ async function startServices(ctx: {
       baseUrl: () => auth.controlClient()?.url ?? null,
       token: () => auth.getToken(),
     }),
+    // Eligible public downloads fetch ON the account's computer via the
+    // agent link (fetch.public) — the VM in cloud mode, this Mac/the home
+    // Mac in local mode.
+    agent: {
+      ctl: (request) => link.ctl(request),
+      onCtlEvent: (listener) => link.onCtlEvent(listener),
+      connected: () => link.connected(),
+      vfs: (request) => link.vfs(request),
+    },
     emitTransfers: (update) => emitFiles("transfers:updated", update),
     emitChanged: (payload) => emitFiles("files:changed", payload),
     emitUploadProgress: (progress) => {
@@ -974,11 +1304,23 @@ async function startServices(ctx: {
   const downloadRouter = new DownloadRouter({
     cloudAvailable: () => files.cloudAvailable(),
     alwaysLocal,
-    startCloudFetch: (args) =>
-      files.startCloudFetch(args).catch((err: unknown) => {
+    startCloudFetch: async (args) => {
+      try {
+        // The router's frozen output is space-blind ("/Downloads/<file>");
+        // the space ↔ folder mapping lives here, so the prefix is applied
+        // here: the fetch lands in the ACTIVE space's Downloads on the
+        // shared filesystem, right where the explorer is looking.
+        let destPath = args.destPath;
+        if (spaceScopeActive()) {
+          await spaceFs.ensureDownloadsDir(args.spaceId);
+          destPath = `/${spaceFs.folderFor(args.spaceId)}${args.destPath}`;
+        }
+        return await files.startCloudFetch({ ...args, destPath });
+      } catch (err: unknown) {
         console.error("suma files:", err);
         return false; // the local download keeps going
-      }),
+      }
+    },
     onDeclined: (declined) => files.noteDeclined(declined),
     requestHeaders: nativeRequestHeaders,
   });
@@ -1012,6 +1354,9 @@ async function startServices(ctx: {
     machines.stop();
     egress.stop();
     gateway.stop();
+    workspaceFs.unbind();
+    homeBridge?.stop();
+    relayClient?.stop();
     link.stop();
     sync.stop();
     // Flush to cancel the debounced write, so nothing lands after the file is
@@ -1074,6 +1419,7 @@ async function startServices(ctx: {
     terminals,
     ports,
     workspaceFs,
+    notifyWorkspaceMutated: () => emitFilesChanged(),
     egress,
     audit,
     favorites,
@@ -1121,9 +1467,7 @@ async function startServices(ctx: {
           key: input.key,
           isAutoRepeat: input.isAutoRepeat === true,
           chorded:
-            input.control === true ||
-            input.meta === true ||
-            input.alt === true,
+            input.control === true || input.meta === true || input.alt === true,
         },
         Date.now(),
       );

@@ -220,6 +220,17 @@ async function progress(cap: string, body: Record<string, unknown>): Promise<Res
   return app.request("/v1/files/transfers/progress", jsonInit("POST", body, cap));
 }
 
+async function deviceProgress(
+  token: string,
+  transferId: string,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  return app.request(
+    `/v1/files/transfers/${transferId}/progress`,
+    jsonInit("POST", body, token),
+  );
+}
+
 /* ------------------------------------------------------------------ *
  * Pure logic
  * ------------------------------------------------------------------ */
@@ -1004,6 +1015,33 @@ describe("concurrent Files writes cannot lose data (§8.6)", () => {
  * ------------------------------------------------------------------ */
 
 describe("transfers (§8.6 cloud fetch)", () => {
+  it("lets the owning desktop durably relay agent lifecycle events", async () => {
+    const owner = await signup();
+    const stranger = await signup();
+    const transfer = transferSchema.parse(
+      (await (await createTransfer(owner.token)).json()).transfer,
+    );
+
+    const moved = await deviceProgress(owner.token, transfer.id, {
+      state: "fetching",
+      receivedBytes: 123,
+    });
+    expect(moved.status).toBe(200);
+    expect((await moved.json()).transfer).toMatchObject({
+      state: "fetching",
+      receivedBytes: 123,
+    });
+
+    expect(
+      (
+        await deviceProgress(stranger.token, transfer.id, {
+          state: "fetching",
+          receivedBytes: 124,
+        })
+      ).status,
+    ).toBe(404);
+  });
+
   it("runs the lifecycle: queued → fetching → storing → completed, visible to every device", async () => {
     const account = await signup();
     const cap = await mintCap(account.token, ["fetch.public"]);

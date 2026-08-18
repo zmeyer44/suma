@@ -24,6 +24,20 @@ function hostMatchesDomain(host: string, domain: string): boolean {
   return host === domain || host.endsWith(`.${domain}`);
 }
 
+/**
+ * Loopback targets are never gateway material: the SessionHub Worker cannot
+ * see this device's (or the VM's) loopback and its jar must never learn a
+ * "localhost" identity. They stay on Chromium's native stack, where the
+ * egress policy's local bypass already lets them go direct — and where a
+ * compute-plane port forward can answer for a dev server inside the VM.
+ */
+export function isLoopbackHost(value: string): boolean {
+  const host = normalizedHost(value).replace(/^\[/, "").replace(/\]$/, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host === "::1" || host === "0.0.0.0") return true;
+  return /^127(\.\d{1,3}){3}$/.test(host);
+}
+
 /** Public-suffix-aware eTLD+1 used for whole-site transport promotion. */
 export function routingDomainForHost(value: string): string {
   const host = normalizedHost(value);
@@ -95,6 +109,7 @@ export class GatewayOriginRouter {
 
   routeForHost(value: string): BrowserTransport {
     const host = normalizedHost(value);
+    if (isLoopbackHost(host)) return "native";
     if ([...this.promoted].some((domain) => hostMatchesDomain(host, domain)))
       return "native";
     const policy = matchOriginPolicy(SEED_CORPUS, host);
@@ -103,6 +118,9 @@ export class GatewayOriginRouter {
   }
 
   promote(value: string): { domain: string; changed: boolean } {
+    // Loopback is unconditionally native; persisting it as a promoted domain
+    // would plant a meaningless "localhost" entry in the synced domain store.
+    if (isLoopbackHost(value)) return { domain: "", changed: false };
     const domain = routingDomainForHost(value);
     if (domain === "") return { domain, changed: false };
     const size = this.promoted.size;

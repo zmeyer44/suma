@@ -22,6 +22,7 @@
  *   GET    /v1/files/quota                   → { usedBytes, limitBytes, … }
  *   POST   /v1/files/transfers { url, destPath, totalBytes? } → { transfer }
  *   GET    /v1/files/transfers               → { transfers: Transfer[] }
+ *   POST   /v1/files/transfers/<id>/progress → { transfer: Transfer }
  *   POST   /v1/files/transfers/<id>/cancel   → { transfer: Transfer }
  *
  *   GET    /v1/files/manifest?path=          → { manifest } | 404 | 409
@@ -240,11 +241,38 @@ export class FilesClient {
    * `cloudFetchEligibility` — public or presigned only, no credential of any
    * kind travels with it (§8.6).
    */
-  async createTransfer(url: string, destPath: string): Promise<Transfer> {
-    const body = await this.request<{ transfer?: unknown }>("POST", "/v1/files/transfers", {
-      url,
-      destPath,
-    });
+  async createTransfer(
+    url: string,
+    destPath: string,
+    totalBytes?: number,
+  ): Promise<Transfer> {
+    const body = await this.request<{ transfer?: unknown }>(
+      "POST",
+      "/v1/files/transfers",
+      {
+        url,
+        destPath,
+        ...(totalBytes === undefined ? {} : { totalBytes }),
+      },
+    );
+    return transferSchema.parse(body.transfer);
+  }
+
+  /** Persist a lifecycle event received over the agent mux. */
+  async reportTransfer(
+    id: string,
+    report: {
+      state: Transfer["state"];
+      receivedBytes: number;
+      totalBytes?: number;
+      error?: string;
+    },
+  ): Promise<Transfer> {
+    const body = await this.request<{ transfer?: unknown }>(
+      "POST",
+      `/v1/files/transfers/${encodeURIComponent(id)}/progress`,
+      report,
+    );
     return transferSchema.parse(body.transfer);
   }
 

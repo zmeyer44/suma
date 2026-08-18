@@ -379,3 +379,53 @@ describe("GatewayBackedService origin routing", () => {
     expect(exchangeBody).toBe("signed-token");
   });
 });
+
+describe("GatewayBackedService loopback handling", () => {
+  it("keeps localhost off the gateway and asks the compute plane to forward", async () => {
+    const gatewayFetch = vi.fn<typeof fetch>(async () => {
+      throw new Error("loopback must never be sent to the gateway");
+    });
+    const forwards: number[] = [];
+    const fake = fakeSession("dev server response");
+    const service = new GatewayBackedService({
+      getToken: async () => "token",
+      gatewayUrl: "https://session.example",
+      fetchImpl: gatewayFetch,
+      ensureLoopbackForward: async (port) => {
+        forwards.push(port);
+        return true;
+      },
+    });
+    service.attachTo(fake.session, "space-1");
+    const handler = fake.handlers.get("http");
+    expect(handler).toBeDefined();
+
+    for (const url of [
+      "http://localhost:3000/",
+      "http://127.0.0.1:3000/app.js",
+      "http://localhost/",
+    ]) {
+      const response = await handler!(new Request(url));
+      expect(await response.text()).toBe("dev server response");
+    }
+    expect(forwards).toEqual([3000, 3000, 80]);
+    expect(gatewayFetch).not.toHaveBeenCalled();
+  });
+
+  it("navigates loopback even when the forward hook rejects", async () => {
+    const fake = fakeSession("still local");
+    const service = new GatewayBackedService({
+      getToken: async () => "token",
+      gatewayUrl: "https://session.example",
+      fetchImpl: vi.fn<typeof fetch>(),
+      ensureLoopbackForward: async () => {
+        throw new Error("agent unreachable");
+      },
+      onError: () => undefined,
+    });
+    service.attachTo(fake.session, "space-1");
+    const handler = fake.handlers.get("http");
+    const response = await handler!(new Request("http://localhost:5173/"));
+    expect(await response.text()).toBe("still local");
+  });
+});

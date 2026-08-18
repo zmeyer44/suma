@@ -63,7 +63,8 @@ export function getStoredIdeLayout(): IdeLayout {
     const raw = localStorage.getItem(LAYOUT_KEY);
     if (raw === null) return DEFAULT_IDE_LAYOUT;
     const parsed: unknown = JSON.parse(raw);
-    if (parsed === null || typeof parsed !== "object") return DEFAULT_IDE_LAYOUT;
+    if (parsed === null || typeof parsed !== "object")
+      return DEFAULT_IDE_LAYOUT;
     const p = parsed as Record<string, unknown>;
     const bool = (v: unknown, fallback: boolean): boolean =>
       typeof v === "boolean" ? v : fallback;
@@ -96,15 +97,91 @@ export interface IdeBuffer {
   current: string;
 }
 
-/**
- * Unsaved edits, keyed by workspace-relative path. A module-level map, not
- * store state: the strings can be megabytes and change per keystroke — the
- * store carries only the boolean dirty flags the UI renders. The chrome
- * renderer outlives the page, so buffers survive tab switches; they are
- * dropped when the file's editor tab closes.
- */
-export const ideBuffers = new Map<string, IdeBuffer>();
+export interface IdeWorkspaceView {
+  openFiles: string[];
+  activeFile: string | null;
+  dirty: Record<string, boolean>;
+}
 
-export function dropIdeBuffer(path: string): void {
-  ideBuffers.delete(path);
+/** A path is only meaningful together with the machine and space behind it. */
+export function ideWorkspaceKey(
+  source: "sim" | "remote" | null,
+  activeSpaceId: string | null,
+  computeMode: "cloud" | "local" | null,
+): string {
+  return JSON.stringify([source ?? "unknown", computeMode, activeSpaceId]);
+}
+
+function ideBufferKey(workspaceKey: string, path: string): string {
+  return JSON.stringify([workspaceKey, path]);
+}
+
+/**
+ * Unsaved edits, keyed by workspace identity AND relative path. A module-level
+ * map, not store state: the strings can be megabytes and change per keystroke
+ * — the store carries only the boolean dirty flags the UI renders. Keeping the
+ * identity in the key prevents `README.md` from one space being saved over the
+ * same relative path after a machine or space switch.
+ */
+const ideBuffers = new Map<string, IdeBuffer>();
+const ideWorkspaceViews = new Map<string, IdeWorkspaceView>();
+
+export function getIdeBuffer(
+  workspaceKey: string,
+  path: string,
+): IdeBuffer | undefined {
+  return ideBuffers.get(ideBufferKey(workspaceKey, path));
+}
+
+export function setIdeBuffer(
+  workspaceKey: string,
+  path: string,
+  buffer: IdeBuffer,
+): void {
+  ideBuffers.set(ideBufferKey(workspaceKey, path), buffer);
+}
+
+export function dropIdeBuffer(workspaceKey: string, path: string): void {
+  ideBuffers.delete(ideBufferKey(workspaceKey, path));
+}
+
+/** Move buffers when the renderer learns the initial source after loading. */
+export function moveIdeBuffers(
+  fromWorkspaceKey: string,
+  toWorkspaceKey: string,
+  paths: readonly string[],
+): void {
+  if (fromWorkspaceKey === toWorkspaceKey) return;
+  for (const path of paths) {
+    const from = ideBufferKey(fromWorkspaceKey, path);
+    const buffer = ideBuffers.get(from);
+    if (buffer === undefined) continue;
+    const to = ideBufferKey(toWorkspaceKey, path);
+    if (!ideBuffers.has(to)) ideBuffers.set(to, buffer);
+    ideBuffers.delete(from);
+  }
+}
+
+export function stashIdeWorkspaceView(
+  workspaceKey: string,
+  view: IdeWorkspaceView,
+): void {
+  ideWorkspaceViews.set(workspaceKey, {
+    openFiles: [...view.openFiles],
+    activeFile: view.activeFile,
+    dirty: { ...view.dirty },
+  });
+}
+
+export function restoreIdeWorkspaceView(
+  workspaceKey: string,
+): IdeWorkspaceView {
+  const view = ideWorkspaceViews.get(workspaceKey);
+  return view === undefined
+    ? { openFiles: [], activeFile: null, dirty: {} }
+    : {
+        openFiles: [...view.openFiles],
+        activeFile: view.activeFile,
+        dirty: { ...view.dirty },
+      };
 }
