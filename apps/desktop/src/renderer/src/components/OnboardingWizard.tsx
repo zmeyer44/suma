@@ -6,6 +6,7 @@ import {
   KeyRound,
   Laptop,
   Link2,
+  Loader2,
   Mail,
   Shield,
 } from "lucide-react";
@@ -154,6 +155,55 @@ function ChoiceCard({
   );
 }
 
+/** One row of the provisioning checklist: done → check, active → spinner,
+ *  pending → hollow dot. The detail line shows only while the row is live —
+ *  finished and future stages need no explanation. */
+function SetupStage({
+  state,
+  title,
+  detail,
+}: {
+  state: "done" | "active" | "pending";
+  title: string;
+  detail?: string;
+}) {
+  return (
+    <div className="flex items-start gap-3">
+      <span
+        className={cn(
+          "mt-px grid size-5 shrink-0 place-items-center rounded-full",
+          state === "done"
+            ? "bg-ok/15 text-ok"
+            : state === "active"
+              ? "bg-accent/15 text-accent"
+              : "border border-ink/15",
+        )}
+      >
+        {state === "done" ? (
+          <Check className="size-3" />
+        ) : state === "active" ? (
+          <Loader2 className="size-3 animate-spin" />
+        ) : null}
+      </span>
+      <span className="min-w-0 flex-1 pt-0.5">
+        <span
+          className={cn(
+            "block text-[13px] font-medium",
+            state === "pending" ? "text-faint" : "text-text",
+          )}
+        >
+          {title}
+        </span>
+        {detail !== undefined && state === "active" ? (
+          <span className="mt-1 block text-[11.5px] leading-snug text-muted">
+            {detail}
+          </span>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
 /** The dark brand column: static across steps, like the reference's. */
 function BrandRail() {
   return (
@@ -251,6 +301,10 @@ export function OnboardingWizard() {
   const passkeyBegin = useSumaStore((s) => s.passkeyBegin);
   const passkeyFinish = useSumaStore((s) => s.passkeyFinish);
   const pushToast = useSumaStore((s) => s.pushToast);
+  const machine = useSumaStore((s) => s.machine);
+  const workspaceSource = useSumaStore((s) => s.workspaceSource);
+  const workspaceConnected = useSumaStore((s) => s.workspaceConnected);
+  const refreshMachine = useSumaStore((s) => s.refreshMachine);
 
   const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -272,6 +326,8 @@ export function OnboardingWizard() {
   >("device");
   const [busy, setBusy] = useState<Busy>("none");
   const [notice, setNotice] = useState<string | null>(null);
+  /** Provisioning has run long enough that silence would read as a hang. */
+  const [waitedLong, setWaitedLong] = useState(false);
   /** Held ONLY here, shown once, cleared on finish — never enters the store. */
   const [recoveryCode, setRecoveryCode] = useState<string | null>(null);
   const [savedConfirmed, setSavedConfirmed] = useState(false);
@@ -279,6 +335,20 @@ export function OnboardingWizard() {
 
   const credentialDone = auth.state === "enrolled" && auth.passkeyRegistered;
   const localOnly = auth.controlUrl === null;
+  /** The control plane says the VM exists and is awake — narrative only. */
+  const machineUp =
+    machine !== null && machine.machineId !== null && machine.state === "running";
+  const machineErrored =
+    machine !== null && machine.machineId !== null && machine.state === "error";
+  /** The bar for moving on is the thing that actually failed in production:
+   *  this Mac's agent link reaching the machine. Deliberately NOT gated on
+   *  machine.state — the row can lag the real VM (no client path moves
+   *  provisioning → running), and a connected agent is proof enough. */
+  const machineReady =
+    workspaceSource === "remote" && workspaceConnected === true;
+  /** The provisioning story's midpoint: the machine exists (control reports
+   *  it awake, or its address already retargeted the link) — now dialing. */
+  const machineDialing = machineUp || workspaceSource === "remote";
   const step = deriveOnboardingStep({
     authState: auth.state,
     credentialDone,
@@ -286,6 +356,8 @@ export function OnboardingWizard() {
     accountConfirmed,
     localOnly,
     accountMode,
+    computeMode: auth.computeMode,
+    machineReady,
   });
   const steps = onboardingSteps({ localOnly, accountMode });
 
@@ -311,6 +383,25 @@ export function OnboardingWizard() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [visible, canDismiss, dismissOnboarding]);
 
+  // Provisioning holds until the VM answers, and main's 15-second machine
+  // poll is too coarse to watch a boot — so poll the live control-plane
+  // status directly while this step is showing. Each refresh that reports
+  // the machine awake also re-arms the agent link's reconnect (machine
+  // service → link.retryNow), so the connection follows the boot within a
+  // poll instead of a backoff. The step advances by derivation: the moment
+  // machineReady flips true, `step` recomputes to "credential".
+  useEffect(() => {
+    if (step !== "provisioning") return;
+    void refreshMachine();
+    const poll = setInterval(() => void refreshMachine(), 2_000);
+    const slow = setTimeout(() => setWaitedLong(true), 90_000);
+    return () => {
+      clearInterval(poll);
+      clearTimeout(slow);
+      setWaitedLong(false);
+    };
+  }, [step, refreshMachine]);
+
   // One field is the obvious target on every step that has one, and only one
   // of them is mounted at a time — so a single ref covers all of them.
   const firstFieldRef = useRef<HTMLInputElement>(null);
@@ -320,7 +411,9 @@ export function OnboardingWizard() {
 
   if (!visible || step === null) return null;
 
-  const stepIndex = steps.indexOf(step);
+  // Provisioning is the tail of the computer step ("Create my computer" →
+  // watch it come up), so it shares that rail segment instead of adding one.
+  const stepIndex = steps.indexOf(step === "provisioning" ? "computer" : step);
 
   const captureRecovery = (status: EnrollmentStatus | undefined) => {
     const code = status?.recoveryCode;
@@ -475,18 +568,22 @@ export function OnboardingWizard() {
         : "How do you want to start?"
       : step === "computer"
         ? "Where should your computer live?"
-        : step === "credential"
-          ? "What should unlock this Mac?"
-          : "Save your recovery code";
+        : step === "provisioning"
+          ? "Setting up your computer"
+          : step === "credential"
+            ? "What should unlock this Mac?"
+            : "Save your recovery code";
 
   const blurb =
     step === "account"
       ? "One account, every Mac. Your spaces are end-to-end encrypted — Suma's servers never see your keys."
       : step === "computer"
         ? "Every device you enroll sees the same files, downloads, and terminal — this is where they actually live."
-        : step === "credential"
-          ? "This credential wraps the keys that unlock your spaces. It is registered on this Mac only; other Macs enroll with their own."
-          : "If you lose every enrolled Mac, this code is the only way back into your encrypted spaces. Suma cannot show it again.";
+        : step === "provisioning"
+          ? "Your account is in. Suma is now building your private Linux machine — the computer your files, downloads, and terminal will live on. This usually takes under a minute."
+          : step === "credential"
+            ? "This credential wraps the keys that unlock your spaces. It is registered on this Mac only; other Macs enroll with their own."
+            : "If you lose every enrolled Mac, this code is the only way back into your encrypted spaces. Suma cannot show it again.";
 
   /** The one primary action, per step — the footer button and Enter both run it. */
   const primary: { label: string; disabled: boolean; run: () => void } =
@@ -508,7 +605,19 @@ export function OnboardingWizard() {
             disabled: busy !== "none",
             run: () => void submitComputer(),
           }
-        : step === "credential"
+        : step === "provisioning"
+          ? {
+              // Never enabled: this step advances itself the moment the
+              // machine is reachable. The label narrates the wait instead.
+              label: machineErrored
+                ? "Waiting on the machine…"
+                : machineDialing
+                  ? "Connecting…"
+                  : "Creating your machine…",
+              disabled: true,
+              run: () => {},
+            }
+          : step === "credential"
           ? {
               label:
                 busy === "device"
@@ -693,6 +802,43 @@ export function OnboardingWizard() {
                   "Access from other devices comes later",
                 ]}
               />
+            </div>
+          ) : null}
+
+          {step === "provisioning" ? (
+            <div className="mt-7 flex flex-col gap-4">
+              {machineErrored ? (
+                <p className="rounded-xl bg-warn/10 px-3.5 py-2.5 text-[12px] leading-snug text-warn">
+                  The machine hit an error while starting — Suma keeps
+                  retrying automatically. If this doesn&apos;t clear in a few
+                  minutes, choose &ldquo;I&apos;ll do this later&rdquo; and
+                  your computer will finish setting up in the background.
+                </p>
+              ) : null}
+
+              <div className="flex flex-col gap-4 rounded-2xl border border-hairline bg-ink/3 px-5 py-5">
+                <SetupStage state="done" title="Account created" />
+                <SetupStage
+                  state={
+                    machineDialing ? "done" : machineErrored ? "pending" : "active"
+                  }
+                  title="Creating your Linux machine"
+                  detail="A private cloud computer, reachable from every Mac you enroll. It suspends when idle, so it costs nothing while you're away."
+                />
+                <SetupStage
+                  state={machineDialing ? "active" : "pending"}
+                  title="Connecting this Mac to it"
+                  detail="The machine is up — opening the link your files and terminal travel over."
+                />
+              </div>
+
+              {waitedLong && !machineErrored ? (
+                <p className="text-[11.5px] leading-snug text-faint">
+                  Still working — cloud machines occasionally take a few
+                  minutes on their first boot. You can leave this window open;
+                  setup continues on its own.
+                </p>
+              ) : null}
             </div>
           ) : null}
 

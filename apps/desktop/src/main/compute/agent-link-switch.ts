@@ -117,6 +117,10 @@ export class SwitchableAgentLink implements AgentLink {
     return this.inner.vfsRootLabel();
   }
 
+  retryNow(): void {
+    this.inner.retryNow?.();
+  }
+
   stop(): void {
     for (const unsub of this.innerUnsubs.splice(0)) unsub();
     this.inner.stop();

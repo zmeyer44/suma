@@ -1115,6 +1115,7 @@ async function startServices(ctx: {
       pushHealth();
     },
     onAgentAddress: (address) => link.setTarget(`tcp://${address}`),
+    onMachineAwake: () => link.retryNow(),
     onLocalComputerRole: (role) => {
       const next = role === "not-local" ? "unknown" : role;
       const enrollment = device.enrollment();

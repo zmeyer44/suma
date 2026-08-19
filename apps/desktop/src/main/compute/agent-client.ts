@@ -149,6 +149,14 @@ export interface AgentLink {
   vfs(request: VfsRequest): Promise<VfsResponse>;
   /** Display label for the vfs root ("~/cloud" remote; absolute path in sim). */
   vfsRootLabel(): string;
+  /**
+   * Skip the current reconnect backoff and dial now. Call when out-of-band
+   * knowledge says the agent just became reachable (the control plane
+   * reports the VM awake) — otherwise a freshly booted machine can sit
+   * unconnected for the full backoff (up to 30s). No-op while connected,
+   * mid-dial, or stopped. Optional: always-connected links have no backoff.
+   */
+  retryNow?(): void;
   stop(): void;
 }
 
@@ -465,5 +473,16 @@ export class TcpAgentClient implements AgentLink {
     }, this.backoffMs);
     this.retryTimer.unref();
     this.backoffMs = Math.min(this.backoffMs * 2, BACKOFF_MAX_MS);
+  }
+
+  retryNow(): void {
+    // Acts only from the waiting-out-a-backoff state: a pending timer is the
+    // one signal that no dial is in flight (connectCtl clears it, close
+    // re-arms it), so firing early here cannot double-connect.
+    if (this.stopped || this.up || this.retryTimer === null) return;
+    clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.backoffMs = BACKOFF_START_MS;
+    this.connectCtl();
   }
 }

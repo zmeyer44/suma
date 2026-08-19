@@ -9,7 +9,9 @@
 import { clearInterval, setInterval } from "node:timers";
 import type { MachineStatus } from "../../shared/ipc";
 import type { ControlClient } from "../control-client";
+import type { MachineState } from "@suma/protocol";
 import {
+  isAwakeState,
   localAwayMachineStatus,
   localHomeMachineStatus,
   localOnlyMachineStatus,
@@ -26,6 +28,10 @@ export interface MachineDeps {
   /** Called whenever a refresh learns the VM's agent address — the hook that
    *  retargets the agent link from the simulator to the real machine. */
   onAgentAddress?: (address: string) => void;
+  /** Called when a refresh reports the VM in an awake state — the hook that
+   *  tells the agent link to skip its reconnect backoff and dial now, so a
+   *  freshly booted machine (first provision, wake) connects within a poll. */
+  onMachineAwake?: () => void;
   /** This installation's enrolled control-plane device id. */
   controlDeviceId?: () => string | null;
   /** Persisted local ownership, so a confirmed home Mac still works offline. */
@@ -102,6 +108,11 @@ export class MachineService {
         machine.agentAddress.length > 0
       ) {
         this.deps.onAgentAddress?.(machine.agentAddress);
+        // Awake per the control plane but possibly not yet dialed: nudge the
+        // link out of its backoff so connecting tracks the poll cadence.
+        if (isAwakeState(machine.state as MachineState)) {
+          this.deps.onMachineAwake?.();
+        }
       }
       let explanation: string | null = null;
       try {
