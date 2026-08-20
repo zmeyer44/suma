@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context};
@@ -137,6 +138,18 @@ impl Scrollback {
     pub fn line_count(&self) -> usize {
         self.lines.len()
     }
+
+    /// Replace only the retained window while preserving monotonic stream
+    /// offsets. tmux reattach uses a plain-text capture for replay so stale
+    /// terminal capability queries are never executed a second time; clients
+    /// already following the old stream must still see future offsets move
+    /// forward rather than jump back to zero.
+    pub fn replace_retained(&mut self, data: &[u8]) {
+        self.lines.clear();
+        self.partial.clear();
+        self.base_offset = self.total_bytes;
+        self.push(data);
+    }
 }
 
 /* ------------------------------------------------------------------ *
@@ -195,6 +208,202 @@ pub struct SpawnParams {
 }
 
 /* ------------------------------------------------------------------ *
+ * tmux-backed persistence
+ * ------------------------------------------------------------------ */
+
+/// Production PTYs are tmux clients rather than the user's shell process
+/// itself. The tmux server lives independently of both the desktop mux
+/// connection and an individual portable-pty client, so a lost client can be
+/// recreated around the same shell and process tree. The compute image ships
+/// tmux; environments without it retain the direct-shell implementation.
+#[derive(Clone, Debug)]
+struct TmuxRuntime {
+    executable: PathBuf,
+}
+
+impl TmuxRuntime {
+    fn detect() -> Option<Self> {
+        let executable = PathBuf::from("tmux");
+        Command::new(&executable)
+            .arg("-V")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .ok()
+            .filter(|status| status.success())
+            .map(|_| Self { executable })
+    }
+
+    fn session_name(pty_id: &str) -> String {
+        format!("suma-{pty_id}")
+    }
+
+    /// `=` makes tmux use an exact target match instead of accepting a
+    /// prefix. PTY ids are already restricted to path-safe ASCII, but exact
+    /// matching also prevents one terminal from operating on another whose
+    /// id happens to share a prefix.
+    fn target(pty_id: &str) -> String {
+        format!("={}", Self::session_name(pty_id))
+    }
+
+    /// Window/pane commands do not accept tmux's exact-session `=name`
+    /// syntax as a target-window. Session names are UUID-derived and unique,
+    /// so naming their first (and only) window explicitly is unambiguous.
+    fn window_target(pty_id: &str) -> String {
+        format!("{}:0", Self::session_name(pty_id))
+    }
+
+    fn has_session(&self, pty_id: &str) -> bool {
+        Command::new(&self.executable)
+            .args(["has-session", "-t", &Self::target(pty_id)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn create_session(
+        &self,
+        pty_id: &str,
+        cwd: &str,
+        command: Option<&str>,
+        cols: u16,
+        rows: u16,
+        env: Option<&BTreeMap<String, String>>,
+    ) -> anyhow::Result<()> {
+        let session_name = Self::session_name(pty_id);
+        let cols = cols.to_string();
+        let rows = rows.to_string();
+        let mut create = Command::new(&self.executable);
+        create.args([
+            "new-session",
+            "-d",
+            "-s",
+            &session_name,
+            "-c",
+            cwd,
+            "-x",
+            &cols,
+            "-y",
+            &rows,
+        ]);
+        if let Some(command) = command {
+            // One argv element: tmux treats it as the new window's
+            // shell-command. Nothing is interpolated by this agent.
+            create.arg(command);
+        }
+        if let Some(env) = env {
+            create.envs(env);
+        }
+        let output = create.output().context("creating tmux session")?;
+        if !output.status.success() {
+            bail!(
+                "tmux new-session failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        if let Err(error) = self.configure_session(pty_id) {
+            let _ = self.kill_session(pty_id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Keep tmux as an invisible persistence layer. Its native status line
+    /// duplicates information Suma owns in the shell tabs and visually leaks
+    /// the implementation detail into every terminal. This also runs before
+    /// attaching an existing session so sessions created by an older agent
+    /// adopt the current presentation on their next reconnect.
+    fn configure_session(&self, pty_id: &str) -> anyhow::Result<()> {
+        let status = Command::new(&self.executable)
+            .args([
+                "set-option",
+                "-t",
+                &Self::session_name(pty_id),
+                "status",
+                "off",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("hiding tmux status bar")?;
+        if !status.success() {
+            bail!("tmux set-option status off failed");
+        }
+
+        // tmux owns the process-independent terminal history. Match Suma's
+        // PTY contract instead of accepting tmux's much smaller default.
+        let status = Command::new(&self.executable)
+            .args([
+                "set-option",
+                "-w",
+                "-t",
+                &Self::window_target(pty_id),
+                "history-limit",
+                &PTY_SCROLLBACK_LINES.to_string(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("setting tmux history limit")?;
+        if !status.success() {
+            bail!("tmux set-option history-limit failed");
+        }
+        Ok(())
+    }
+
+    fn client_command(&self, pty_id: &str) -> CommandBuilder {
+        let mut cmd = CommandBuilder::new(&self.executable);
+        cmd.args(["attach-session", "-t", &Self::target(pty_id)]);
+        cmd
+    }
+
+    /// Plain text (no terminal control sequences) from tmux's own history.
+    /// Raw PTY replay can contain DA/DSR queries; replaying those makes xterm
+    /// answer them again when tmux is no longer waiting, injecting the replies
+    /// into the user's shell as commands.
+    fn capture_pane(&self, pty_id: &str) -> anyhow::Result<Vec<u8>> {
+        let output = Command::new(&self.executable)
+            .args([
+                "capture-pane",
+                "-p",
+                "-S",
+                "-",
+                "-t",
+                &Self::window_target(pty_id),
+            ])
+            .output()
+            .context("capturing tmux history")?;
+        if !output.status.success() {
+            bail!(
+                "tmux capture-pane failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(output.stdout)
+    }
+
+    fn kill_session(&self, pty_id: &str) -> bool {
+        Command::new(&self.executable)
+            .args(["kill-session", "-t", &Self::target(pty_id)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn interrupt_session(&self, pty_id: &str) -> bool {
+        Command::new(&self.executable)
+            .args(["send-keys", "-t", &Self::window_target(pty_id), "C-c"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+}
+
+/* ------------------------------------------------------------------ *
  * Live output fan-out
  * ------------------------------------------------------------------ */
 
@@ -244,6 +453,7 @@ pub struct AttachResult {
 pub struct PtyManager {
     base_dir: PathBuf,
     sessions: HashMap<String, PtySession>,
+    tmux: Option<TmuxRuntime>,
     /// Exits reaped by `attach`/`list` that the exit pump has not yet
     /// broadcast. Every reap site records the code here before removing the
     /// session, so a shell that exits between poller ticks — and is reaped by
@@ -252,12 +462,34 @@ pub struct PtyManager {
 }
 
 impl PtyManager {
+    /// Direct PTYs, used by tests and environments that intentionally do not
+    /// promise process persistence independently of this agent process.
     pub fn new(base_dir: impl Into<PathBuf>) -> Self {
         PtyManager {
             base_dir: base_dir.into(),
             sessions: HashMap::new(),
+            tmux: None,
             exited_pending: Vec::new(),
         }
+    }
+
+    /// Production constructor. tmux is present in the compute image; keeping
+    /// detection here makes a developer-built agent fail soft instead of
+    /// making the terminal unusable on a machine without tmux.
+    pub fn new_persistent(base_dir: impl Into<PathBuf>) -> Self {
+        let mut manager = Self::new(base_dir);
+        manager.tmux = TmuxRuntime::detect();
+        if manager.tmux.is_none() {
+            tracing::warn!("tmux unavailable; PTYs will not survive agent-client loss");
+        }
+        manager
+    }
+
+    #[cfg(test)]
+    fn new_with_tmux(base_dir: impl Into<PathBuf>, executable: PathBuf) -> Self {
+        let mut manager = Self::new(base_dir);
+        manager.tmux = Some(TmuxRuntime { executable });
+        manager
     }
 
     /// Exit codes to broadcast as `pty.exited`, drained once each. Called by
@@ -265,16 +497,31 @@ impl PtyManager {
     /// picks up exits that `attach`/`list` reaped since the last drain — so
     /// each real exit is reported exactly once whichever site saw it first.
     pub fn collect_new_exits(&mut self) -> Vec<(String, i32)> {
-        let mut newly: Vec<(String, i32)> = Vec::new();
-        let mut remove: Vec<String> = Vec::new();
+        let mut finished: Vec<(String, i32)> = Vec::new();
         for (id, session) in self.sessions.iter_mut() {
             if let Ok(Some(status)) = session.child.try_wait() {
-                newly.push((id.clone(), status.exit_code() as i32));
-                remove.push(id.clone());
+                finished.push((id.clone(), status.exit_code() as i32));
             }
         }
-        for id in &remove {
+        for (id, _) in &finished {
             self.sessions.remove(id);
+        }
+
+        let mut newly: Vec<(String, i32)> = Vec::new();
+        for (id, code) in finished {
+            let resumed = self.tmux.as_ref().is_some_and(|tmux| tmux.has_session(&id))
+                && load_context(&self.dir_for(&id)).is_some_and(|(meta, _)| {
+                    let capture = self
+                        .tmux
+                        .as_ref()
+                        .and_then(|tmux| tmux.capture_pane(&id).ok())
+                        .unwrap_or_default();
+                    self.launch_client(id.clone(), meta.cwd, meta.command, 80, 24, None, capture)
+                        .is_ok()
+                });
+            if !resumed {
+                newly.push((id, code));
+            }
         }
         let mut exits = std::mem::take(&mut self.exited_pending);
         exits.append(&mut newly);
@@ -319,6 +566,13 @@ impl PtyManager {
         if self.sessions.contains_key(&params.pty_id) {
             bail!("pty {} already exists", params.pty_id);
         }
+        if self
+            .tmux
+            .as_ref()
+            .is_some_and(|tmux| tmux.has_session(&params.pty_id))
+        {
+            bail!("pty {} already exists", params.pty_id);
+        }
 
         let home = std::env::var("HOME").ok();
         let cwd = match params.cwd.clone() {
@@ -326,32 +580,10 @@ impl PtyManager {
             None => default_cwd(home.as_deref()),
         };
 
-        let pair = native_pty_system().openpty(PtySize {
-            rows: params.rows,
-            cols: params.cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
-
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        let mut cmd = CommandBuilder::new(shell);
-        if let Some(command) = &params.command {
-            cmd.args(["-c", command]);
-        }
-        cmd.cwd(&cwd);
-        if let Some(env) = &params.env {
-            for (k, v) in env {
-                cmd.env(k, v);
-            }
-        }
-
-        let child = pair.slave.spawn_command(cmd)?;
-        drop(pair.slave);
-        let writer = pair.master.take_writer()?;
-        let mut reader = pair.master.try_clone_reader()?;
-
         // Persist context immediately: the whole point is surviving an
-        // unplanned cold boot, so nothing waits for a graceful shutdown.
+        // unplanned client/agent failure, so nothing waits for a graceful
+        // shutdown. The tmux client launched below can then be recreated from
+        // exactly this metadata.
         let dir = self.dir_for(&params.pty_id);
         let mut history = Vec::new();
         if let Some(command) = &params.command {
@@ -366,7 +598,76 @@ impl PtyManager {
             },
         )?;
 
+        if let Some(tmux) = &self.tmux {
+            tmux.create_session(
+                &params.pty_id,
+                &cwd,
+                params.command.as_deref(),
+                params.cols,
+                params.rows,
+                params.env.as_ref(),
+            )?;
+        }
+
+        self.launch_client(
+            params.pty_id,
+            cwd,
+            params.command,
+            params.cols,
+            params.rows,
+            params.env,
+            Vec::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_client(
+        &mut self,
+        pty_id: String,
+        cwd: String,
+        command: Option<String>,
+        cols: u16,
+        rows: u16,
+        env: Option<BTreeMap<String, String>>,
+        initial_scrollback: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let pair = native_pty_system().openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+
+        let mut cmd = if let Some(tmux) = &self.tmux {
+            tmux.configure_session(&pty_id)?;
+            tmux.client_command(&pty_id)
+        } else {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+            let mut cmd = CommandBuilder::new(shell);
+            if let Some(command) = &command {
+                cmd.args(["-c", command]);
+            }
+            cmd
+        };
+        cmd.cwd(&cwd);
+        if let Some(env) = &env {
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+        }
+
+        let child = pair.slave.spawn_command(cmd)?;
+        drop(pair.slave);
+        let writer = pair.master.take_writer()?;
+        let mut reader = pair.master.try_clone_reader()?;
+
+        let dir = self.dir_for(&pty_id);
         let ring = Arc::new(Mutex::new(Scrollback::with_default_cap()));
+        if !initial_scrollback.is_empty() {
+            ring.lock()
+                .expect("scrollback lock poisoned")
+                .push(&initial_scrollback);
+        }
         let ring_writer = Arc::clone(&ring);
         let (output, _) = broadcast::channel(PTY_OUTPUT_LAG_CAPACITY);
         let output_writer = output.clone();
@@ -403,7 +704,7 @@ impl PtyManager {
         });
 
         self.sessions.insert(
-            params.pty_id,
+            pty_id,
             PtySession {
                 master: pair.master,
                 child,
@@ -411,7 +712,7 @@ impl PtyManager {
                 ring,
                 output,
                 cwd,
-                command: params.command,
+                command,
             },
         );
         Ok(())
@@ -442,11 +743,27 @@ impl PtyManager {
     }
 
     pub fn kill(&mut self, pty_id: &str, signal: Option<PtySignal>) -> anyhow::Result<()> {
+        Self::check_id(pty_id)?;
+        let signal = signal.unwrap_or(PtySignal::Term);
+
+        // Signalling the portable-pty child would only kill/detach the tmux
+        // client and leave the user's shell orphaned in the server. Operate on
+        // the named session itself so close and Ctrl-C preserve their existing
+        // product semantics.
+        if let Some(tmux) = &self.tmux {
+            let handled = match signal {
+                PtySignal::Int => tmux.interrupt_session(pty_id),
+                PtySignal::Term | PtySignal::Kill => tmux.kill_session(pty_id),
+            };
+            if handled {
+                return Ok(());
+            }
+        }
+
         let session = self
             .sessions
             .get_mut(pty_id)
             .ok_or_else(|| anyhow!("unknown pty {pty_id}"))?;
-        let signal = signal.unwrap_or(PtySignal::Term);
         match session.child.process_id() {
             Some(pid) => {
                 let sig = match signal {
@@ -484,12 +801,25 @@ impl PtyManager {
             None => None,
         };
         if let Some(code) = exited {
-            self.exited_pending.push((pty_id.to_string(), code));
             self.sessions.remove(pty_id);
+            if !self
+                .tmux
+                .as_ref()
+                .is_some_and(|tmux| tmux.has_session(pty_id))
+            {
+                self.exited_pending.push((pty_id.to_string(), code));
+            }
         }
 
         if let Some(session) = self.sessions.get(pty_id) {
-            let ring = session.ring.lock().expect("scrollback lock poisoned");
+            let mut ring = session.ring.lock().expect("scrollback lock poisoned");
+            if let Some(capture) = self
+                .tmux
+                .as_ref()
+                .and_then(|tmux| tmux.capture_pane(pty_id).ok())
+            {
+                ring.replace_retained(&capture);
+            }
             return Ok(AttachResult {
                 restore: PtyRestoreKind::Resumed,
                 scrollback: ring.bytes_since(since_byte),
@@ -502,6 +832,43 @@ impl PtyManager {
         let (meta, bytes) = load_context(&dir).ok_or_else(|| {
             anyhow!("unknown pty {pty_id}: no live session, no persisted context")
         })?;
+
+        // The agent-side portable-pty client may be gone while its tmux
+        // session — and therefore the user's actual shell/process tree — is
+        // still alive. Recreate that disposable client and seed its ring with
+        // the durable stream before the desktop opens the pty/<id> channel.
+        if self
+            .tmux
+            .as_ref()
+            .is_some_and(|tmux| tmux.has_session(pty_id))
+        {
+            let capture = self
+                .tmux
+                .as_ref()
+                .and_then(|tmux| tmux.capture_pane(pty_id).ok())
+                .unwrap_or_default();
+            self.launch_client(
+                pty_id.to_string(),
+                meta.cwd.clone(),
+                meta.command.clone(),
+                80,
+                24,
+                None,
+                capture,
+            )?;
+            let session = self
+                .sessions
+                .get(pty_id)
+                .expect("launch_client inserts the resumed session");
+            let ring = session.ring.lock().expect("scrollback lock poisoned");
+            return Ok(AttachResult {
+                restore: PtyRestoreKind::Resumed,
+                scrollback: ring.bytes_since(since_byte),
+                scrollback_bytes: ring.total_bytes(),
+                cwd: session.cwd.clone(),
+            });
+        }
+
         // Rebuild the ring from the on-disk stream; the cap applies exactly
         // as it would have live, so offsets line up with what a client saw.
         let mut ring = Scrollback::with_default_cap();
@@ -523,17 +890,22 @@ impl PtyManager {
     /// would, so `live` never claims a dead process. Sorted by ptyId so two
     /// devices render the same order.
     pub fn list(&mut self) -> Vec<PtySessionEntry> {
-        let mut exited: Vec<String> = Vec::new();
+        let mut exited: Vec<(String, i32)> = Vec::new();
         for (id, session) in self.sessions.iter_mut() {
             if let Ok(Some(status)) = session.child.try_wait() {
-                // Record the code for the exit pump before reaping (see attach).
-                self.exited_pending
-                    .push((id.clone(), status.exit_code() as i32));
-                exited.push(id.clone());
+                exited.push((id.clone(), status.exit_code() as i32));
             }
         }
-        for id in &exited {
+        for (id, _) in &exited {
             self.sessions.remove(id);
+        }
+        for (id, code) in exited {
+            // A dead tmux client is disposable; the shell remains live and
+            // attach will recreate the client. Only report a true shell/session
+            // exit to the desktop.
+            if !self.tmux.as_ref().is_some_and(|tmux| tmux.has_session(&id)) {
+                self.exited_pending.push((id, code));
+            }
         }
 
         let mut entries: Vec<PtySessionEntry> = self
@@ -563,10 +935,13 @@ impl PtyManager {
                     continue;
                 };
                 entries.push(PtySessionEntry {
+                    live: self
+                        .tmux
+                        .as_ref()
+                        .is_some_and(|tmux| tmux.has_session(&pty_id)),
                     pty_id,
                     cwd: meta.cwd,
                     command: meta.command,
-                    live: false,
                 });
             }
         }
@@ -706,6 +1081,19 @@ mod tests {
     }
 
     #[test]
+    fn replacing_retained_scrollback_keeps_stream_offsets_monotonic() {
+        let mut ring = Scrollback::new(10);
+        ring.push(b"raw terminal query\n");
+        let before = ring.total_bytes();
+
+        ring.replace_retained(b"plain tmux capture\n");
+
+        assert_eq!(ring.base_offset(), before);
+        assert!(ring.total_bytes() > before);
+        assert_eq!(ring.bytes_since(0), b"plain tmux capture\n");
+    }
+
+    #[test]
     fn production_cap_is_100k_lines() {
         // §8.5 names the number; the constant and the TS side must agree.
         assert_eq!(PTY_SCROLLBACK_LINES, 100_000);
@@ -789,6 +1177,103 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(reaped, "killed pty must eventually attach as reconstructed");
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tmux_session_is_discovered_and_reattached_by_a_fresh_manager() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = test_dir("tmux-resume");
+        fs::create_dir_all(&base).unwrap();
+        let fake_tmux = base.join("fake-tmux");
+        let marker = PathBuf::from(format!("{}.session", fake_tmux.display()));
+        let calls = PathBuf::from(format!("{}.calls", fake_tmux.display()));
+        fs::write(
+            &fake_tmux,
+            r#"#!/bin/sh
+marker="${0}.session"
+calls="${0}.calls"
+printf '%s\n' "$*" >> "$calls"
+case "$1" in
+  -V) exit 0 ;;
+  has-session) test -f "$marker" ;;
+  new-session) : > "$marker"; exit 0 ;;
+  set-option) exit 0 ;;
+  attach-session) test -f "$marker" || exit 1; exec /bin/cat ;;
+  capture-pane) printf 'captured tmux scrollback\n' ;;
+  kill-session) rm -f "$marker"; exit 0 ;;
+  send-keys) exit 0 ;;
+  *) exit 2 ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_tmux).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_tmux, permissions).unwrap();
+
+        let mut first = PtyManager::new_with_tmux(&base, fake_tmux.clone());
+        first
+            .spawn(SpawnParams {
+                pty_id: "stable-shell".into(),
+                cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+                command: None,
+                cols: 80,
+                rows: 24,
+                env: None,
+            })
+            .unwrap();
+        wait_for(|| marker.exists().then_some(()));
+        let configured = fs::read_to_string(calls).unwrap();
+        assert!(
+            configured.contains("set-option -t suma-stable-shell status off"),
+            "tmux's own status bar must stay hidden behind the Suma shell tab"
+        );
+        first.write_input("stable-shell", b"before\n").unwrap();
+        wait_for(|| {
+            first
+                .replay("stable-shell", 0)?
+                .0
+                .windows(6)
+                .any(|bytes| bytes == b"before")
+                .then_some(())
+        });
+
+        // A brand-new manager models a restarted agent: its in-memory PTY
+        // table is empty, while the tmux server and durable metadata remain.
+        let mut restarted = PtyManager::new_with_tmux(&base, fake_tmux.clone());
+        assert!(restarted
+            .list()
+            .iter()
+            .any(|entry| entry.pty_id == "stable-shell" && entry.live));
+        let attached = restarted.attach("stable-shell", 0).unwrap();
+        assert_eq!(attached.restore, PtyRestoreKind::Resumed);
+        restarted.write_input("stable-shell", b"after\n").unwrap();
+        wait_for(|| {
+            restarted
+                .replay("stable-shell", 0)?
+                .0
+                .windows(5)
+                .any(|bytes| bytes == b"after")
+                .then_some(())
+        });
+
+        restarted
+            .kill("stable-shell", Some(PtySignal::Term))
+            .unwrap();
+        assert!(
+            !marker.exists(),
+            "closing the terminal kills its tmux session"
+        );
+        // The fake clients are `cat`, not a real tmux process that exits when
+        // kill-session runs; stop them explicitly before removing the fixture.
+        for manager in [&mut first, &mut restarted] {
+            if let Some(session) = manager.sessions.get_mut("stable-shell") {
+                let _ = session.child.kill();
+            }
+        }
         fs::remove_dir_all(&base).unwrap();
     }
 

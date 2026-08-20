@@ -19,4 +19,9 @@ describe("compute image runtime contract", () => {
   it("defaults the agent to a dual-stack listener", () => {
     expect(dockerfile).toContain("ENV SUMA_AGENT_LISTEN=[::]:2222");
   });
+
+  it("ships tmux for agent-independent terminal sessions", () => {
+    expect(dockerfile).toMatch(/\n\s+tmux\s+\\/);
+    expect(agentMain).toContain("PtyManager::new_persistent");
+  });
 });

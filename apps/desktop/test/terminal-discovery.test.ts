@@ -19,6 +19,7 @@ import { SimAgent } from "../src/main/compute/sim-agent";
 class FakeLink implements AgentLink {
   readonly kind = "remote" as const;
   readonly requests: AgentCtlRequest[] = [];
+  readonly operations: string[] = [];
   readonly ctlEventListeners = new Set<(event: AgentCtlResponse) => void>();
   readonly connectionListeners = new Set<(up: boolean) => void>();
   up = true;
@@ -37,10 +38,12 @@ class FakeLink implements AgentLink {
   }
   ctl(request: AgentCtlRequest): Promise<AgentCtlResponse | null> {
     this.requests.push(request);
+    this.operations.push(`ctl:${request.t}`);
     if (!this.up) return Promise.reject(new Error("suma-agent unreachable"));
     return Promise.resolve(this.answers[request.t] ?? null);
   }
-  openPty(_ptyId: string, _onData: (data: Buffer) => void): PtyChannel {
+  openPty(ptyId: string, _onData: (data: Buffer) => void): PtyChannel {
+    this.operations.push(`open:${ptyId}`);
     return { write: () => undefined, close: () => undefined };
   }
   forward(_port: number, _socket: Duplex): void {}
@@ -108,6 +111,48 @@ describe("TerminalService.discover", () => {
     expect(list).toHaveLength(1);
     // Existing record updated in place — title survives, liveness is honest.
     expect(list[0]).toMatchObject({ title: created.title, cwd: "/tmp/deeper", exited: true });
+  });
+
+  it("clears an exited marker when tmux discovery reports the shell live again", async () => {
+    const link = new FakeLink();
+    link.answers["pty.list"] = {
+      t: "pty.listing",
+      sessions: [{ ptyId: "tmux-shell", cwd: "/root/project", live: false }],
+    };
+    const terminals = service(link);
+    expect((await terminals.discover())[0]?.exited).toBe(true);
+
+    link.answers["pty.list"] = {
+      t: "pty.listing",
+      sessions: [{ ptyId: "tmux-shell", cwd: "/root/project", live: true }],
+    };
+    expect((await terminals.discover())[0]).toMatchObject({
+      ptyId: "tmux-shell",
+      exited: false,
+    });
+  });
+
+  it("asks the agent to resume tmux before opening the replay channel", async () => {
+    const link = new FakeLink();
+    link.answers["pty.list"] = {
+      t: "pty.listing",
+      sessions: [{ ptyId: "tmux-shell", cwd: "/root/project", live: false }],
+    };
+    link.answers["pty.attach"] = {
+      t: "pty.attached",
+      ptyId: "tmux-shell",
+      restore: "resumed",
+      scrollbackBytes: 42,
+      cwd: "/root/project",
+    };
+    const terminals = service(link);
+    await terminals.discover();
+    link.operations.length = 0;
+
+    const attached = await terminals.attach("tmux-shell");
+
+    expect(link.operations).toEqual(["ctl:pty.attach", "open:tmux-shell"]);
+    expect(attached).toMatchObject({ restore: "resumed", exited: false });
   });
 
   it("returns the local list when the agent is unreachable", async () => {

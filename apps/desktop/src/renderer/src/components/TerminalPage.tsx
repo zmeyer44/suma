@@ -1,5 +1,6 @@
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import {
+  Cloud,
   FileCode,
   PanelLeft,
   Plus,
@@ -135,11 +136,21 @@ export function TerminalPage() {
   const mainColRef = useRef<HTMLDivElement | null>(null);
 
   const activePtyRef = useRef<string | null>(null);
+  const activeTabElRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   // State, not a ref: the callback ref re-renders when the host div lands, and
   // the effect that builds the Terminal onto it runs then. A ref alone would
   // still be null on the mount pass that has to attach it.
   const [hostEl, setHostEl] = useState<HTMLDivElement | null>(null);
+
+  // A newly-created or reattached shell can land beyond a long row of
+  // historical tabs. Keep the active tab—and its persistence state—visible.
+  useEffect(() => {
+    activeTabElRef.current?.scrollIntoView({
+      block: "nearest",
+      inline: "nearest",
+    });
+  }, [activePty]);
 
   /** Attach replays the whole scrollback, so the display resets first. */
   const selectPty = (ptyId: string): void => {
@@ -147,6 +158,15 @@ export function TerminalPage() {
     activePtyRef.current = ptyId;
     termRef.current?.reset();
     setActivePty(ptyId);
+    // Also handle selecting the already-active shell: React will elide the
+    // identical state update, but its tab may still be outside the scroller
+    // after a renderer restart restored a long historical list.
+    requestAnimationFrame(() => {
+      activeTabElRef.current?.scrollIntoView({
+        block: "nearest",
+        inline: "nearest",
+      });
+    });
     void attachTerminal(ptyId);
   };
 
@@ -358,10 +378,14 @@ export function TerminalPage() {
         />
       ) : null}
       <div className="flex shrink-0 items-center gap-1.5 border-b border-hairline px-3 py-2">
-        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+        <div
+          data-testid="terminal-tabs"
+          className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
+        >
           {terminals.map((t) => (
             <div
               key={t.ptyId}
+              ref={t.ptyId === activePty ? activeTabElRef : undefined}
               className={cn(
                 "flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1 text-[12px]",
                 t.ptyId === activePty
@@ -371,12 +395,23 @@ export function TerminalPage() {
             >
               <button
                 type="button"
+                data-testid={`terminal-select-${t.ptyId}`}
                 onClick={() => selectPty(t.ptyId)}
                 className="cursor-pointer"
                 title={t.cwd}
               >
                 {t.jobMode ? <span className="mr-1 text-ok">●</span> : null}
                 {t.title}
+                {machine !== null && machine.machineId !== null && !t.exited ? (
+                  <span
+                    data-testid={`terminal-persistent-${t.ptyId}`}
+                    aria-label="Persistent VM shell"
+                    title="Persistent VM shell — keeps running when Suma disconnects"
+                    className="ml-1 inline-flex align-[-2px] text-accent"
+                  >
+                    <Cloud className="size-3" aria-hidden="true" />
+                  </span>
+                ) : null}
                 {t.exited ? (
                   <span className="ml-1 text-faint">(exited)</span>
                 ) : null}
@@ -384,9 +419,14 @@ export function TerminalPage() {
               <button
                 type="button"
                 aria-label={`Close ${t.title}`}
+                data-testid={`terminal-close-${t.ptyId}`}
                 onClick={() => {
                   void closeTerminal(t.ptyId);
-                  if (activePty === t.ptyId) setActivePty(null);
+                  if (activePty === t.ptyId) {
+                    activePtyRef.current = null;
+                    termRef.current?.reset();
+                    setActivePty(null);
+                  }
                 }}
                 className="grid size-3.5 cursor-pointer place-items-center rounded text-faint hover:bg-ink/12 hover:text-text"
               >
@@ -453,7 +493,11 @@ export function TerminalPage() {
       {/* No Escape handler: there is no dialog above this to dismiss, so the
           key reaches xterm — and the shell — on its own. */}
       <div className="relative min-h-0 flex-1 cursor-text bg-bg px-3 py-2">
-        <div ref={setHostEl} className="h-full w-full" />
+        <div
+          ref={setHostEl}
+          data-testid="terminal-emulator"
+          className={cn("h-full w-full", active === null && "invisible")}
+        />
         {active === null ? (
           <p className="absolute inset-0 p-4 text-[12px] text-faint">
             No shell — open one with the + button.
@@ -565,7 +609,9 @@ function PanelToggle({
       onClick={onClick}
       className={cn(
         "grid size-6 shrink-0 cursor-pointer place-items-center rounded-md",
-        open ? "bg-ink/10 text-text" : "text-muted hover:bg-ink/8 hover:text-text",
+        open
+          ? "bg-ink/10 text-text"
+          : "text-muted hover:bg-ink/8 hover:text-text",
       )}
     >
       <Icon className="size-3.5" aria-hidden="true" />

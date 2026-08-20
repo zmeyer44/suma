@@ -64,7 +64,9 @@ async fn main() -> anyhow::Result<()> {
     let vfs_root = VfsRoot::new(VfsRoot::default_root());
 
     let state = Arc::new(Mutex::new(AgentState {
-        ptys: PtyManager::new(PtyManager::default_base()),
+        // Remote shells live in stable tmux sessions. The portable-pty client
+        // is disposable and can be recreated after an agent/client failure.
+        ptys: PtyManager::new_persistent(PtyManager::default_base()),
         jobs: JobRegistry::default(),
         ports: Box::new(ProcSource),
         vfs_root: vfs_root.clone(),

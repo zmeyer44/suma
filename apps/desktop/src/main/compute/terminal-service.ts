@@ -74,7 +74,10 @@ export class TerminalService {
       const existing = this.records.get(session.ptyId);
       if (existing !== undefined) {
         existing.info.cwd = session.cwd;
-        if (!session.live) existing.info.exited = true;
+        // A tmux-backed session can outlive and then recreate its disposable
+        // agent PTY client, so discovery must be able to clear an earlier
+        // exited marker as well as set one.
+        existing.info.exited = !session.live;
         continue;
       }
       this.counter += 1;
@@ -144,14 +147,17 @@ export class TerminalService {
    */
   async attach(ptyId: string): Promise<TerminalInfo> {
     const record = this.require(ptyId);
-    // Re-open the byte channel first so the replay has somewhere to land.
-    this.openChannel(record);
+    // Let the agent recreate a disposable tmux client first when necessary.
+    // Opening pty/<id> afterwards is still gap-free: the agent subscribes to
+    // live output before replaying the retained ring onto the new channel.
     const response = await this.deps.link.ctl({ t: "pty.attach", ptyId, sinceByte: 0 });
     if (response?.t === "error") throw new Error(`terminal: ${response.message}`);
     if (response?.t === "pty.attached") {
       record.info.restore = response.restore;
       record.info.cwd = response.cwd;
+      record.info.exited = response.restore !== "resumed";
     }
+    this.openChannel(record);
     this.pushUpdated();
     return { ...record.info };
   }
