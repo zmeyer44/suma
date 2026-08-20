@@ -11,6 +11,11 @@
  *
  * In a packaged build there is no .env anywhere above the app bundle, so this
  * is a cheap no-op.
+ *
+ * SUMA_NO_DOTENV=1 disables loading entirely. Production never sees a .env,
+ * so a faithful cloud-preview dev run (dev:cloud) sets this to keep repo-root
+ * keys like AI_GATEWAY_API_KEY from silently switching chat/voice/TTS onto
+ * the bring-your-own-key path that real users don't get.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -50,6 +55,7 @@ export function loadDotEnv(
   startDir: string,
   env: NodeJS.ProcessEnv = process.env,
 ): void {
+  if (env["SUMA_NO_DOTENV"] === "1") return;
   let dir = path.resolve(startDir);
   // Nearest-first: a value set by apps/desktop/.env must not be replaced by
   // the repo root's, and neither replaces the real environment.

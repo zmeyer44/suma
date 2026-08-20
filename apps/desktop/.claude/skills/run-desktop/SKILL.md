@@ -65,7 +65,11 @@ invite gate; mint codes via `POST /v1/admin/invites`).
 ## Run (human path)
 
 ```bash
-pnpm dev   # electron-vite dev with HMR; opens the window. Ctrl-C to quit.
+pnpm dev         # electron-vite dev with HMR; opens the window. Ctrl-C to quit.
+pnpm dev:cloud   # same, but a faithful preview against the HOSTED planes:
+                 # own profile ("Suma Dev Cloud"), SUMA_NO_DOTENV=1, AI keys
+                 # and plane-pinning vars stripped. Enrolling here creates a
+                 # REAL production account — ask the user first.
 ```
 
 ## Gotchas

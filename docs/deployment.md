@@ -152,6 +152,23 @@ against the deployed stack — those pin a dev gateway and bypass discovery.
 A signed/entitled build is required only for the Touch ID passkey ceremony;
 the device-key enrollment path works in an unsigned dev build.
 
+For day-to-day development against the hosted planes, use the wrapper
+instead of exporting vars by hand:
+
+```sh
+pnpm --filter @suma/desktop dev:cloud
+```
+
+It builds `@suma/files`, launches `electron-vite dev` with
+`SUMA_CONTROL_URL=https://api.sumabrowser.com`, a dedicated profile
+(`~/Library/Application Support/Suma Dev Cloud` — a profile keeps the
+control URL it first enrolled against, so the cloud profile stays separate
+from local-only dev profiles), and strips the plane-pinning vars and
+AI/TTS env keys, with `SUMA_NO_DOTENV=1` so the repo-root `.env` cannot
+reintroduce them — chat/voice/TTS then exercise the same stored/vended
+credential paths a shipped build uses. What dev mode still cannot preview:
+Touch ID passkeys, Widevine, and auto-update (use `dist:mac` for those).
+
 ## Pre-flight before a two-Mac session test
 
 ```sh

@@ -150,7 +150,14 @@ The control plane's dev entry substitutes the two backing services you won't
 have locally: `DATABASE_URL=pglite` (embedded Postgres, same engine the tests
 use) and `OBJECT_STORE=stub` (in-memory chunk store). Both warn on boot; real
 credentials take precedence. The production entry refuses to boot without
-them.
+them. One caveat to "no cloud credentials": if a repo-root `.env` exists, the
+control dev server adopts its `FLY_*` keys and will provision **real** Fly
+machines (`services/control/src/dev-env.ts`).
+
+To preview the exact production experience from a dev checkout — hosted
+control plane, discovered hub/gateway, vended AI, packaged-equivalent Files
+bundle — use `pnpm --filter @suma/desktop dev:cloud` (details in
+`docs/deployment.md`; agent-facing rules in `AGENTS.md`).
 
 End-to-end suites drive two real Electron instances against a local
 SessionHub: `pnpm test:e2e:gateway`.

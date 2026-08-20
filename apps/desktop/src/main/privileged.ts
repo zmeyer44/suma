@@ -63,24 +63,22 @@ export function registerSumaScheme(): void {
 }
 
 /**
- * As strict as Vite dev tolerates: the dev server needs inline scripts for
- * the React refresh preamble and ws: for HMR; images allow https: for
- * favicon fetches. Production builds are file:-local and ship no remote
- * origin at all.
+ * Byte-identical to the meta CSP in renderer/index.html (test/csp-parity
+ * asserts this). Header and meta INTERSECT, so the meta — present in dev too,
+ * since Vite serves the same index.html — already enforces the production
+ * policy; a header any looser can never take effect, it can only mislead the
+ * reader into believing dev allows something prod blocks. Keeping the header
+ * equal to the meta means a renderer change that needs a new source fails in
+ * dev exactly as it would in a shipped build. Vite's HMR websocket is
+ * same-origin (ws://localhost:5173 from http://localhost:5173), which CSP3's
+ * 'self' covers, so dev needs no extra allowance.
  */
-const DEV_CSP = [
+export const DEV_CSP = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline'",
+  "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: https: suma-video:",
-  "font-src 'self' data:",
-  // Mirrors index.html's meta CSP: header and meta INTERSECT, so a media
-  // source the meta allows (the inlined save-pop data: URI) must be allowed
-  // here too or dev silently loses the sound. suma-video: is the saved-video
-  // stream (PIP playback + library thumbnails); suma-workspace: is the IDE's
-  // audio-file player.
   "media-src 'self' blob: data: suma-video: suma-workspace:",
-  "connect-src 'self' ws: http://localhost:*",
 ].join("; ");
 
 /**

@@ -24,9 +24,16 @@ files:
 # The bundle icon follows the macOS icon grid, which reserves an outer safe
 # area. The running app uses this full-bleed raster for its Dock slot so the
 # production footprint matches development; both derive from icon.svg.
+#
+# The Files privileged page (suma://files) serves the built apps/files bundle;
+# packaged apps look for it at <resources>/files (src/main/files/bundle.ts).
+# The dist:mac* scripts build @suma/files first so this copy never packages a
+# stale or missing bundle.
 extraResources:
   - from: build/icon.png
     to: icon.png
+  - from: ../files/dist
+    to: files
 
 # node-pty ships a native addon and a spawn-helper binary that must live on
 # the real filesystem, not inside the asar; sherpa-onnx (the voice
