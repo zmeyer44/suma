@@ -65,14 +65,14 @@ export function Hero() {
                 </a>
               </p>
 
-              <h1 className="display mt-8 max-w-[15ch] text-[clamp(2.875rem,4.8vw,4.75rem)] leading-[1.02] tracking-[-0.025em]">
+              <h1 className="display mt-8 max-w-[15ch] text-[clamp(2.875rem,4.8vw,4.5rem)] leading-[1.02] tracking-[-0.025em]">
                 The browser that remembers where you left off
               </h1>
 
               <p className="mt-7 max-w-[42ch] text-[1.0625rem] leading-[1.6] text-muted-foreground">
                 Sign in once and your spaces, tabs, sign-ins and files follow
-                you to any machine — with an always-on cloud computer that
-                keeps working after you close the lid.
+                you to any machine — with an always-on cloud computer that keeps
+                working after you close the lid.
               </p>
             </Reveal>
 
