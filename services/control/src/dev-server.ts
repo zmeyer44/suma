@@ -11,6 +11,23 @@
  * always wins, so pointing dev at a branch database stays a one-liner.
  */
 
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { adoptComputeEnvFromDisk } from "./dev-env.js";
+
+// Compute-plane env from the repo root .env (turbo/tsx load no .env files;
+// without FLY_API_TOKEN a cloud-mode account gets the stub provider and
+// machines stuck in "provisioning"). Allowlisted keys only — never
+// DATABASE_URL, whose root-.env value is Railway-internal and unreachable.
+const adoption = adoptComputeEnvFromDisk(
+  path.dirname(fileURLToPath(import.meta.url)),
+);
+if (adoption !== null && adoption.adopted.length > 0) {
+  console.log(
+    `dev env: adopted ${adoption.adopted.join(", ")} from ${adoption.file}`,
+  );
+}
+
 process.env["DATABASE_URL"] ??= "pglite";
 // Leave a configured bucket alone; `objectStoreFromEnv` reports partial R2
 // config better than a guess here would.
