@@ -30,7 +30,13 @@ type Busy = "none" | "signup" | "device" | "passkey" | "link";
 /* ── Layout pieces ──────────────────────────────────────────────────────── */
 
 /** "STEP 2 OF 3" plus the segmented rail beside it. */
-function StepRail({ steps, index }: { steps: OnboardingStep[]; index: number }) {
+function StepRail({
+  steps,
+  index,
+}: {
+  steps: OnboardingStep[];
+  index: number;
+}) {
   return (
     <div className="flex items-center gap-3.5">
       <span className="text-[10px] font-semibold tracking-[0.16em] text-faint uppercase">
@@ -315,7 +321,9 @@ export function OnboardingWizard() {
   const [deviceName, setDeviceName] = useState("");
   /** Where the account's computer lives — rides the signup POST, so the
    *  computer step must precede it. Cloud is the recommended default. */
-  const [computeChoice, setComputeChoice] = useState<"cloud" | "local">("cloud");
+  const [computeChoice, setComputeChoice] = useState<"cloud" | "local">(
+    "cloud",
+  );
   /** The account form validated and the user continued to the computer step.
    *  Component-local on purpose: a restart before signup resumes at account. */
   const [accountConfirmed, setAccountConfirmed] = useState(false);
@@ -337,7 +345,9 @@ export function OnboardingWizard() {
   const localOnly = auth.controlUrl === null;
   /** The control plane says the VM exists and is awake — narrative only. */
   const machineUp =
-    machine !== null && machine.machineId !== null && machine.state === "running";
+    machine !== null &&
+    machine.machineId !== null &&
+    machine.state === "running";
   const machineErrored =
     machine !== null && machine.machineId !== null && machine.state === "error";
   /** The bar for moving on is the thing that actually failed in production:
@@ -364,8 +374,12 @@ export function OnboardingWizard() {
   // Only this component knows its full visibility (the recovery step depends
   // on component-local state); App raises the chrome view off this flag.
   const visible = authKnown && !dismissed && step !== null;
-  // Once a recovery code exists it MUST be shown and saved — no way out.
-  const canDismiss = step !== "recovery" && recoveryCode === null;
+  // A signed-up device must consume its short-lived bootstrap credential now;
+  // once a recovery code exists it likewise MUST be shown and saved.
+  const canDismiss =
+    !(step === "credential" && auth.state === "signed-up") &&
+    step !== "recovery" &&
+    recoveryCode === null;
 
   const setWizardOpen = useSumaStore((s) => s.setWizardOpen);
   useEffect(() => {
@@ -389,7 +403,7 @@ export function OnboardingWizard() {
   // the machine awake also re-arms the agent link's reconnect (machine
   // service → link.retryNow), so the connection follows the boot within a
   // poll instead of a backoff. The step advances by derivation: the moment
-  // machineReady flips true, `step` recomputes to "credential".
+  // machineReady flips true, `step` recomputes to "recovery".
   useEffect(() => {
     if (step !== "provisioning") return;
     void refreshMachine();
@@ -411,9 +425,11 @@ export function OnboardingWizard() {
 
   if (!visible || step === null) return null;
 
-  // Provisioning is the tail of the computer step ("Create my computer" →
-  // watch it come up), so it shares that rail segment instead of adding one.
-  const stepIndex = steps.indexOf(step === "provisioning" ? "computer" : step);
+  // Provisioning runs after this Mac is secured and before its recovery code
+  // is revealed, so it shares the credential rail segment.
+  const stepIndex = steps.indexOf(
+    step === "provisioning" ? "credential" : step,
+  );
 
   const captureRecovery = (status: EnrollmentStatus | undefined) => {
     const code = status?.recoveryCode;
@@ -601,7 +617,10 @@ export function OnboardingWizard() {
           }
       : step === "computer"
         ? {
-            label: busy === "signup" ? "Setting up your computer…" : "Create my computer",
+            label:
+              busy === "signup"
+                ? "Setting up your computer…"
+                : "Create my computer",
             disabled: busy !== "none",
             run: () => void submitComputer(),
           }
@@ -618,20 +637,20 @@ export function OnboardingWizard() {
               run: () => {},
             }
           : step === "credential"
-          ? {
-              label:
-                busy === "device"
-                  ? "Registering…"
-                  : busy === "passkey"
-                    ? "Waiting for your passkey…"
-                    : "Secure this Mac",
-              disabled: busy !== "none",
-              run: () =>
-                void (credentialChoice === "passkey"
-                  ? registerWithPasskey()
-                  : registerWithDeviceKey()),
-            }
-          : { label: "Finish setup", disabled: !savedConfirmed, run: finish };
+            ? {
+                label:
+                  busy === "device"
+                    ? "Registering…"
+                    : busy === "passkey"
+                      ? "Waiting for your passkey…"
+                      : "Secure this Mac",
+                disabled: busy !== "none",
+                run: () =>
+                  void (credentialChoice === "passkey"
+                    ? registerWithPasskey()
+                    : registerWithDeviceKey()),
+              }
+            : { label: "Finish setup", disabled: !savedConfirmed, run: finish };
 
   return (
     /* z-40, the overlay layer — NOT above it. The screen lives in #root while
@@ -809,10 +828,10 @@ export function OnboardingWizard() {
             <div className="mt-7 flex flex-col gap-4">
               {machineErrored ? (
                 <p className="rounded-xl bg-warn/10 px-3.5 py-2.5 text-[12px] leading-snug text-warn">
-                  The machine hit an error while starting — Suma keeps
-                  retrying automatically. If this doesn&apos;t clear in a few
-                  minutes, choose &ldquo;I&apos;ll do this later&rdquo; and
-                  your computer will finish setting up in the background.
+                  The machine hit an error while starting — Suma keeps retrying
+                  automatically. If this doesn&apos;t clear in a few minutes,
+                  choose &ldquo;I&apos;ll do this later&rdquo; and your computer
+                  will finish setting up in the background.
                 </p>
               ) : null}
 
@@ -820,7 +839,11 @@ export function OnboardingWizard() {
                 <SetupStage state="done" title="Account created" />
                 <SetupStage
                   state={
-                    machineDialing ? "done" : machineErrored ? "pending" : "active"
+                    machineDialing
+                      ? "done"
+                      : machineErrored
+                        ? "pending"
+                        : "active"
                   }
                   title="Creating your Linux machine"
                   detail="A private cloud computer, reachable from every Mac you enroll. It suspends when idle, so it costs nothing while you're away."
@@ -834,9 +857,9 @@ export function OnboardingWizard() {
 
               {waitedLong && !machineErrored ? (
                 <p className="text-[11.5px] leading-snug text-faint">
-                  Still working — cloud machines occasionally take a few
-                  minutes on their first boot. You can leave this window open;
-                  setup continues on its own.
+                  Still working — cloud machines occasionally take a few minutes
+                  on their first boot. You can leave this window open; setup
+                  continues on its own.
                 </p>
               ) : null}
             </div>

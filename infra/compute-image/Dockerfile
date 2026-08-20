@@ -55,7 +55,7 @@ WORKDIR /root
 
 # Defaults; the provider overrides these per machine (fly.ts sets
 # SUMA_MACHINE_ID, SUMA_AGENT_LISTEN, SUMA_AGENT_CLAIMS).
-ENV SUMA_AGENT_LISTEN=0.0.0.0:2222
+ENV SUMA_AGENT_LISTEN=[::]:2222
 EXPOSE 2222
 
 ENTRYPOINT ["/usr/local/bin/suma-agent"]

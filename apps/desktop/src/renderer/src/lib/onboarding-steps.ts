@@ -7,12 +7,11 @@
  * Linked devices inherit the account's compute mode, and local-only mode
  * (no control plane) has no computer to choose.
  *
- * The provisioning step is the cloud path's gate: signup kicked off a VM
- * build, and letting the user finish setup before that VM is reachable
- * strands them in an app whose computer isn't there yet (every workspace
- * call fails with "suma-agent unreachable"). The wizard holds on this step —
- * showing live progress — until the machine is running AND the agent link is
- * actually connected, and only then moves on.
+ * Signup credentials are deliberately short-lived, so the credential step
+ * comes immediately after signup. Cloud provisioning can take longer than a
+ * bootstrap token's lifetime; waiting for the VM first would leave enrollment
+ * holding an expired token. Once this Mac is secured, the wizard holds on the
+ * provisioning step until the machine and its agent link are reachable.
  */
 
 export type OnboardingStep =
@@ -42,9 +41,9 @@ export interface OnboardingFlowState {
 
 /**
  * The rail's segments. Provisioning is deliberately NOT one of them: it is
- * the tail of the computer step ("Create my computer" → watch it being
- * created), so the wizard maps it onto the computer segment rather than
- * inflating the step count.
+ * background work between securing this Mac and revealing the recovery code,
+ * so the wizard maps it onto the credential segment rather than inflating the
+ * step count.
  */
 export function onboardingSteps(
   state: Pick<OnboardingFlowState, "localOnly" | "accountMode">,
@@ -55,26 +54,26 @@ export function onboardingSteps(
     : ["account", "credential", "recovery"];
 }
 
-export function deriveOnboardingStep(state: OnboardingFlowState): OnboardingStep | null {
+export function deriveOnboardingStep(
+  state: OnboardingFlowState,
+): OnboardingStep | null {
   if (state.authState === "unenrolled") {
     const computerOffered = !state.localOnly && state.accountMode === "create";
     return computerOffered && state.accountConfirmed ? "computer" : "account";
   }
-  if (!state.credentialDone) {
-    // The cloud gate — scoped to the create path (a linked Mac joins a
-    // machine that already exists; local modes have no VM to wait for) and
-    // to setups still awaiting their credential: once enrollment finished,
-    // a disconnected machine is the app's suspend/wake story, and must not
-    // resurrect the wizard on launch.
-    if (
-      !state.localOnly &&
-      state.accountMode === "create" &&
-      state.computeMode !== "local" &&
-      !state.machineReady
-    ) {
-      return "provisioning";
-    }
-    return "credential";
+  if (!state.credentialDone) return "credential";
+  // Provision only while this mount still owns the just-created recovery
+  // code. That distinguishes unfinished signup from an enrolled device whose
+  // machine is merely sleeping on a later launch, which must not resurrect
+  // onboarding.
+  if (
+    !state.localOnly &&
+    state.accountMode === "create" &&
+    state.computeMode !== "local" &&
+    state.recoveryCodeShowing &&
+    !state.machineReady
+  ) {
+    return "provisioning";
   }
   if (state.recoveryCodeShowing) return "recovery";
   return null;

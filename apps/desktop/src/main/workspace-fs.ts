@@ -22,7 +22,11 @@ import {
   type VfsResponse,
 } from "@suma/protocol";
 import type { AgentLink } from "./compute/agent-client";
-import type { WorkspaceFile, WorkspaceTree } from "../shared/ipc";
+import type {
+  WorkspaceConnectionStatus,
+  WorkspaceFile,
+  WorkspaceTree,
+} from "../shared/ipc";
 import { workspaceMediaUrl } from "./workspace-media";
 import {
   looksBinary,
@@ -65,6 +69,18 @@ export class WorkspaceFsService {
 
   unbind(): void {
     this.link = null;
+  }
+
+  /** Current transport identity, retained for renderer hydration. The push
+   * event can happen before chrome subscribes; this snapshot makes the same
+   * state queryable without touching the filesystem. */
+  connectionStatus(activeSpaceId: string | null): WorkspaceConnectionStatus {
+    const link = this.link;
+    return {
+      source: link?.kind === "remote" ? "remote" : "sim",
+      connected: link?.connected() ?? false,
+      activeSpaceId,
+    };
   }
 
   /** Display label for the workspace root (never a path the renderer resolves). */

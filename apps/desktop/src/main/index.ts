@@ -998,12 +998,14 @@ async function startServices(ctx: {
     if (active === null || !spaceScopeActive()) return "";
     return spaceFs.folderFor(active);
   });
-  const emitWorkspaceChanged = (connected: boolean): void => {
-    emit("workspace:changed", {
-      source: link.kind === "simulated" ? "sim" : "remote",
-      connected,
-      activeSpaceId: spaces.activeSpaceId,
-    });
+  const emitWorkspaceChanged = (_connected: boolean): void => {
+    // Read the retained snapshot from the same service the renderer can
+    // query during hydration. This keeps event and snapshot semantics exact,
+    // including link swaps that announce `false` before the new socket opens.
+    emit(
+      "workspace:changed",
+      workspaceFs.connectionStatus(spaces.activeSpaceId),
+    );
   };
   link.onConnectionChanged(emitWorkspaceChanged);
   notifyWorkspaceChanged = () => emitWorkspaceChanged(link.connected());

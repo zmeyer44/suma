@@ -26,7 +26,7 @@ use suma_agent::dispatch::{check_fwd, check_pty_io, dispatch, pty_input, AgentSt
 use suma_agent::fwd::FwdSession;
 use suma_agent::jobs::JobRegistry;
 use suma_agent::mux::{parse_channel, read_frame, write_frame, Channel, Frame};
-use suma_agent::ports::LsofSource;
+use suma_agent::ports::ProcSource;
 use suma_agent::proto::{AgentCtlRequest, AgentCtlResponse};
 use suma_agent::pty::PtyManager;
 use suma_agent::vfs::{self, VfsRoot};
@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(Mutex::new(AgentState {
         ptys: PtyManager::new(PtyManager::default_base()),
         jobs: JobRegistry::default(),
-        ports: Box::new(LsofSource),
+        ports: Box::new(ProcSource),
         vfs_root: vfs_root.clone(),
     }));
 

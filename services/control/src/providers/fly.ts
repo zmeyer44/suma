@@ -222,7 +222,10 @@ export class FlySandboxProvider implements SandboxProvider {
         guest: guestFor(input.spec),
         env: {
           SUMA_MACHINE_ID: input.machineId,
-          SUMA_AGENT_LISTEN: `0.0.0.0:${this.config.agentPort}`,
+          // Fly private `.internal` addresses use 6PN IPv6. Ubuntu's IPv6
+          // wildcard is dual-stack, so this also preserves the agent's
+          // 127.0.0.1 path used by in-VM port-forward and dev probes.
+          SUMA_AGENT_LISTEN: `[::]:${this.config.agentPort}`,
           SUMA_AGENT_CLAIMS: JSON.stringify(claims),
         },
         mounts: [{ volume: volume.id, path: HOME_MOUNT_PATH }],

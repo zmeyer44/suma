@@ -376,6 +376,16 @@ export interface WorkspaceTree {
   truncated: boolean;
 }
 
+/** Retained snapshot of the filesystem transport behind the IDE. Events use
+ * the same shape, but renderers also query it during hydration so a VM that
+ * connected before their event listener existed cannot leave the explorer
+ * stuck on "Connecting to your computer…". */
+export interface WorkspaceConnectionStatus {
+  source: "sim" | "remote";
+  connected: boolean;
+  activeSpaceId: string | null;
+}
+
 /**
  * What the IDE got back for a file: editable text, an image it can render but
  * not edit, or a notice. The kind decides the pane — main never hands the
@@ -853,6 +863,7 @@ export interface SumaInvokeMap {
     result: PortForwardInfo;
   };
   /* ---- IDE workspace filesystem (suma://terminal) ---- */
+  "workspace:status": { args: void; result: WorkspaceConnectionStatus };
   "workspace:tree": { args: void; result: WorkspaceTree };
   "workspace:readFile": { args: { path: string }; result: WorkspaceFile };
   /** Result is an object (not void) so callers can tell success from the
@@ -1166,11 +1177,7 @@ export interface SumaEventMap {
   "ports:updated": PortForwardInfo[];
   /** The machine behind the IDE's filesystem changed (sim⇄VM swap, reconnect,
    *  active-space move) — the explorer refetches, stale buffers drop. */
-  "workspace:changed": {
-    source: "sim" | "remote";
-    connected: boolean;
-    activeSpaceId: string | null;
-  };
+  "workspace:changed": WorkspaceConnectionStatus;
   /** FILES on the current machine changed (a shell wrote, a fetch landed, an
    *  editor saved) — same machine, fresher tree. Debounced in main; the
    *  renderer throttles its refetch on top. */
@@ -1369,6 +1376,7 @@ export const INVOKE_CHANNELS: ReadonlyArray<InvokeChannel> = [
   "terminal:setJobMode",
   "ports:list",
   "ports:forward",
+  "workspace:status",
   "workspace:tree",
   "workspace:readFile",
   "workspace:writeFile",

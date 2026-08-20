@@ -9,7 +9,37 @@
  * back exactly as it was left.
  */
 
+import { isInternalPage } from "../../../shared/internal-pages";
+
 export type IdePanel = "explorer" | "editor" | "terminal";
+
+/** Only a visible Terminal pane consumes the workspace tree. Connection
+ * events also fire during onboarding, before this page has ever been opened;
+ * treating those as an explorer refresh races the machine's first boot and
+ * turns an expected wake/disconnect into a global error toast. */
+export function isIdePageVisible(
+  tabs: ReadonlyArray<{
+    url: string;
+    active: boolean;
+    split: boolean;
+  }>,
+): boolean {
+  return tabs.some(
+    (tab) => (tab.active || tab.split) && isInternalPage(tab.url, "terminal"),
+  );
+}
+
+/** Transport failures are already represented by the explorer's connecting
+ * state and retried on the next workspace connection event. They are not
+ * actionable file-operation errors and should never leak into onboarding. */
+export function isTransientWorkspaceError(message: string): boolean {
+  return (
+    message.includes("suma-agent unreachable") ||
+    message.includes("suma-agent connection lost") ||
+    message.includes("vfs channel lost") ||
+    message.includes("agent client stopped")
+  );
+}
 
 export const EXPLORER_DEFAULT_WIDTH = 240;
 /** Below this, filenames truncate into uselessness; above, the explorer

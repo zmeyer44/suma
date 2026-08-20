@@ -102,7 +102,7 @@ describe("FlySandboxProvider.provision", () => {
     });
     const env = (machineConfig as { env: Record<string, string> }).env;
     expect(env["SUMA_MACHINE_ID"]).toBe(MACHINE_ID);
-    expect(env["SUMA_AGENT_LISTEN"]).toBe("0.0.0.0:2222");
+    expect(env["SUMA_AGENT_LISTEN"]).toBe("[::]:2222");
     const claims = JSON.parse(env["SUMA_AGENT_CLAIMS"] ?? "{}") as {
       mid: string;
       sub: string;

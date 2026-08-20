@@ -504,12 +504,32 @@ export class AuthService {
   /* ------------------------------ internals ------------------------------ */
 
   private buildClient(url: string): ControlClient {
-    return new ControlClient(url, this.deps.fetchImpl ?? fetch, () => {
-      // 401: the token is dead (revocation or expiry) — drop it and surface
-      // the change; the user re-enrolls from the UI.
-      this.deps.device.setEnrollment({ authToken: null });
-      this.notifyChanged();
-    });
+    return new ControlClient(
+      url,
+      this.deps.fetchImpl ?? fetch,
+      () => {
+        // 401: the token is dead (revocation or expiry) — drop it and surface
+        // the change; the user re-enrolls from the UI.
+        this.deps.device.setEnrollment({ authToken: null });
+        this.notifyChanged();
+      },
+      (token) => {
+        // Signup/redeem set their token before the enrollment record exists,
+        // and older dev controls use opaque hbr_dev_ bearers. Persist only a
+        // refreshed signed token for an account already known to this device.
+        if (token === null || token.split(".").length !== 3) return;
+        const enrollment = this.deps.device.enrollment();
+        if (
+          enrollment.state === "unenrolled" ||
+          enrollment.controlUrl !== url ||
+          enrollment.authToken === token
+        ) {
+          return;
+        }
+        this.deps.device.setEnrollment({ authToken: token });
+        this.deps.onTokenChanged();
+      },
+    );
   }
 
   private requireClient(): ControlClient {

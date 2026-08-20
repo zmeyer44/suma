@@ -130,12 +130,7 @@ async fn handle_connection(mut client: TcpStream, config: &ProxyConfig) -> anyho
     };
     let Some((host, port)) = parse_connect_target(&head) else {
         // Not CONNECT (or no parsable target): sumad tunnels TCP only.
-        return respond(
-            &mut client,
-            "405 Method Not Allowed",
-            "Suma: CONNECT only",
-        )
-        .await;
+        return respond(&mut client, "405 Method Not Allowed", "Suma: CONNECT only").await;
     };
 
     let (decision, action) = plan(&host, config);

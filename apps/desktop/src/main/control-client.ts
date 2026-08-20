@@ -140,6 +140,8 @@ export class ControlClient {
     private readonly baseUrl: string,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly onUnauthorized?: () => void,
+    /** Persist signed refreshes; otherwise a restart resurrects the old token. */
+    private readonly onTokenChanged?: (token: string | null) => void,
   ) {}
 
   setReauth(fn: (() => Promise<string | null>) | null): void {
@@ -151,8 +153,10 @@ export class ControlClient {
   }
 
   setToken(token: string | null): void {
+    const changed = token !== this.token;
     this.token = token;
     this.scheduleRefresh();
+    if (changed) this.onTokenChanged?.(token);
   }
 
   /** Current device token for the hub edge; refreshes first when due. */

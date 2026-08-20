@@ -25,6 +25,8 @@ import {
   clampTerminalHeight,
   dropIdeBuffer,
   ideWorkspaceKey,
+  isIdePageVisible,
+  isTransientWorkspaceError,
   moveIdeBuffers,
   getStoredIdeLayout,
   restoreIdeWorkspaceView,
@@ -863,7 +865,10 @@ export const useSumaStore = create<SumaState>()((set, get) => {
         "warning",
       );
     }
-    if (refreshTree && connected !== false) {
+    // Workspace connectivity is account-level and also changes throughout
+    // onboarding. The explorer is the only consumer of this listing, so do
+    // not touch VFS until a Terminal pane is actually on screen.
+    if (refreshTree && connected !== false && isIdePageVisible(previous.tabs)) {
       void get().refreshWorkspaceTree();
     }
   }
@@ -1022,6 +1027,13 @@ export const useSumaStore = create<SumaState>()((set, get) => {
         callQuiet("ports:list", undefined),
         callQuiet("workspaceSync:get", undefined),
       ]);
+      // Query after machine:status has had a chance to retarget the shared
+      // link; running these concurrently could snapshot the startup sim just
+      // before machine discovery switches to the VM.
+      const workspaceConnection = await callQuiet(
+        "workspace:status",
+        undefined,
+      );
       const saves = await callQuiet("saves:list", undefined);
       const videos = await callQuiet("videos:list", undefined);
       const favorites = await callQuiet("favorites:list", undefined);
@@ -1056,6 +1068,18 @@ export const useSumaStore = create<SumaState>()((set, get) => {
         hydrated: true,
       });
       await refreshTabs();
+      // `workspace:changed` is intentionally push-based for later swaps, but
+      // the initial VM connection may predate this renderer. Apply the
+      // retained snapshot only when no newer event has already supplied the
+      // source; this closes the startup race without overwriting live state.
+      if (workspaceConnection !== undefined && get().workspaceSource === null) {
+        transitionIdeWorkspace(
+          workspaceConnection.source,
+          workspaceConnection.activeSpaceId,
+          workspaceConnection.connected,
+          true,
+        );
+      }
       await refreshEgressFor(activeSpaceId());
     },
 
@@ -2104,6 +2128,10 @@ export const useSumaStore = create<SumaState>()((set, get) => {
       // The first terminal visit can precede main's initial source event, but
       // the hydrated space roster already knows which space is active.
       const before = get();
+      // A known-down link will be retried by workspace:changed. Skipping here
+      // avoids a guaranteed invoke failure when Terminal mounts behind a
+      // waking-machine surface.
+      if (before.workspaceConnected === false) return;
       const spaceId = activeSpaceId();
       const expectedKey = ideWorkspaceKey(
         before.workspaceSource,
@@ -2119,7 +2147,20 @@ export const useSumaStore = create<SumaState>()((set, get) => {
         );
       }
       const request = get();
-      const workspaceTree = await call("workspace:tree", undefined);
+      let workspaceTree: WorkspaceTree | undefined;
+      try {
+        if (!window.suma) throw new Error("bridge unavailable");
+        workspaceTree = await window.suma.invoke("workspace:tree", undefined);
+      } catch (err) {
+        const message = errorMessage(err);
+        // The connection event that scheduled this refresh can race a socket
+        // close before main handles the invoke. The next up event retries it;
+        // the explorer already says "Connecting to your computer…" meanwhile.
+        if (!isTransientWorkspaceError(message)) {
+          get().pushToast(`workspace:tree failed — ${message}`, "error");
+        }
+        return;
+      }
       const current = get();
       if (
         workspaceTree !== undefined &&

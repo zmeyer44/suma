@@ -3,6 +3,8 @@ import {
   dropIdeBuffer,
   getIdeBuffer,
   ideWorkspaceKey,
+  isIdePageVisible,
+  isTransientWorkspaceError,
   moveIdeBuffers,
   restoreIdeWorkspaceView,
   setIdeBuffer,
@@ -56,5 +58,46 @@ describe("IDE workspace isolation", () => {
     });
     restored.openFiles.push("also-mutated.ts");
     expect(restoreIdeWorkspaceView(first).openFiles).toEqual(["one.ts"]);
+  });
+});
+
+describe("IDE workspace refresh gating", () => {
+  it("refreshes only while a Terminal pane is visible", () => {
+    expect(
+      isIdePageVisible([
+        {
+          url: "https://example.com",
+          active: true,
+          split: false,
+        },
+        {
+          url: "suma://terminal",
+          active: false,
+          split: false,
+        },
+      ]),
+    ).toBe(false);
+    expect(
+      isIdePageVisible([
+        { url: "suma://terminal", active: true, split: false },
+      ]),
+    ).toBe(true);
+    expect(
+      isIdePageVisible([
+        { url: "suma://terminal/", active: false, split: true },
+      ]),
+    ).toBe(true);
+  });
+
+  it("classifies only transient agent transport failures as quiet", () => {
+    expect(
+      isTransientWorkspaceError(
+        "Error invoking remote method 'workspace:tree': Error: suma-agent unreachable — the machine may be waking or offline",
+      ),
+    ).toBe(true);
+    expect(isTransientWorkspaceError("vfs channel lost")).toBe(true);
+    expect(
+      isTransientWorkspaceError("listing workspace: permission denied"),
+    ).toBe(false);
   });
 });

@@ -262,8 +262,8 @@ async fn fetch_with(
             other => bail!("fetch failed: upstream answered {other}"),
         }
     };
-    let total = content_length(&head)
-        .context("fetcher requires Content-Length (no chunked transfer)")?;
+    let total =
+        content_length(&head).context("fetcher requires Content-Length (no chunked transfer)")?;
     if total > options.max_bytes {
         bail!(
             "fetch refused: {total} bytes exceeds the {} byte limit for one fetch",
@@ -351,10 +351,7 @@ async fn connect_target(target: &Target, options: &FetchOptions) -> anyhow::Resu
     match target.scheme {
         Scheme::Http => Ok(MaybeTls::Plain(stream)),
         Scheme::Https => {
-            let config = options
-                .tls_config
-                .clone()
-                .unwrap_or_else(shared_tls_config);
+            let config = options.tls_config.clone().unwrap_or_else(shared_tls_config);
             let name = rustls::pki_types::ServerName::try_from(target.host.clone())
                 .with_context(|| format!("{} is not a valid TLS server name", target.host))?;
             let tls = TlsConnector::from(config)
@@ -758,9 +755,8 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut req = [0u8; 2048];
             let _ = stream.read(&mut req).await;
-            let head = format!(
-                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n"
-            );
+            let head =
+                format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n");
             stream.write_all(head.as_bytes()).await.unwrap();
         });
         addr
@@ -937,7 +933,9 @@ mod tests {
             allow_private_targets: true,
             ..FetchOptions::default()
         };
-        let err = fetch_with(&spec2, &untrusting, &mut emit).await.unwrap_err();
+        let err = fetch_with(&spec2, &untrusting, &mut emit)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("TLS"), "{err}");
     }
 
@@ -965,7 +963,12 @@ mod tests {
         );
 
         // Protocol-relative, path-relative, and injected forms are refused.
-        for bad in ["//evil.example.com/x", "relative/path", "/a\r\nX: 1", "/a b"] {
+        for bad in [
+            "//evil.example.com/x",
+            "relative/path",
+            "/a\r\nX: 1",
+            "/a b",
+        ] {
             assert!(resolve_redirect(&from, bad).is_err(), "{bad:?}");
         }
     }

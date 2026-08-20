@@ -15,11 +15,15 @@ function jwtWith(payload: Record<string, unknown>): string {
 
 describe("tokenExpSeconds", () => {
   it("reads exp from a compact JWT", () => {
-    expect(tokenExpSeconds(jwtWith({ sub: "u", exp: 1_700_000_600 }))).toBe(1_700_000_600);
+    expect(tokenExpSeconds(jwtWith({ sub: "u", exp: 1_700_000_600 }))).toBe(
+      1_700_000_600,
+    );
   });
 
   it("returns null for opaque dev tokens", () => {
-    expect(tokenExpSeconds("hbr_dev_9a1b2c3d-0000-0000-0000-000000000000")).toBeNull();
+    expect(
+      tokenExpSeconds("hbr_dev_9a1b2c3d-0000-0000-0000-000000000000"),
+    ).toBeNull();
   });
 
   it("returns null for a JWT without a numeric exp", () => {
@@ -37,11 +41,15 @@ describe("shouldRefreshToken", () => {
   const exp = 10_000;
 
   it("holds off outside the leeway window", () => {
-    expect(shouldRefreshToken(exp, exp - TOKEN_REFRESH_LEEWAY_SECONDS - 1)).toBe(false);
+    expect(
+      shouldRefreshToken(exp, exp - TOKEN_REFRESH_LEEWAY_SECONDS - 1),
+    ).toBe(false);
   });
 
   it("refreshes exactly at exp - leeway (spec: schedule at exp - 60s)", () => {
-    expect(shouldRefreshToken(exp, exp - TOKEN_REFRESH_LEEWAY_SECONDS)).toBe(true);
+    expect(shouldRefreshToken(exp, exp - TOKEN_REFRESH_LEEWAY_SECONDS)).toBe(
+      true,
+    );
   });
 
   it("refreshes past expiry", () => {
@@ -70,18 +78,26 @@ describe("refreshDelayMs", () => {
  */
 describe("ControlClient re-auth on a rejected token", () => {
   const ok = (body: unknown): Response =>
-    new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
-  const unauthorized = (): Response => new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  const unauthorized = (): Response =>
+    new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
 
   it("proves the device key once and retries the request", async () => {
     const calls: string[] = [];
     let accepted = false;
-    const client = new ControlClient("http://control.test", async (input, init) => {
-      const path = new URL(String(input)).pathname;
-      calls.push(`${String(init?.method ?? "GET")} ${path}`);
-      if (path === "/v1/devices") return accepted ? ok({ devices: [{ id: "d1" }] }) : unauthorized();
-      throw new Error(`unexpected ${path}`);
-    });
+    const client = new ControlClient(
+      "http://control.test",
+      async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        calls.push(`${String(init?.method ?? "GET")} ${path}`);
+        if (path === "/v1/devices")
+          return accepted ? ok({ devices: [{ id: "d1" }] }) : unauthorized();
+        throw new Error(`unexpected ${path}`);
+      },
+    );
     client.setToken("stale");
     client.setReauth(async () => {
       accepted = true;
@@ -97,7 +113,8 @@ describe("ControlClient re-auth on a rejected token", () => {
     let proofs = 0;
     const client = new ControlClient("http://control.test", async (input) => {
       const path = new URL(String(input)).pathname;
-      if (path === "/v1/devices") return accepted ? ok({ devices: [] }) : unauthorized();
+      if (path === "/v1/devices")
+        return accepted ? ok({ devices: [] }) : unauthorized();
       throw new Error(`unexpected ${path}`);
     });
     client.setToken("stale");
@@ -108,7 +125,11 @@ describe("ControlClient re-auth on a rejected token", () => {
       return "fresh";
     });
 
-    await Promise.all([client.listDevices(), client.listDevices(), client.listDevices()]);
+    await Promise.all([
+      client.listDevices(),
+      client.listDevices(),
+      client.listDevices(),
+    ]);
     expect(proofs).toBe(1);
   });
 
@@ -144,5 +165,31 @@ describe("ControlClient re-auth on a rejected token", () => {
     await expect(client.listDevices()).rejects.toThrow(/unauthorized/);
     expect(requests).toBe(2);
     expect(proofs).toBe(1);
+  });
+});
+
+describe("ControlClient refreshed-token persistence", () => {
+  it("publishes a silently refreshed signed token to its owner", async () => {
+    const exp = Math.floor(Date.now() / 1000) + 3_600;
+    const stale = jwtWith({ sub: "u", did: "u", exp, jti: "old" });
+    const fresh = jwtWith({ sub: "u", did: "u", exp, jti: "new" });
+    const changed: Array<string | null> = [];
+    const client = new ControlClient(
+      "http://control.test",
+      async (input) => {
+        expect(new URL(String(input)).pathname).toBe("/v1/auth/token/refresh");
+        return new Response(JSON.stringify({ deviceToken: fresh, exp }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+      undefined,
+      (token) => changed.push(token),
+    );
+
+    client.setToken(stale);
+    await (client as unknown as { refresh: () => Promise<void> }).refresh();
+    expect(await client.getToken()).toBe(fresh);
+    expect(changed).toEqual([stale, fresh]);
   });
 });

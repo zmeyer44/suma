@@ -823,8 +823,10 @@ export function createApp(
     },
   );
 
-  // Silent re-mint of the 10-minute token: a still-valid device token, or a
-  // fresh device-login proof. Refused once the device is revoked.
+  // Silent re-mint of the 10-minute token: a still-valid signup bootstrap,
+  // device token, or fresh device-login proof. Bootstrap renewal is allowed
+  // only until the account enrolls its first device; after that, refresh must
+  // prove an active device key.
   v1.post("/auth/token/refresh", async (c) => {
     const header = c.req.header("Authorization");
     const bearer = header?.startsWith("Bearer ")
@@ -839,6 +841,32 @@ export function createApp(
       );
       if (!result.ok)
         return c.json({ error: "unauthorized", reason: result.reason }, 401);
+      if (result.claims.did === result.claims.sub) {
+        const [user] = await db
+          .select({ id: users.id })
+          .from(users)
+          .where(eq(users.id, result.claims.sub));
+        if (!user)
+          return c.json({ error: "unauthorized", reason: "unknown_user" }, 401);
+        const [enrolled] = await db
+          .select({ id: devices.id })
+          .from(devices)
+          .where(
+            and(
+              eq(devices.userId, result.claims.sub),
+              isNull(devices.revokedAt),
+            ),
+          )
+          .limit(1);
+        if (enrolled)
+          return c.json(
+            { error: "unauthorized", reason: "bootstrap_consumed" },
+            401,
+          );
+        return c.json(
+          await mintDeviceToken(result.claims.sub, result.claims.sub),
+        );
+      }
       const device = await activeDevice(result.claims.sub, result.claims.did);
       if (!device)
         return c.json(
@@ -1339,7 +1367,12 @@ export function createApp(
       .returning({ id: users.id });
     if (claimed) {
       isHomeMachine = true;
-      await audit(userId, "device.homeMachine", { deviceId: device.id }, device.id);
+      await audit(
+        userId,
+        "device.homeMachine",
+        { deviceId: device.id },
+        device.id,
+      );
     }
     await audit(
       userId,

@@ -10,6 +10,7 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AgentLink } from "../src/main/compute/agent-client";
 import { SimAgent } from "../src/main/compute/sim-agent";
 import { WorkspaceFsService } from "../src/main/workspace-fs";
 
@@ -50,6 +51,31 @@ describe("path guard", () => {
     await expect(new WorkspaceFsService().tree()).rejects.toThrow(
       /not connected/,
     );
+  });
+});
+
+describe("connection snapshot", () => {
+  it("retains the remote link state for a renderer that missed the event", () => {
+    const remote = {
+      kind: "remote",
+      connected: () => true,
+    } as AgentLink;
+    service.bind(remote);
+
+    expect(service.connectionStatus("space-a")).toEqual({
+      source: "remote",
+      connected: true,
+      activeSpaceId: "space-a",
+    });
+  });
+
+  it("reports a disconnected snapshot while the service is unbound", () => {
+    service.unbind();
+    expect(service.connectionStatus(null)).toEqual({
+      source: "sim",
+      connected: false,
+      activeSpaceId: null,
+    });
   });
 });
 

@@ -25,7 +25,8 @@ class FakeNotifier {
 
   notify = (userId: string, deviceId: string): Promise<boolean> => {
     this.calls.push({ userId, deviceId });
-    if (this.behavior === "throw") return Promise.reject(new Error("hub unreachable"));
+    if (this.behavior === "throw")
+      return Promise.reject(new Error("hub unreachable"));
     return Promise.resolve(this.behavior === "deliver");
   };
 }
@@ -45,7 +46,10 @@ beforeAll(async () => {
   signing = await createSigningKeys(pair.privateKeyPkcs8, pair.publicKeyRaw);
   publicKeyB64 = toBase64(pair.publicKeyRaw);
   const otherPair = await generateTokenKeypair();
-  otherSigning = await createSigningKeys(otherPair.privateKeyPkcs8, otherPair.publicKeyRaw);
+  otherSigning = await createSigningKeys(
+    otherPair.privateKeyPkcs8,
+    otherPair.publicKeyRaw,
+  );
   app = createApp(db, new StubSandboxProvider(), signing, notifier.notify);
 });
 
@@ -71,20 +75,36 @@ function authedInit(token: string): RequestInit {
 
 let emailCounter = 0;
 
-async function signup(): Promise<{ userId: string; spaceId: string; token: string }> {
+async function signup(): Promise<{
+  userId: string;
+  spaceId: string;
+  token: string;
+  bootstrapToken: string;
+}> {
   const email = `auth-${emailCounter++}@example.com`;
   const res = await app.request("/v1/accounts", jsonInit("POST", { email }));
   expect(res.status).toBe(201);
   const body = await res.json();
-  return { userId: body.user.id, spaceId: body.space.id, token: `hbr_dev_${body.user.id}` };
+  return {
+    userId: body.user.id,
+    spaceId: body.space.id,
+    token: `hbr_dev_${body.user.id}`,
+    bootstrapToken: body.bootstrapToken,
+  };
 }
 
-async function enrollDevice(token: string): Promise<{ deviceId: string; pair: DeviceKeypair; publicKey: string }> {
+async function enrollDevice(
+  token: string,
+): Promise<{ deviceId: string; pair: DeviceKeypair; publicKey: string }> {
   const pair = await generateDeviceKeypair();
   const publicKey = toBase64(await exportPublicKeyRaw(pair.publicKey));
   const res = await app.request(
     "/v1/devices/enroll",
-    jsonInit("POST", { name: "MBP", platform: "darwin", devicePublicKey: publicKey }, token),
+    jsonInit(
+      "POST",
+      { name: "MBP", platform: "darwin", devicePublicKey: publicKey },
+      token,
+    ),
   );
   expect(res.status).toBe(201);
   const body = await res.json();
@@ -92,12 +112,19 @@ async function enrollDevice(token: string): Promise<{ deviceId: string; pair: De
 }
 
 async function deviceChallenge(deviceId: string): Promise<string> {
-  const res = await app.request("/v1/auth/device-challenge", jsonInit("POST", { deviceId }));
+  const res = await app.request(
+    "/v1/auth/device-challenge",
+    jsonInit("POST", { deviceId }),
+  );
   expect(res.status).toBe(200);
   return (await res.json()).challenge;
 }
 
-async function signChallenge(pair: DeviceKeypair, deviceId: string, challenge: string): Promise<string> {
+async function signChallenge(
+  pair: DeviceKeypair,
+  deviceId: string,
+  challenge: string,
+): Promise<string> {
   const sig = await crypto.subtle.sign(
     "Ed25519",
     pair.privateKey,
@@ -106,10 +133,16 @@ async function signChallenge(pair: DeviceKeypair, deviceId: string, challenge: s
   return toBase64(new Uint8Array(sig));
 }
 
-async function deviceLogin(pair: DeviceKeypair, deviceId: string): Promise<{ deviceToken: string; exp: number }> {
+async function deviceLogin(
+  pair: DeviceKeypair,
+  deviceId: string,
+): Promise<{ deviceToken: string; exp: number }> {
   const challenge = await deviceChallenge(deviceId);
   const signature = await signChallenge(pair, deviceId, challenge);
-  const res = await app.request("/v1/auth/device-login", jsonInit("POST", { deviceId, signature }));
+  const res = await app.request(
+    "/v1/auth/device-login",
+    jsonInit("POST", { deviceId, signature }),
+  );
   expect(res.status).toBe(200);
   return res.json();
 }
@@ -141,15 +174,23 @@ describe("device-credential registration and login", () => {
     const body = await res.json();
     expect(body.credentialKind).toBe("device-key");
 
-    const verified = await verifyDeviceToken(signing.verifyKey, body.deviceToken, nowSeconds());
+    const verified = await verifyDeviceToken(
+      signing.verifyKey,
+      body.deviceToken,
+      nowSeconds(),
+    );
     expect(verified.ok).toBe(true);
     if (!verified.ok) throw new Error("unreachable");
     expect(verified.claims.sub).toBe(userId);
     expect(verified.claims.did).toBe(deviceId);
-    expect(verified.claims.exp - verified.claims.iat).toBe(DEVICE_TOKEN_TTL_SECONDS);
+    expect(verified.claims.exp - verified.claims.iat).toBe(
+      DEVICE_TOKEN_TTL_SECONDS,
+    );
     expect(body.exp).toBe(verified.claims.exp);
 
-    const audits = await (await app.request("/v1/audit", authedInit(token))).json();
+    const audits = await (
+      await app.request("/v1/audit", authedInit(token))
+    ).json();
     expect(audits.events.map((e: { type: string }) => e.type)).toContain(
       "auth.device_credential_registered",
     );
@@ -158,7 +199,9 @@ describe("device-credential registration and login", () => {
   it("rejects a registration whose public key does not match the enrolled one", async () => {
     const { token } = await signup();
     const { deviceId, pair } = await enrollDevice(token);
-    const otherKey = toBase64(await exportPublicKeyRaw((await generateDeviceKeypair()).publicKey));
+    const otherKey = toBase64(
+      await exportPublicKeyRaw((await generateDeviceKeypair()).publicKey),
+    );
     const challenge = await deviceChallenge(deviceId);
     const signature = await signChallenge(pair, deviceId, challenge);
     const res = await app.request(
@@ -185,7 +228,10 @@ describe("device-credential registration and login", () => {
     const stranger = await generateDeviceKeypair();
     const challenge = await deviceChallenge(deviceId);
     const signature = await signChallenge(stranger, deviceId, challenge);
-    const res = await app.request("/v1/auth/device-login", jsonInit("POST", { deviceId, signature }));
+    const res = await app.request(
+      "/v1/auth/device-login",
+      jsonInit("POST", { deviceId, signature }),
+    );
     expect(res.status).toBe(401);
     expect((await res.json()).reason).toBe("bad_signature");
   });
@@ -195,9 +241,15 @@ describe("device-credential registration and login", () => {
     const { deviceId, pair } = await enrollDevice(token);
     const challenge = await deviceChallenge(deviceId);
     const signature = await signChallenge(pair, deviceId, challenge);
-    const first = await app.request("/v1/auth/device-login", jsonInit("POST", { deviceId, signature }));
+    const first = await app.request(
+      "/v1/auth/device-login",
+      jsonInit("POST", { deviceId, signature }),
+    );
     expect(first.status).toBe(200);
-    const replay = await app.request("/v1/auth/device-login", jsonInit("POST", { deviceId, signature }));
+    const replay = await app.request(
+      "/v1/auth/device-login",
+      jsonInit("POST", { deviceId, signature }),
+    );
     expect(replay.status).toBe(401);
     expect((await replay.json()).reason).toBe("challenge_expired");
   });
@@ -205,16 +257,56 @@ describe("device-credential registration and login", () => {
   it("refuses login for a revoked device", async () => {
     const { token } = await signup();
     const { deviceId, pair } = await enrollDevice(token);
-    await app.request(`/v1/devices/${deviceId}/revoke`, jsonInit("POST", {}, token));
+    await app.request(
+      `/v1/devices/${deviceId}/revoke`,
+      jsonInit("POST", {}, token),
+    );
     const challenge = await deviceChallenge(deviceId);
     const signature = await signChallenge(pair, deviceId, challenge);
-    const res = await app.request("/v1/auth/device-login", jsonInit("POST", { deviceId, signature }));
+    const res = await app.request(
+      "/v1/auth/device-login",
+      jsonInit("POST", { deviceId, signature }),
+    );
     expect(res.status).toBe(401);
     expect((await res.json()).reason).toBe("device_revoked");
   });
 });
 
 describe("POST /v1/auth/token/refresh", () => {
+  it("re-mints a signup bootstrap until the first device enrolls", async () => {
+    const { userId, bootstrapToken } = await signup();
+
+    const res = await app.request("/v1/auth/token/refresh", {
+      method: "POST",
+      headers: { authorization: `Bearer ${bootstrapToken}` },
+    });
+    expect(res.status).toBe(200);
+    const refreshed = (await res.json()).deviceToken;
+    const verified = await verifyDeviceToken(
+      signing.verifyKey,
+      refreshed,
+      nowSeconds(),
+    );
+    expect(verified.ok).toBe(true);
+    if (!verified.ok) throw new Error("unreachable");
+    expect(verified.claims.sub).toBe(userId);
+    expect(verified.claims.did).toBe(userId);
+
+    await enrollDevice(refreshed);
+  });
+
+  it("refuses a bootstrap refresh after a device enrolls", async () => {
+    const { token, bootstrapToken } = await signup();
+    await enrollDevice(token);
+
+    const res = await app.request("/v1/auth/token/refresh", {
+      method: "POST",
+      headers: { authorization: `Bearer ${bootstrapToken}` },
+    });
+    expect(res.status).toBe(401);
+    expect((await res.json()).reason).toBe("bootstrap_consumed");
+  });
+
   it("re-mints from a currently-valid device token", async () => {
     const { userId, token } = await signup();
     const { deviceId, pair } = await enrollDevice(token);
@@ -226,7 +318,11 @@ describe("POST /v1/auth/token/refresh", () => {
     });
     expect(res.status).toBe(200);
     const body = await res.json();
-    const verified = await verifyDeviceToken(signing.verifyKey, body.deviceToken, nowSeconds());
+    const verified = await verifyDeviceToken(
+      signing.verifyKey,
+      body.deviceToken,
+      nowSeconds(),
+    );
     expect(verified.ok).toBe(true);
     if (!verified.ok) throw new Error("unreachable");
     expect(verified.claims.sub).toBe(userId);
@@ -238,7 +334,10 @@ describe("POST /v1/auth/token/refresh", () => {
     const { deviceId, pair } = await enrollDevice(token);
     const challenge = await deviceChallenge(deviceId);
     const signature = await signChallenge(pair, deviceId, challenge);
-    const res = await app.request("/v1/auth/token/refresh", jsonInit("POST", { deviceId, signature }));
+    const res = await app.request(
+      "/v1/auth/token/refresh",
+      jsonInit("POST", { deviceId, signature }),
+    );
     expect(res.status).toBe(200);
     const verified = await verifyDeviceToken(
       signing.verifyKey,
@@ -252,7 +351,10 @@ describe("POST /v1/auth/token/refresh", () => {
     const { token } = await signup();
     const { deviceId, pair } = await enrollDevice(token);
     const { deviceToken } = await deviceLogin(pair, deviceId);
-    await app.request(`/v1/devices/${deviceId}/revoke`, jsonInit("POST", {}, token));
+    await app.request(
+      `/v1/devices/${deviceId}/revoke`,
+      jsonInit("POST", {}, token),
+    );
 
     const res = await app.request("/v1/auth/token/refresh", {
       method: "POST",
@@ -273,8 +375,12 @@ describe("bearer middleware device-token path", () => {
     const { token } = await signup();
     const { deviceId, pair } = await enrollDevice(token);
     const { deviceToken } = await deviceLogin(pair, deviceId);
-    expect((await app.request("/v1/devices", authedInit(deviceToken))).status).toBe(200);
-    expect((await app.request("/v1/machine", authedInit(deviceToken))).status).toBe(200);
+    expect(
+      (await app.request("/v1/devices", authedInit(deviceToken))).status,
+    ).toBe(200);
+    expect(
+      (await app.request("/v1/machine", authedInit(deviceToken))).status,
+    ).toBe(200);
   });
 
   it("rejects an expired token", async () => {
@@ -309,8 +415,13 @@ describe("bearer middleware device-token path", () => {
     const { token } = await signup();
     const { deviceId, pair } = await enrollDevice(token);
     const { deviceToken } = await deviceLogin(pair, deviceId);
-    await app.request(`/v1/devices/${deviceId}/revoke`, jsonInit("POST", {}, token));
-    expect((await app.request("/v1/me", authedInit(deviceToken))).status).toBe(401);
+    await app.request(
+      `/v1/devices/${deviceId}/revoke`,
+      jsonInit("POST", {}, token),
+    );
+    expect((await app.request("/v1/me", authedInit(deviceToken))).status).toBe(
+      401,
+    );
   });
 });
 
@@ -318,13 +429,19 @@ describe("revocation propagation to the hub", () => {
   it("calls the injected notifier exactly once with the right ids", async () => {
     const { userId, token } = await signup();
     const { deviceId } = await enrollDevice(token);
-    const res = await app.request(`/v1/devices/${deviceId}/revoke`, jsonInit("POST", {}, token));
+    const res = await app.request(
+      `/v1/devices/${deviceId}/revoke`,
+      jsonInit("POST", {}, token),
+    );
     expect(res.status).toBe(200);
     expect((await res.json()).hubNotified).toBe(true);
     expect(notifier.calls).toEqual([{ userId, deviceId }]);
 
     // Revoking again is a no-op: no second notification.
-    const again = await app.request(`/v1/devices/${deviceId}/revoke`, jsonInit("POST", {}, token));
+    const again = await app.request(
+      `/v1/devices/${deviceId}/revoke`,
+      jsonInit("POST", {}, token),
+    );
     expect(again.status).toBe(200);
     expect((await again.json()).hubNotified).toBe(false);
     expect(notifier.calls).toHaveLength(1);
@@ -334,46 +451,81 @@ describe("revocation propagation to the hub", () => {
     notifier.behavior = "throw";
     const { userId, token } = await signup();
     const { deviceId } = await enrollDevice(token);
-    const res = await app.request(`/v1/devices/${deviceId}/revoke`, jsonInit("POST", {}, token));
+    const res = await app.request(
+      `/v1/devices/${deviceId}/revoke`,
+      jsonInit("POST", {}, token),
+    );
     expect(res.status).toBe(200);
     expect((await res.json()).hubNotified).toBe(false);
 
-    const outbox = await app.request("/v1/admin/revocation-outbox", authedInit(token));
+    const outbox = await app.request(
+      "/v1/admin/revocation-outbox",
+      authedInit(token),
+    );
     expect(outbox.status).toBe(200);
     const rows = (await outbox.json()).outbox;
     const row = rows.find((r: { deviceId: string }) => r.deviceId === deviceId);
-    expect(row).toMatchObject({ userId, deviceId, attempts: 1, deliveredAt: null });
+    expect(row).toMatchObject({
+      userId,
+      deviceId,
+      attempts: 1,
+      deliveredAt: null,
+    });
   });
 
   it("queues a pending outbox row when no hub is configured yet", async () => {
     notifier.behavior = "unconfigured";
     const { userId, token } = await signup();
     const { deviceId } = await enrollDevice(token);
-    const res = await app.request(`/v1/devices/${deviceId}/revoke`, jsonInit("POST", {}, token));
+    const res = await app.request(
+      `/v1/devices/${deviceId}/revoke`,
+      jsonInit("POST", {}, token),
+    );
     expect((await res.json()).hubNotified).toBe(false);
     // A row is queued (attempts unburned) so the revocation still propagates
     // once an admin URL is configured — silently dropping it would leave a
     // revoked device able to sync (§8.2).
-    const rows = (await (await app.request("/v1/admin/revocation-outbox", authedInit(token))).json())
-      .outbox;
+    const rows = (
+      await (
+        await app.request("/v1/admin/revocation-outbox", authedInit(token))
+      ).json()
+    ).outbox;
     const row = rows.find((r: { deviceId: string }) => r.deviceId === deviceId);
-    expect(row).toMatchObject({ userId, deviceId, attempts: 0, deliveredAt: null });
+    expect(row).toMatchObject({
+      userId,
+      deviceId,
+      attempts: 0,
+      deliveredAt: null,
+    });
   });
 
   it("drains a previously-failed revocation once the hub recovers", async () => {
     notifier.behavior = "throw";
     const { deviceId } = await enrollDevice((await signup()).token);
-    await app.request(`/v1/devices/${deviceId}/revoke`, jsonInit("POST", {}, (await signup()).token));
+    await app.request(
+      `/v1/devices/${deviceId}/revoke`,
+      jsonInit("POST", {}, (await signup()).token),
+    );
     // The notifier recovers; a subsequent revoke's opportunistic drain delivers
     // the backlog, including the earlier failed row.
     notifier.behavior = "deliver";
     const second = await signup();
     const other = await enrollDevice(second.token);
-    await app.request(`/v1/devices/${other.deviceId}/revoke`, jsonInit("POST", {}, second.token));
+    await app.request(
+      `/v1/devices/${other.deviceId}/revoke`,
+      jsonInit("POST", {}, second.token),
+    );
     const rows = (
-      await (await app.request("/v1/admin/revocation-outbox", authedInit(second.token))).json()
+      await (
+        await app.request(
+          "/v1/admin/revocation-outbox",
+          authedInit(second.token),
+        )
+      ).json()
     ).outbox;
-    const drained = rows.find((r: { deviceId: string }) => r.deviceId === deviceId);
+    const drained = rows.find(
+      (r: { deviceId: string }) => r.deviceId === deviceId,
+    );
     expect(drained?.deliveredAt).not.toBeNull();
   });
 });
@@ -397,8 +549,12 @@ describe("recovery wrapper", () => {
       wrapped: wrappedB64,
     });
 
-    const audits = await (await app.request("/v1/audit", authedInit(token))).json();
-    expect(audits.events.map((e: { type: string }) => e.type)).toContain("keys.recovery_set");
+    const audits = await (
+      await app.request("/v1/audit", authedInit(token))
+    ).json();
+    expect(audits.events.map((e: { type: string }) => e.type)).toContain(
+      "keys.recovery_set",
+    );
 
     // Re-setting rotates in place rather than adding a second wrapper.
     const rewrapped = toBase64(crypto.getRandomValues(new Uint8Array(61)));
@@ -406,24 +562,40 @@ describe("recovery wrapper", () => {
       `/v1/spaces/${spaceId}/recovery`,
       jsonInit("POST", { saltB64, wrappedB64: rewrapped }, token),
     );
-    expect((await updated.json()).wrapper).toMatchObject({ id: wrapper.id, wrapped: rewrapped });
+    expect((await updated.json()).wrapper).toMatchObject({
+      id: wrapper.id,
+      wrapped: rewrapped,
+    });
   });
 
   it("filters the wrapper list by kind", async () => {
     const { spaceId, token } = await signup();
     await app.request(
       `/v1/spaces/${spaceId}/recovery`,
-      jsonInit("POST", { saltB64: toBase64(new Uint8Array(16)), wrappedB64: "AAAA" }, token),
+      jsonInit(
+        "POST",
+        { saltB64: toBase64(new Uint8Array(16)), wrappedB64: "AAAA" },
+        token,
+      ),
     );
     await app.request(
       `/v1/spaces/${spaceId}/wrappers`,
-      jsonInit("POST", { kind: "passkey-prf", credentialId: "cred-1", wrapped: "AAAA" }, token),
+      jsonInit(
+        "POST",
+        { kind: "passkey-prf", credentialId: "cred-1", wrapped: "AAAA" },
+        token,
+      ),
     );
 
-    const all = await (await app.request(`/v1/spaces/${spaceId}/wrappers`, authedInit(token))).json();
+    const all = await (
+      await app.request(`/v1/spaces/${spaceId}/wrappers`, authedInit(token))
+    ).json();
     expect(all.wrappers).toHaveLength(2);
     const recovery = await (
-      await app.request(`/v1/spaces/${spaceId}/wrappers?kind=recovery-code`, authedInit(token))
+      await app.request(
+        `/v1/spaces/${spaceId}/wrappers?kind=recovery-code`,
+        authedInit(token),
+      )
     ).json();
     expect(recovery.wrappers).toHaveLength(1);
     expect(recovery.wrappers[0].kind).toBe("recovery-code");
@@ -446,13 +618,28 @@ describe("production mode: unsigned stub rejected, signed bootstrap token accept
   beforeAll(async () => {
     const pair = await generateTokenKeypair();
     // envProvided=true simulates CONTROL_TOKEN_SK/PK from the environment.
-    const prodSigning = await createSigningKeys(pair.privateKeyPkcs8, pair.publicKeyRaw, true);
-    prodApp = createApp(db, new StubSandboxProvider(), prodSigning, notifier.notify);
+    const prodSigning = await createSigningKeys(
+      pair.privateKeyPkcs8,
+      pair.publicKeyRaw,
+      true,
+    );
+    prodApp = createApp(
+      db,
+      new StubSandboxProvider(),
+      prodSigning,
+      notifier.notify,
+    );
   });
 
-  async function prodSignup(): Promise<{ userId: string; bootstrapToken: string }> {
+  async function prodSignup(): Promise<{
+    userId: string;
+    bootstrapToken: string;
+  }> {
     const email = `prod-${emailCounter++}@example.com`;
-    const res = await prodApp.request("/v1/accounts", jsonInit("POST", { email }));
+    const res = await prodApp.request(
+      "/v1/accounts",
+      jsonInit("POST", { email }),
+    );
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(typeof body.bootstrapToken).toBe("string");
@@ -461,9 +648,15 @@ describe("production mode: unsigned stub rejected, signed bootstrap token accept
 
   it("rejects the unsigned hbr_dev_ stub once real signing keys are configured", async () => {
     const { userId } = await prodSignup();
-    const res = await prodApp.request("/v1/me", authedInit(`hbr_dev_${userId}`));
+    const res = await prodApp.request(
+      "/v1/me",
+      authedInit(`hbr_dev_${userId}`),
+    );
     expect(res.status).toBe(401);
-    const bound = await prodApp.request("/v1/me", authedInit(`hbr_dev_${userId}.${crypto.randomUUID()}`));
+    const bound = await prodApp.request(
+      "/v1/me",
+      authedInit(`hbr_dev_${userId}.${crypto.randomUUID()}`),
+    );
     expect(bound.status).toBe(401);
   });
 
@@ -475,7 +668,11 @@ describe("production mode: unsigned stub rejected, signed bootstrap token accept
     const publicKey = toBase64(await exportPublicKeyRaw(pair.publicKey));
     const enroll = await prodApp.request(
       "/v1/devices/enroll",
-      jsonInit("POST", { name: "MBP", platform: "darwin", devicePublicKey: publicKey }, bootstrapToken),
+      jsonInit(
+        "POST",
+        { name: "MBP", platform: "darwin", devicePublicKey: publicKey },
+        bootstrapToken,
+      ),
     );
     expect(enroll.status).toBe(201);
   });
@@ -484,7 +681,9 @@ describe("production mode: unsigned stub rejected, signed bootstrap token accept
     const a = await prodSignup();
     const b = await prodSignup();
     // b's bootstrap token authenticates as b, not a — /me returns b's account.
-    const me = await (await prodApp.request("/v1/me", authedInit(b.bootstrapToken))).json();
+    const me = await (
+      await prodApp.request("/v1/me", authedInit(b.bootstrapToken))
+    ).json();
     expect(me.user.id).toBe(b.userId);
     expect(me.user.id).not.toBe(a.userId);
   });

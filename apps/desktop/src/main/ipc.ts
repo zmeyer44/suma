@@ -1122,6 +1122,10 @@ export function registerIpc(deps: IpcDeps): void {
 
   /* ------------------- IDE workspace (suma://terminal) ------------------- */
 
+  handle("workspace:status", () =>
+    deps.workspaceFs.connectionStatus(deps.spaces.activeSpaceId),
+  );
+
   handle("workspace:tree", () => deps.workspaceFs.tree());
 
   handle("workspace:readFile", (args) => {
