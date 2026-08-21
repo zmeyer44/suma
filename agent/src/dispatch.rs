@@ -155,6 +155,32 @@ pub async fn dispatch(
     request: AgentCtlRequest,
     events: &CtlEvents,
 ) -> Option<AgentCtlResponse> {
+    // A fire-and-forget request must never put a frame on the wire, and that
+    // includes the refusals below (`capability_denied`, `invalid_request`)
+    // which are produced before the operation is even reached. The desktop
+    // matches ctl responses positionally, so an unawaited error frame is
+    // taken as the answer to whatever request IS in flight — a `pty.resize`
+    // for a shell that just exited would otherwise steal a concurrent
+    // `pty.attach`'s response. See `AgentCtlRequest::awaits_response`.
+    let awaited = request.awaits_response();
+    let response = dispatch_awaited(state, claims, machine_id, now_seconds, request, events).await;
+    match response {
+        Some(AgentCtlResponse::Error { code, message }) if !awaited => {
+            tracing::debug!(code, message, "suppressing error for a fire-and-forget ctl request");
+            None
+        }
+        other => other,
+    }
+}
+
+async fn dispatch_awaited(
+    state: &mut AgentState,
+    claims: &CapabilityClaims,
+    machine_id: &str,
+    now_seconds: i64,
+    request: AgentCtlRequest,
+    events: &CtlEvents,
+) -> Option<AgentCtlResponse> {
     // I-2 enforcement point. Nothing below this line runs without a valid,
     // in-window, machine-bound capability naming this exact operation.
     let cap = required_capability(&request);
@@ -800,16 +826,61 @@ mod tests {
     #[tokio::test]
     async fn invalid_requests_are_refused_after_authz() {
         let mut st = state();
-        let c = claims(vec![Capability::PtyResize]);
-        let req: AgentCtlRequest =
-            serde_json::from_str(r#"{"t":"pty.resize","ptyId":"t1","cols":5000,"rows":24}"#)
-                .unwrap();
+        let c = claims(vec![Capability::PtySpawn]);
+        let req: AgentCtlRequest = serde_json::from_str(
+            r#"{"t":"pty.spawn","ptyId":"t1","cols":5000,"rows":24}"#,
+        )
+        .unwrap();
         let resp = dispatch(&mut st, &c, "m-1", 1_100, req, &no_events())
             .await
             .unwrap();
         assert!(matches!(
             resp,
             AgentCtlResponse::Error { ref code, .. } if code == "invalid_request"
+        ));
+    }
+
+    /// The ctl wire has no request ids, so the desktop attributes an `error`
+    /// frame to whatever request is at the head of its FIFO. A request it
+    /// never queued an entry for must therefore stay silent even when it is
+    /// refused, or the error is consumed as some other request's response.
+    #[tokio::test]
+    async fn fire_and_forget_requests_stay_silent_even_when_refused() {
+        // Refused by validation, after authz passes.
+        let mut st = state();
+        let c = claims(vec![Capability::PtyResize]);
+        let req: AgentCtlRequest =
+            serde_json::from_str(r#"{"t":"pty.resize","ptyId":"t1","cols":5000,"rows":24}"#)
+                .unwrap();
+        assert!(dispatch(&mut st, &c, "m-1", 1_100, req, &no_events())
+            .await
+            .is_none());
+
+        // Refused by authz, before validation.
+        let c = claims(vec![Capability::PtySpawn]);
+        let req: AgentCtlRequest =
+            serde_json::from_str(r#"{"t":"pty.resize","ptyId":"t1","cols":80,"rows":24}"#)
+                .unwrap();
+        assert!(dispatch(&mut st, &c, "m-1", 1_100, req, &no_events())
+            .await
+            .is_none());
+
+        // Refused by the operation itself — no such pty.
+        let c = claims(vec![Capability::PtyResize]);
+        let req: AgentCtlRequest =
+            serde_json::from_str(r#"{"t":"pty.resize","ptyId":"nope","cols":80,"rows":24}"#)
+                .unwrap();
+        assert!(dispatch(&mut st, &c, "m-1", 1_100, req, &no_events())
+            .await
+            .is_none());
+
+        // An AWAITED request still reports its refusal.
+        let c = claims(vec![Capability::PtyIo]);
+        let req: AgentCtlRequest =
+            serde_json::from_str(r#"{"t":"pty.attach","ptyId":"nope"}"#).unwrap();
+        assert!(matches!(
+            dispatch(&mut st, &c, "m-1", 1_100, req, &no_events()).await,
+            Some(AgentCtlResponse::Error { .. })
         ));
     }
 }

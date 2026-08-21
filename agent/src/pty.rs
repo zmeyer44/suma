@@ -14,7 +14,8 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -211,6 +212,109 @@ pub struct SpawnParams {
  * tmux-backed persistence
  * ------------------------------------------------------------------ */
 
+/// How long the resizer waits for a drag to settle before spending a
+/// process. Long enough that a splitter drag collapses to a couple of tmux
+/// invocations, short enough that the pane has caught up by the time the
+/// user stops moving the mouse.
+const TMUX_RESIZE_DEBOUNCE: Duration = Duration::from_millis(50);
+
+fn run_resize_window(
+    executable: &Path,
+    pty_id: &str,
+    cols: u16,
+    rows: u16,
+) -> anyhow::Result<()> {
+    let status = Command::new(executable)
+        .args([
+            "resize-window",
+            "-x",
+            &cols.to_string(),
+            "-y",
+            &rows.to_string(),
+            "-t",
+            &TmuxRuntime::window_target(pty_id),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("resizing tmux window")?;
+    if !status.success() {
+        bail!("tmux resize-window failed");
+    }
+    Ok(())
+}
+
+/// Applies `resize-window` off the caller's thread, keeping only the NEWEST
+/// size per pty.
+///
+/// `PtyManager::resize` runs under the agent-state lock and a splitter drag
+/// emits a resize per grid step. Spawning tmux inline would queue a
+/// synchronous subprocess per step in front of every other ctl and pty
+/// operation, stalling the terminal for the length of the drag. Queuing
+/// instead means one process per idle window, and every size the drag
+/// superseded is dropped unsent.
+///
+/// The worker parks on the condvar while idle and lives as long as the
+/// process — there is one `TmuxRuntime` per agent, built once by `detect`.
+/// Newest requested size per pty, plus the condvar the worker parks on.
+type ResizeQueue = Arc<(Mutex<HashMap<String, (u16, u16)>>, Condvar)>;
+
+#[derive(Clone, Debug)]
+struct TmuxResizer {
+    shared: ResizeQueue,
+}
+
+impl TmuxResizer {
+    fn spawn(executable: PathBuf) -> Self {
+        let shared: ResizeQueue = Arc::new((Mutex::new(HashMap::new()), Condvar::new()));
+        let worker = Arc::clone(&shared);
+        std::thread::Builder::new()
+            .name("suma-tmux-resize".to_string())
+            .spawn(move || {
+                let (lock, idle) = &*worker;
+                loop {
+                    let mut pending = lock.lock().expect("tmux resize queue poisoned");
+                    while pending.is_empty() {
+                        pending = idle.wait(pending).expect("tmux resize queue poisoned");
+                    }
+                    drop(pending);
+                    // Let the rest of the drag land before spending a process.
+                    std::thread::sleep(TMUX_RESIZE_DEBOUNCE);
+                    let batch: Vec<(String, (u16, u16))> = lock
+                        .lock()
+                        .expect("tmux resize queue poisoned")
+                        .drain()
+                        .collect();
+                    for (pty_id, (cols, rows)) in batch {
+                        // Best-effort: the session may have exited mid-drag.
+                        let _ = run_resize_window(&executable, &pty_id, cols, rows);
+                    }
+                }
+            })
+            .expect("spawning the tmux resize worker");
+        Self { shared }
+    }
+
+    fn queue(&self, pty_id: &str, cols: u16, rows: u16) {
+        let (lock, idle) = &*self.shared;
+        lock.lock()
+            .expect("tmux resize queue poisoned")
+            .insert(pty_id.to_string(), (cols, rows));
+        idle.notify_one();
+    }
+
+    /// Drop any size queued for a pty. `attach` sizes the window
+    /// synchronously — it must be in place before `capture_pane` reads it —
+    /// so a queued value from the drag that preceded the attach must not
+    /// land afterwards and undo it.
+    fn cancel(&self, pty_id: &str) {
+        let (lock, _) = &*self.shared;
+        lock.lock()
+            .expect("tmux resize queue poisoned")
+            .remove(pty_id);
+    }
+}
+
 /// Production PTYs are tmux clients rather than the user's shell process
 /// itself. The tmux server lives independently of both the desktop mux
 /// connection and an individual portable-pty client, so a lost client can be
@@ -219,6 +323,7 @@ pub struct SpawnParams {
 #[derive(Clone, Debug)]
 struct TmuxRuntime {
     executable: PathBuf,
+    resizer: TmuxResizer,
 }
 
 impl TmuxRuntime {
@@ -231,7 +336,10 @@ impl TmuxRuntime {
             .status()
             .ok()
             .filter(|status| status.success())
-            .map(|_| Self { executable })
+            .map(|_| Self {
+                resizer: TmuxResizer::spawn(executable.clone()),
+                executable,
+            })
     }
 
     fn session_name(pty_id: &str) -> String {
@@ -389,25 +497,16 @@ impl TmuxRuntime {
         Ok(normalize_terminal_newlines(&output.stdout))
     }
 
+    /// Size the window NOW. Only `attach` needs this: the capture it takes
+    /// immediately afterwards must see the new geometry.
     fn resize_window(&self, pty_id: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
-        let status = Command::new(&self.executable)
-            .args([
-                "resize-window",
-                "-x",
-                &cols.to_string(),
-                "-y",
-                &rows.to_string(),
-                "-t",
-                &Self::window_target(pty_id),
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .context("resizing tmux window before capture")?;
-        if !status.success() {
-            bail!("tmux resize-window failed");
-        }
-        Ok(())
+        self.resizer.cancel(pty_id);
+        run_resize_window(&self.executable, pty_id, cols, rows)
+    }
+
+    /// Size the window soon, coalescing with whatever else the drag emits.
+    fn queue_resize_window(&self, pty_id: &str, cols: u16, rows: u16) {
+        self.resizer.queue(pty_id, cols, rows);
     }
 
     fn kill_session(&self, pty_id: &str) -> bool {
@@ -527,7 +626,10 @@ impl PtyManager {
     #[cfg(test)]
     fn new_with_tmux(base_dir: impl Into<PathBuf>, executable: PathBuf) -> Self {
         let mut manager = Self::new(base_dir);
-        manager.tmux = Some(TmuxRuntime { executable });
+        manager.tmux = Some(TmuxRuntime {
+            resizer: TmuxResizer::spawn(executable.clone()),
+            executable,
+        });
         manager
     }
 
@@ -778,6 +880,21 @@ impl PtyManager {
             pixel_width: 0,
             pixel_height: 0,
         })?;
+        // `resize-window -x/-y` latches the window's `window-size` option to
+        // `manual`, so once attach has sized it the window no longer follows
+        // its attached client. Every later resize has to be mirrored or the
+        // pane stays pinned at the attach-time size while xterm reflows
+        // around it — a splitter drag would render the shell into a box.
+        //
+        // Queued, not inline: this runs under the agent-state lock and a
+        // drag emits one resize per grid step, so a synchronous tmux process
+        // here would stall every other operation for the length of the drag.
+        // The queue also swallows failures, which is what we want — the
+        // session may have died, and an old tmux without `resize-window`
+        // must not turn a plain PTY resize into an error.
+        if let Some(tmux) = &self.tmux {
+            tmux.queue_resize_window(pty_id, cols, rows);
+        }
         Ok(())
     }
 
@@ -857,10 +974,10 @@ impl PtyManager {
 
         if self.sessions.contains_key(pty_id) {
             if let Some((cols, rows)) = size {
+                // `resize` mirrors this onto the tmux window itself, and it
+                // does so best-effort — like every other tmux call here, a
+                // sizing failure must not cost the user the attach.
                 self.resize(pty_id, cols, rows)?;
-                if let Some(tmux) = &self.tmux {
-                    tmux.resize_window(pty_id, cols, rows)?;
-                }
             }
         }
 
@@ -898,7 +1015,9 @@ impl PtyManager {
             let (cols, rows) = size.unwrap_or((80, 24));
             if size.is_some() {
                 if let Some(tmux) = &self.tmux {
-                    tmux.resize_window(pty_id, cols, rows)?;
+                    // Best-effort, as above: the capture below and the client
+                    // relaunch are what the user is actually attaching to.
+                    let _ = tmux.resize_window(pty_id, cols, rows);
                 }
             }
             let capture = self

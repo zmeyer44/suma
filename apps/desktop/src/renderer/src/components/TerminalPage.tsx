@@ -136,9 +136,12 @@ export function TerminalPage() {
   const mainColRef = useRef<HTMLDivElement | null>(null);
 
   const activePtyRef = useRef<string | null>(null);
-  // Only a successfully attached live shell may receive fire-and-forget
-  // resizes. An exited shell returns an error; sending that before its attach
-  // can otherwise corrupt the ctl FIFO by looking like the attach response.
+  // Only a successfully attached live shell is worth a fire-and-forget
+  // resize; anything else is traffic the agent will refuse. This is an
+  // optimization, NOT the safety property — a shell can die between this
+  // check and the frame landing, so what actually makes an unanswered
+  // request safe is that the agent never emits a frame for one
+  // (AgentCtlRequest::awaits_response; test/ctl-fire-and-forget.test.ts).
   const attachedPtyRef = useRef<string | null>(null);
   const selectionGenerationRef = useRef(0);
   const activeTabElRef = useRef<HTMLDivElement | null>(null);
@@ -311,6 +314,18 @@ export function TerminalPage() {
       needsReattach.current = true;
     };
   }, [hostEl, sendTerminalInput, resizeTerminal, attachTerminal]);
+
+  // The attached shell can exit under us — `exit` at the prompt, a kill from
+  // another device. `terminal:updated` lands that in the store; retire the
+  // ref with it so a dead shell stops drawing resize traffic. Best-effort by
+  // nature: the pty can die before this event arrives, which is exactly why
+  // the wire-level guarantee lives in the agent rather than here.
+  useEffect(() => {
+    const attached = attachedPtyRef.current;
+    if (attached === null) return;
+    if (terminals.some((t) => t.ptyId === attached && t.exited))
+      attachedPtyRef.current = null;
+  }, [terminals]);
 
   useEffect(() => {
     if (!window.suma) return;

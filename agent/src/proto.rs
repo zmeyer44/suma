@@ -131,6 +131,28 @@ pub enum AgentCtlRequest {
     FetchCancel { fetch_id: String },
 }
 
+impl AgentCtlRequest {
+    /// Whether the sender is waiting on a terminal response frame.
+    ///
+    /// The ctl wire carries no request ids. The desktop matches responses to
+    /// requests POSITIONALLY (`CTL_RESPONSE_TYPE` in agent-client.ts) and
+    /// attributes any `error` frame to whatever sits at the head of that
+    /// queue. So a request nobody awaits must put NOTHING on the wire — not
+    /// even an error — or that error is consumed as some other request's
+    /// answer and every later response is off by one.
+    ///
+    /// This is the agent-side half of that contract; the desktop's half is
+    /// the absence of an entry in `CTL_RESPONSE_TYPE`. The two lists must
+    /// agree exactly (`fire_and_forget_requests_match_the_desktop` below,
+    /// and `ctl-fire-and-forget.test.ts` on the desktop).
+    pub fn awaits_response(&self) -> bool {
+        !matches!(
+            self,
+            Self::PtyResize { .. } | Self::PtyKill { .. } | Self::FetchCancel { .. }
+        )
+    }
+}
+
 /// The exact `fetch.failed.error` a cancelled fetch reports — mirror of
 /// `FETCH_CANCELLED_ERROR` in packages/protocol/src/agent.ts. The desktop
 /// matches on it to show "cancelled" rather than "failed".
@@ -666,4 +688,33 @@ mod tests {
         .unwrap();
         assert!(encoded.validate().is_ok());
     }
+    /// The fire-and-forget set is a CONTRACT with the desktop: exactly the
+    /// requests absent from `CTL_RESPONSE_TYPE` in agent-client.ts. Adding a
+    /// request here without adding it there (or vice versa) reintroduces the
+    /// FIFO desync this list exists to prevent, so both sides pin the list.
+    #[test]
+    fn fire_and_forget_requests_match_the_desktop() {
+        let awaited: Vec<&str> = vec![
+            r#"{"t":"pty.spawn","ptyId":"a","cols":80,"rows":24}"#,
+            r#"{"t":"pty.attach","ptyId":"a"}"#,
+            r#"{"t":"pty.list"}"#,
+            r#"{"t":"job.set","ptyId":"a","enabled":true}"#,
+            r#"{"t":"ports.list"}"#,
+            r#"{"t":"fetch.public","fetchId":"f","url":"https://e.com/x","destPath":"/x"}"#,
+        ];
+        let silent: Vec<&str> = vec![
+            r#"{"t":"pty.resize","ptyId":"a","cols":80,"rows":24}"#,
+            r#"{"t":"pty.kill","ptyId":"a"}"#,
+            r#"{"t":"fetch.cancel","fetchId":"f"}"#,
+        ];
+        for raw in awaited {
+            let req: AgentCtlRequest = serde_json::from_str(raw).unwrap();
+            assert!(req.awaits_response(), "{raw} must await a response");
+        }
+        for raw in silent {
+            let req: AgentCtlRequest = serde_json::from_str(raw).unwrap();
+            assert!(!req.awaits_response(), "{raw} must never answer");
+        }
+    }
+
 }
