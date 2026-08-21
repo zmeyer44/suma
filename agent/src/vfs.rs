@@ -125,6 +125,12 @@ pub enum VfsRequest {
         #[serde(default)]
         expected_size_bytes: Option<u64>,
     },
+    #[serde(rename = "vfs.replace", rename_all = "camelCase")]
+    Replace {
+        path: String,
+        expected_data_b64: String,
+        data_b64: String,
+    },
     #[serde(rename = "vfs.delete")]
     Delete {
         path: String,
@@ -147,6 +153,7 @@ impl VfsRequest {
             | VfsRequest::Read { path, .. }
             | VfsRequest::Write { path, .. }
             | VfsRequest::Append { path, .. }
+            | VfsRequest::Replace { path, .. }
             | VfsRequest::Delete { path, .. }
             | VfsRequest::Mkdir { path }
             | VfsRequest::Tree { path } => path,
@@ -397,6 +404,7 @@ pub fn required_capability(request: &VfsRequest) -> Capability {
         | VfsRequest::Tree { .. } => Capability::FsRead,
         VfsRequest::Write { .. }
         | VfsRequest::Append { .. }
+        | VfsRequest::Replace { .. }
         | VfsRequest::Delete { .. }
         | VfsRequest::Mkdir { .. }
         | VfsRequest::Rename { .. } => Capability::FsWrite,
@@ -460,6 +468,11 @@ pub async fn handle(
             expected_size_bytes,
             ..
         } => append(&path, &target, &data_b64, expected_size_bytes).await,
+        VfsRequest::Replace {
+            expected_data_b64,
+            data_b64,
+            ..
+        } => replace(&path, &target, &expected_data_b64, &data_b64).await,
         VfsRequest::Delete { recursive, .. } => delete(root, &path, &target, recursive).await,
         VfsRequest::Mkdir { .. } => mkdir(&path, &target).await,
         VfsRequest::Tree { .. } => tree(&path, &target).await,
@@ -699,6 +712,10 @@ async fn write(
 }
 
 async fn delete(root: &VfsRoot, path: &str, target: &Path, recursive: bool) -> VfsResponse {
+    let _mutation_guard = VFS_MUTATION_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     if target == root.path() {
         return error("vfs_path_refused", "the Files root cannot be deleted");
     }
@@ -735,6 +752,10 @@ async fn delete(root: &VfsRoot, path: &str, target: &Path, recursive: bool) -> V
 }
 
 async fn mkdir(path: &str, target: &Path) -> VfsResponse {
+    let _mutation_guard = VFS_MUTATION_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     match tokio::fs::create_dir_all(target).await {
         Ok(()) => VfsResponse::Created {
             path: path.to_string(),
@@ -813,6 +834,118 @@ async fn append(
     VfsResponse::Wrote {
         path: path.to_string(),
         size_bytes: metadata.len() + bytes.len() as u64,
+    }
+}
+
+async fn replace(
+    path: &str,
+    target: &Path,
+    expected_data_b64: &str,
+    data_b64: &str,
+) -> VfsResponse {
+    if (expected_data_b64.len() + data_b64.len()) / 4 * 3 > VFS_MAX_WRITE_BYTES {
+        return error(
+            "vfs_too_large",
+            format!(
+                "a single replace is limited to {VFS_MAX_WRITE_BYTES} bytes across both payloads"
+            ),
+        );
+    }
+    let expected = match b64::decode(expected_data_b64) {
+        Ok(bytes) => bytes,
+        Err(reason) => {
+            return error(
+                "invalid_request",
+                format!("expectedDataB64 is not base64: {reason}"),
+            )
+        }
+    };
+    let bytes = match b64::decode(data_b64) {
+        Ok(bytes) => bytes,
+        Err(reason) => {
+            return error(
+                "invalid_request",
+                format!("dataB64 is not base64: {reason}"),
+            )
+        }
+    };
+    if expected.len() + bytes.len() > VFS_MAX_WRITE_BYTES {
+        return error(
+            "vfs_too_large",
+            format!(
+                "a single replace is limited to {VFS_MAX_WRITE_BYTES} bytes across both payloads"
+            ),
+        );
+    }
+    let _mutation_guard = VFS_MUTATION_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let metadata = match tokio::fs::symlink_metadata(target).await {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => {
+            return error(
+                "vfs_conflict",
+                format!("{path} no longer contains the expected data"),
+            )
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return error(
+                "vfs_conflict",
+                format!("{path} no longer contains the expected data"),
+            )
+        }
+        Err(err) => return io_error(&format!("checking {path} before replacing"), err),
+    };
+    if metadata.len() != expected.len() as u64 {
+        return error(
+            "vfs_conflict",
+            format!("{path} no longer contains the expected data"),
+        );
+    }
+    let current = match tokio::fs::read(target).await {
+        Ok(current) => current,
+        Err(err) => return io_error(&format!("checking {path} before replacing"), err),
+    };
+    if current != expected {
+        return error(
+            "vfs_conflict",
+            format!("{path} no longer contains the expected data"),
+        );
+    }
+    let Some(parent) = target.parent() else {
+        return error("vfs_path_refused", "cannot replace the Files root itself");
+    };
+    let temp = parent.join(format!(
+        ".suma-vfs-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    ));
+    let size_bytes = bytes.len() as u64;
+    match tokio::fs::File::create(&temp).await {
+        Ok(mut file) => {
+            let written = async {
+                file.write_all(&bytes).await?;
+                file.flush().await
+            }
+            .await;
+            if let Err(err) = written {
+                let _ = tokio::fs::remove_file(&temp).await;
+                return io_error(&format!("replacing {path}"), err);
+            }
+        }
+        Err(err) => return io_error(&format!("replacing {path}"), err),
+    }
+    if let Err(err) = tokio::fs::rename(&temp, target).await {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return io_error(&format!("replacing {path}"), err);
+    }
+    VfsResponse::Wrote {
+        path: path.to_string(),
+        size_bytes,
     }
 }
 
@@ -1435,6 +1568,11 @@ mod tests {
                 path: "/x.txt".into(),
                 data_b64: b64::encode(b"x"),
                 expected_size_bytes: None,
+            },
+            VfsRequest::Replace {
+                path: "/x.txt".into(),
+                expected_data_b64: b64::encode(b"old"),
+                data_b64: b64::encode(b"new"),
             },
             VfsRequest::Delete {
                 path: "/x.txt".into(),
@@ -2104,6 +2242,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replace_compares_exact_contents_before_writing() {
+        let root = temp_root("replace");
+        let c = both();
+        std::fs::write(root.path().join("a.txt"), "one").unwrap();
+
+        let stale = run(
+            &root,
+            &c,
+            VfsRequest::Replace {
+                path: "/a.txt".into(),
+                expected_data_b64: b64::encode(b"two"),
+                data_b64: b64::encode(b"bad"),
+            },
+        )
+        .await;
+        assert!(
+            matches!(&stale, VfsResponse::Error { code, .. } if code == "vfs_conflict"),
+            "{stale:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("a.txt")).unwrap(),
+            "one"
+        );
+
+        let wrote = run(
+            &root,
+            &c,
+            VfsRequest::Replace {
+                path: "/a.txt".into(),
+                expected_data_b64: b64::encode(b"one"),
+                data_b64: b64::encode(b"after"),
+            },
+        )
+        .await;
+        assert_eq!(
+            wrote,
+            VfsResponse::Wrote {
+                path: "/a.txt".into(),
+                size_bytes: 5,
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("a.txt")).unwrap(),
+            "after"
+        );
+
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[tokio::test]
     async fn new_ops_parse_from_the_typescript_wire_shape() {
         // Exactly what the extended `vfsRequestSchema` produces.
         let tree: VfsRequest = serde_json::from_str(r#"{"t":"vfs.tree","path":"/"}"#).unwrap();
@@ -2127,6 +2315,18 @@ mod tests {
                 path: "/a".into(),
                 data_b64: "aGk=".into(),
                 expected_size_bytes: Some(7),
+            }
+        );
+        let replace: VfsRequest = serde_json::from_str(
+            r#"{"t":"vfs.replace","path":"/a","expectedDataB64":"b2xk","dataB64":"bmV3"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            replace,
+            VfsRequest::Replace {
+                path: "/a".into(),
+                expected_data_b64: "b2xk".into(),
+                data_b64: "bmV3".into(),
             }
         );
         // The old delete shape (no flag) still parses, defaulting to false.

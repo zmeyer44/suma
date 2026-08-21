@@ -77,7 +77,11 @@ const PRESIGNED_MARKERS: ReadonlyArray<string> = [
 
 /** Azure SAS is only a SAS when the signature travels with the version+expiry. */
 function isAzureSas(params: URLSearchParams): boolean {
-  return params.has("sig") && params.has("sv") && (params.has("se") || params.has("sp"));
+  return (
+    params.has("sig") &&
+    params.has("sv") &&
+    (params.has("se") || params.has("sp"))
+  );
 }
 
 function isPresigned(url: URL): boolean {
@@ -155,7 +159,8 @@ function isPrivateHost(host: string): boolean {
   // it by the embedded v4 rather than waving it through as "some other IPv6".
   // Both spellings matter: authors write `::ffff:169.254.169.254`, but URL
   // parsing normalizes it to the hextet form `::ffff:a9fe:a9fe`.
-  const dotted = /^::(?:ffff:)?(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  const dotted =
+    /^::(?:ffff:)?(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
   if (dotted) return isPrivateV4(Number(dotted[1]), Number(dotted[2]));
   const hextet = /^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
   if (hextet) {
@@ -202,7 +207,8 @@ export function cloudFetchEligibility(ctx: DownloadContext): CloudFetchVerdict {
     return {
       eligible: false,
       reason: "userinfo_in_url",
-      explanation: "This link embeds a username or password, so it stays on this Mac.",
+      explanation:
+        "This link embeds a username or password, so it stays on this Mac.",
     };
   }
   if (ctx.hasCookies || ctx.hasAuthHeader || ctx.usesClientCert) {
@@ -230,7 +236,8 @@ export function cloudFetchEligibility(ctx: DownloadContext): CloudFetchVerdict {
     return {
       eligible: false,
       reason: "private_host",
-      explanation: "This address is on your local network, which your cloud machine cannot reach.",
+      explanation:
+        "This address is on your local network, which your cloud machine cannot reach.",
     };
   }
   if (ctx.totalBytes !== null && ctx.totalBytes < CLOUD_FETCH_MIN_BYTES) {
@@ -324,7 +331,10 @@ export interface QuotaVerdict {
  * deletes or hides what is already stored — losing a user's data to a quota
  * would be a far worse failure than refusing an upload.
  */
-export function checkQuota(state: QuotaState, incomingBytes: number): QuotaVerdict {
+export function checkQuota(
+  state: QuotaState,
+  incomingBytes: number,
+): QuotaVerdict {
   const projected = state.usedBytes + incomingBytes;
   const softBlocked = state.usedBytes >= state.limitBytes;
   const allowed = projected <= state.limitBytes;
@@ -347,7 +357,16 @@ export function checkQuota(state: QuotaState, incomingBytes: number): QuotaVerdi
 export const vfsRequestSchema = z.discriminatedUnion("t", [
   z.object({ t: z.literal("vfs.list"), path: z.string().max(4096) }),
   z.object({ t: z.literal("vfs.stat"), path: z.string().max(4096) }),
-  z.object({ t: z.literal("vfs.read"), path: z.string().max(4096), offset: z.number().int().nonnegative(), length: z.number().int().positive().max(64 * 1024 * 1024) }),
+  z.object({
+    t: z.literal("vfs.read"),
+    path: z.string().max(4096),
+    offset: z.number().int().nonnegative(),
+    length: z
+      .number()
+      .int()
+      .positive()
+      .max(64 * 1024 * 1024),
+  }),
   z.object({
     t: z.literal("vfs.write"),
     path: z.string().max(4096),
@@ -362,10 +381,25 @@ export const vfsRequestSchema = z.discriminatedUnion("t", [
     /** Optimistic concurrency: append only when the current file has this size. */
     expectedSizeBytes: z.number().int().nonnegative().optional(),
   }),
-  z.object({ t: z.literal("vfs.delete"), path: z.string().max(4096), recursive: z.boolean().optional() }),
+  z.object({
+    t: z.literal("vfs.replace"),
+    path: z.string().max(4096),
+    /** Exact compare-and-replace. A mismatch returns vfs_conflict. */
+    expectedDataB64: z.string(),
+    dataB64: z.string(),
+  }),
+  z.object({
+    t: z.literal("vfs.delete"),
+    path: z.string().max(4096),
+    recursive: z.boolean().optional(),
+  }),
   z.object({ t: z.literal("vfs.mkdir"), path: z.string().max(4096) }),
   z.object({ t: z.literal("vfs.tree"), path: z.string().max(4096) }),
-  z.object({ t: z.literal("vfs.rename"), from: z.string().max(4096), to: z.string().max(4096) }),
+  z.object({
+    t: z.literal("vfs.rename"),
+    from: z.string().max(4096),
+    to: z.string().max(4096),
+  }),
 ]);
 export type VfsRequest = z.infer<typeof vfsRequestSchema>;
 
@@ -392,14 +426,34 @@ export type VfsEntry = z.infer<typeof vfsEntrySchema>;
  * failure on old desktops.
  */
 export const vfsResponseSchema = z.discriminatedUnion("t", [
-  z.object({ t: z.literal("vfs.listing"), path: z.string(), entries: z.array(vfsEntrySchema), truncated: z.boolean() }),
+  z.object({
+    t: z.literal("vfs.listing"),
+    path: z.string(),
+    entries: z.array(vfsEntrySchema),
+    truncated: z.boolean(),
+  }),
   z.object({ t: z.literal("vfs.info"), entry: vfsEntrySchema }),
-  z.object({ t: z.literal("vfs.data"), path: z.string(), offset: z.number().int().nonnegative(), dataB64: z.string(), eof: z.boolean() }),
-  z.object({ t: z.literal("vfs.wrote"), path: z.string(), sizeBytes: z.number().int().nonnegative() }),
+  z.object({
+    t: z.literal("vfs.data"),
+    path: z.string(),
+    offset: z.number().int().nonnegative(),
+    dataB64: z.string(),
+    eof: z.boolean(),
+  }),
+  z.object({
+    t: z.literal("vfs.wrote"),
+    path: z.string(),
+    sizeBytes: z.number().int().nonnegative(),
+  }),
   z.object({ t: z.literal("vfs.deleted"), path: z.string() }),
   z.object({ t: z.literal("vfs.created"), path: z.string() }),
   z.object({ t: z.literal("vfs.renamed"), from: z.string(), to: z.string() }),
-  z.object({ t: z.literal("vfs.paths"), path: z.string(), paths: z.array(z.string()), truncated: z.boolean() }),
+  z.object({
+    t: z.literal("vfs.paths"),
+    path: z.string(),
+    paths: z.array(z.string()),
+    truncated: z.boolean(),
+  }),
   z.object({ t: z.literal("error"), code: z.string(), message: z.string() }),
 ]);
 export type VfsResponse = z.infer<typeof vfsResponseSchema>;
@@ -416,6 +470,7 @@ export const VFS_CAPABILITY: Record<VfsRequest["t"], "fs.read" | "fs.write"> = {
   "vfs.tree": "fs.read",
   "vfs.write": "fs.write",
   "vfs.append": "fs.write",
+  "vfs.replace": "fs.write",
   "vfs.delete": "fs.write",
   "vfs.mkdir": "fs.write",
   "vfs.rename": "fs.write",
@@ -430,8 +485,18 @@ export const VFS_MAX_TREE_ENTRIES = 10_000;
 export const VFS_MAX_TREE_DEPTH = 12;
 /** Keep in step with SKIPPED_DIRS in agent/src/vfs.rs and local-vfs.ts. */
 export const VFS_TREE_SKIPPED_DIRS: ReadonlyArray<string> = [
-  ".git", ".hg", ".svn", ".suma", "node_modules", ".pnpm-store", ".npm",
-  ".cache", ".cargo", ".rustup", ".Trash", "Library",
+  ".git",
+  ".hg",
+  ".svn",
+  ".suma",
+  "node_modules",
+  ".pnpm-store",
+  ".npm",
+  ".cache",
+  ".cargo",
+  ".rustup",
+  ".Trash",
+  "Library",
 ];
 export const VFS_TREE_SKIPPED_FILES: ReadonlyArray<string> = [".DS_Store"];
 

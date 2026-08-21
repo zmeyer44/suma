@@ -200,6 +200,17 @@ const TOOL_LABELS: Record<string, { running: string; done: string }> = {
   search_memory: { running: "Searching memories…", done: "Searched memories" },
   expand_memory: { running: "Recalling details…", done: "Recalled details" },
   compress_memory: { running: "Tidying memories…", done: "Tidied memories" },
+  list_files: { running: "Listing files…", done: "Listed files" },
+  read_file: { running: "Reading a file…", done: "Read a file" },
+  write_file: { running: "Writing a file…", done: "Wrote a file" },
+  edit_file: { running: "Editing a file…", done: "Edited a file" },
+  run_command: { running: "Running a command…", done: "Ran a command" },
+  wait_for_output: { running: "Waiting on a command…", done: "Command finished" },
+  read_terminal: { running: "Reading the terminal…", done: "Read the terminal" },
+  send_keys: { running: "Typing in the terminal…", done: "Sent keystrokes" },
+  open_terminal_app: { running: "Starting a terminal app…", done: "Started a terminal app" },
+  kill_shell: { running: "Stopping a shell…", done: "Stopped a shell" },
+  list_ports: { running: "Checking ports…", done: "Checked ports" },
 };
 
 /**

@@ -60,6 +60,28 @@ export const CHAT_TOOL_GROUPS = [
       "Remember lasting details about you across conversations — preferences, people, plans — and search what it has remembered. Stored in your own files (.suma/memory).",
     tools: ["add_memory", "search_memory", "expand_memory", "compress_memory"],
   },
+  {
+    id: "files",
+    label: "Read and write files",
+    description:
+      "Browse, read, create, and edit files in your space's folder — the same files the built-in IDE shows.",
+    tools: ["list_files", "read_file", "write_file", "edit_file"],
+  },
+  {
+    id: "terminal",
+    label: "Run commands",
+    description:
+      "Run shell commands and coding agents in terminals on your computer, watch their output, and see which local ports are serving. Every shell it opens is visible in your terminal panel.",
+    tools: [
+      "run_command",
+      "wait_for_output",
+      "read_terminal",
+      "send_keys",
+      "open_terminal_app",
+      "kill_shell",
+      "list_ports",
+    ],
+  },
 ] as const;
 
 export type ChatToolGroupId = (typeof CHAT_TOOL_GROUPS)[number]["id"];

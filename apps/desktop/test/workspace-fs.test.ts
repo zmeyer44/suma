@@ -174,6 +174,39 @@ describe("read/write", () => {
     expect(file).toEqual({ path: "a.txt", kind: "text", contents: "after" });
   });
 
+  it("compare-and-replaces only the exact contents it read", async () => {
+    await writeFile(path.join(root, "a.txt"), "before");
+    await service.replace("a.txt", "before", "after");
+    await expect(
+      service.replace("a.txt", "before", "stale overwrite"),
+    ).rejects.toThrow(/expected data/);
+    expect(await service.read("a.txt")).toEqual({
+      path: "a.txt",
+      kind: "text",
+      contents: "after",
+    });
+  });
+
+  it("keeps a captured edit scope stable across an active-space switch", async () => {
+    let active = "Space-A";
+    service.bind(new SimAgent({ root: () => root }), () => active);
+    await mkdir(path.join(root, "Space-A"), { recursive: true });
+    await mkdir(path.join(root, "Space-B"), { recursive: true });
+    await writeFile(path.join(root, "Space-A/a.txt"), "from-a");
+    await writeFile(path.join(root, "Space-B/a.txt"), "from-b");
+
+    const scope = service.captureScope();
+    const read = await service.read("a.txt", scope);
+    active = "Space-B";
+    await service.replace("a.txt", "from-a", "edited-a", scope);
+
+    expect(read).toMatchObject({ kind: "text", contents: "from-a" });
+    expect(await service.read("a.txt", "/Space-A")).toMatchObject({
+      contents: "edited-a",
+    });
+    expect(await service.read("a.txt")).toMatchObject({ contents: "from-b" });
+  });
+
   it("flags binary files unreadable instead of returning bytes", async () => {
     await writeFile(path.join(root, "blob.bin"), Buffer.from([0x89, 0, 0x50]));
     const file = await service.read("blob.bin");

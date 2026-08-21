@@ -236,6 +236,29 @@ describe("LocalVfs operations", () => {
     );
   });
 
+  it("compare-and-replaces exact contents, including same-size conflicts", async () => {
+    const { vfs, root } = tempVfs();
+    await vfs.handle({ t: "vfs.write", path: "/a.txt", dataB64: b64("one") });
+    expectError(
+      await vfs.handle({
+        t: "vfs.replace",
+        path: "/a.txt",
+        expectedDataB64: b64("two"),
+        dataB64: b64("new"),
+      }),
+      "vfs_conflict",
+    );
+    expect(
+      await vfs.handle({
+        t: "vfs.replace",
+        path: "/a.txt",
+        expectedDataB64: b64("one"),
+        dataB64: b64("after"),
+      }),
+    ).toEqual({ t: "vfs.wrote", path: "/a.txt", sizeBytes: 5 });
+    expect(await fs.readFile(path.join(root, "a.txt"), "utf8")).toBe("after");
+  });
+
   it("delete refuses a populated directory unless recursive", async () => {
     const { vfs, root } = tempVfs();
     await fs.mkdir(path.join(root, "sub/deep"), { recursive: true });

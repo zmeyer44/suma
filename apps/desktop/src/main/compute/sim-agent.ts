@@ -79,6 +79,7 @@ interface SimPty {
   exited: boolean;
   exitCode: number | null;
   cwd: string;
+  command?: string;
   scrollback: Buffer;
   /** Lifetime output count; scrollback may retain only its bounded suffix. */
   totalOutputBytes: number;
@@ -241,6 +242,7 @@ export class SimAgent implements AgentLink {
         return this.spawnPty(
           request.ptyId,
           request.cwd,
+          request.command,
           request.cols,
           request.rows,
           request.env,
@@ -325,6 +327,7 @@ export class SimAgent implements AgentLink {
             .map((pty) => ({
               ptyId: pty.ptyId,
               cwd: pty.cwd,
+              ...(pty.command === undefined ? {} : { command: pty.command }),
               live: isLive(pty),
             }))
             .sort((a, b) => a.ptyId.localeCompare(b.ptyId)),
@@ -450,6 +453,7 @@ export class SimAgent implements AgentLink {
   private async spawnPty(
     ptyId: string,
     cwd: string | undefined,
+    command: string | undefined,
     cols: number,
     rows: number,
     env?: Record<string, string>,
@@ -472,6 +476,7 @@ export class SimAgent implements AgentLink {
       exited: false,
       exitCode: null,
       cwd: dir,
+      command,
       scrollback: Buffer.alloc(0),
       totalOutputBytes: 0,
       pendingLine: "",
@@ -482,17 +487,21 @@ export class SimAgent implements AgentLink {
     const nodePty = await loadNodePty();
     if (nodePty !== null) {
       try {
-        const tty = nodePty.spawn(shell, [], {
-          name: "xterm-256color",
-          cols,
-          rows,
-          cwd: dir,
-          env: {
-            ...(process.env as Record<string, string>),
-            TERM: "xterm-256color",
-            ...env,
+        const tty = nodePty.spawn(
+          shell,
+          command === undefined ? [] : ["-c", command],
+          {
+            name: "xterm-256color",
+            cols,
+            rows,
+            cwd: dir,
+            env: {
+              ...(process.env as Record<string, string>),
+              TERM: "xterm-256color",
+              ...env,
+            },
           },
-        });
+        );
         pty.tty = tty;
         this.ptys.set(ptyId, pty);
         tty.onData((data) => this.emitOutput(pty, Buffer.from(data)));
@@ -503,14 +512,16 @@ export class SimAgent implements AgentLink {
       }
     }
 
-    return this.spawnPipeFallback(pty, shell, cols, rows);
+    return this.spawnPipeFallback(pty, shell, command, cols, rows, env);
   }
 
   private spawnPipeFallback(
     pty: SimPty,
     shell: string,
+    command: string | undefined,
     cols: number,
     rows: number,
+    env?: Record<string, string>,
   ): AgentCtlResponse {
     const dir = pty.cwd;
     // -i so the shell prints prompts to the pipe; job control is unavailable
@@ -526,17 +537,22 @@ export class SimAgent implements AgentLink {
     // with no terminal attached. Detaching makes both launch paths behave the
     // same: with no controlling terminal to reach for, the shell falls back to
     // the stdin pipe this stand-in actually provides.
-    const child = spawn(shell, ["-i"], {
-      cwd: dir,
-      env: {
-        ...process.env,
-        TERM: "dumb", // pipes are not a TTY — claiming xterm would be a lie
-        COLUMNS: String(cols),
-        LINES: String(rows),
+    const child = spawn(
+      shell,
+      command === undefined ? ["-i"] : ["-c", command],
+      {
+        cwd: dir,
+        env: {
+          ...process.env,
+          TERM: "dumb", // pipes are not a TTY — claiming xterm would be a lie
+          COLUMNS: String(cols),
+          LINES: String(rows),
+          ...env,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: true,
       },
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: true,
-    });
+    );
     pty.child = child;
     this.ptys.set(pty.ptyId, pty);
     const onOutput = (chunk: Buffer): void => this.emitOutput(pty, chunk);

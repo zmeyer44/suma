@@ -34,6 +34,7 @@ import { AuthService } from "./auth-service";
 import { PROD_CONTROL_URL } from "./control-client";
 import { ChatService } from "./chat/chat-service";
 import { MemoryService } from "./memory/memory-service";
+import { AssistantShellService } from "./shell/assistant-shell-service";
 import { loadDotEnv } from "./env";
 import { TcpAgentClient } from "./compute/agent-client";
 import { SwitchableAgentLink } from "./compute/agent-link-switch";
@@ -681,6 +682,11 @@ async function startServices(ctx: {
   // link does not exist yet), the same deferral WorkspaceFsService uses.
   const memory = new MemoryService();
 
+  // The assistant's computer: a shell (run_command, coding agents, ports) and
+  // the workspace filesystem (file tools). Like memory, constructed here so
+  // chat and voice share one instance and bound to the agent link below.
+  const assistantShell = new AssistantShellService();
+
   const chat = new ChatService({
     userDataDir: userData,
     storedApiKey: () => tts.apiKeyFor("vercel"),
@@ -693,6 +699,8 @@ async function startServices(ctx: {
     },
     browser: { spaces, tabs },
     memory,
+    shell: assistantShell,
+    workspaceFs,
   });
 
   /* ------------------- Saves: smart bookmarking (double-Shift) ------------ */
@@ -711,6 +719,8 @@ async function startServices(ctx: {
     userDataDir: userData,
     browser: { spaces, tabs },
     memory,
+    shell: assistantShell,
+    workspaceFs,
     chatToolSettings: () => {
       const info = chat.settings();
       return { model: info.model, tools: info.tools };
@@ -1211,34 +1221,43 @@ async function startServices(ctx: {
     }
   };
   applyRelayRole();
+  // New shells (the user's and the assistant's) start in the active space's
+  // folder — the same tree the explorer shows. The folder is created over the
+  // link first so the spawn cannot land in a missing directory.
+  const assistantWorkspaceCwd = async (): Promise<string | null> => {
+    const active = spaces.activeSpaceId;
+    if (active === null || !spaceScopeActive()) return null;
+    const folder = await spaceFs.ensureSpaceDir(active);
+    // Remote links speak `~`-rooted paths (both agents expand them):
+    // "~/cloud/…" on the VM, "~/Suma/…" over the relay — exactly what
+    // vfsRootLabel() reports for each.
+    return link.kind === "remote"
+      ? `${link.vfsRootLabel()}/${folder}`
+      : path.join(resolveSimRoot(), folder);
+  };
   const terminals = new TerminalService({
     link,
     control: () => auth.controlClient(),
     emitData: (payload) => emit("terminal:data", payload),
     emitUpdated: (list) => emit("terminal:updated", list),
-    // New shells start in the active space's folder — the same tree the
-    // explorer shows. The folder is created over the link first so the
-    // spawn cannot land in a missing directory.
-    defaultCwd: async () => {
-      const active = spaces.activeSpaceId;
-      if (active === null || !spaceScopeActive()) return null;
-      const folder = await spaceFs.ensureSpaceDir(active);
-      // Remote links speak `~`-rooted paths (both agents expand them):
-      // "~/cloud/…" on the VM, "~/Suma/…" over the relay — exactly what
-      // vfsRootLabel() reports for each.
-      return link.kind === "remote"
-        ? `${link.vfsRootLabel()}/${folder}`
-        : path.join(
-            resolveSimRoot(),
-            folder,
-          );
-    },
+    defaultCwd: assistantWorkspaceCwd,
   });
   const ports = new PortsService({
     link,
     emit: (list) => emit("ports:updated", list),
   });
   ensureLoopbackForward = (port) => ports.ensureForward(port);
+  // The assistant's hands on the computer — its shells ride TerminalService
+  // (visible to the user) and its job scripts ride the link's vfs. The
+  // shell-side workspace root mirrors defaultCwd's coordinate system.
+  assistantShell.bind({
+    terminals,
+    link,
+    ports,
+    shellWorkspaceRoot: () =>
+      link.kind === "remote" ? link.vfsRootLabel() : resolveSimRoot(),
+    defaultCwd: assistantWorkspaceCwd,
+  });
   const egress = new EgressService({
     spaces,
     store,
@@ -1371,6 +1390,7 @@ async function startServices(ctx: {
     gateway.stop();
     workspaceFs.unbind();
     memory.unbind();
+    assistantShell.stopAll();
     homeBridge?.stop();
     relayClient?.stop();
     link.stop();

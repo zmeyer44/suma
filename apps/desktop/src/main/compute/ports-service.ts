@@ -59,6 +59,14 @@ export class PortsService {
     }));
   }
 
+  /** A fresh listener list right now (the assistant's list_ports): one poll
+   *  instead of waiting out the 4 s interval, then the same view list()
+   *  serves. Poll failures keep the last-known list, like the interval. */
+  async refresh(): Promise<PortForwardInfo[]> {
+    await this.poll();
+    return this.list();
+  }
+
   async setForward(port: number, enabled: boolean): Promise<PortForwardInfo> {
     const active = this.forwards.has(port);
     if (enabled && !active) {

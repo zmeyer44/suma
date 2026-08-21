@@ -132,10 +132,16 @@ export class LocalVfs {
         return this.withMutationLock(() =>
           this.append(wire, target, request.dataB64, request.expectedSizeBytes),
         );
+      case "vfs.replace":
+        return this.withMutationLock(() =>
+          this.replace(wire, target, request.expectedDataB64, request.dataB64),
+        );
       case "vfs.delete":
-        return this.delete(wire, target, request.recursive === true);
+        return this.withMutationLock(() =>
+          this.delete(wire, target, request.recursive === true),
+        );
       case "vfs.mkdir":
-        return this.mkdir(wire, target);
+        return this.withMutationLock(() => this.mkdir(wire, target));
       case "vfs.tree":
         return this.tree(wire, target);
       case "vfs.rename":
@@ -413,6 +419,79 @@ export class LocalVfs {
       path: wire,
       sizeBytes: before.size + bytes.byteLength,
     };
+  }
+
+  private async replace(
+    wire: string,
+    target: string,
+    expectedDataB64: string,
+    dataB64: string,
+  ): Promise<VfsResponse> {
+    const tooLarge = error(
+      "vfs_too_large",
+      `a single replace is limited to ${VFS_MAX_WRITE_BYTES} bytes across both payloads`,
+    );
+    if (
+      ((expectedDataB64.length + dataB64.length) / 4) * 3 >
+      VFS_MAX_WRITE_BYTES
+    ) {
+      return tooLarge;
+    }
+    let expected: Uint8Array;
+    let bytes: Uint8Array;
+    try {
+      expected = fromBase64(expectedDataB64);
+      bytes = fromBase64(dataB64);
+    } catch (err) {
+      return error(
+        "invalid_request",
+        `replace payload is not base64: ${String(err)}`,
+      );
+    }
+    if (expected.byteLength + bytes.byteLength > VFS_MAX_WRITE_BYTES) {
+      return tooLarge;
+    }
+    if (wire === "/") {
+      return error("vfs_path_refused", "cannot replace the Files root itself");
+    }
+    let current: Buffer;
+    try {
+      const metadata = await fs.lstat(target);
+      if (!metadata.isFile()) {
+        return error(
+          "vfs_conflict",
+          `${wire} no longer contains the expected data`,
+        );
+      }
+      current = await fs.readFile(target);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return error(
+          "vfs_conflict",
+          `${wire} no longer contains the expected data`,
+        );
+      }
+      return ioError(`checking ${wire} before replacing`, err);
+    }
+    if (!current.equals(Buffer.from(expected))) {
+      return error(
+        "vfs_conflict",
+        `${wire} no longer contains the expected data`,
+      );
+    }
+    const parent = path.dirname(target);
+    const temp = path.join(
+      parent,
+      `.suma-vfs-${process.pid}-${process.hrtime.bigint()}`,
+    );
+    try {
+      await fs.writeFile(temp, bytes, { flag: "wx" });
+      await fs.rename(temp, target);
+    } catch (err) {
+      await fs.rm(temp, { force: true }).catch(() => undefined);
+      return ioError(`replacing ${wire}`, err);
+    }
+    return { t: "vfs.wrote", path: wire, sizeBytes: bytes.byteLength };
   }
 
   private async delete(

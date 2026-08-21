@@ -120,8 +120,13 @@ export class WorkspaceFsService {
    * needs: audio never crosses IPC (the player streams it over
    * suma-workspace://), while images and text are read whole under their caps.
    */
-  async read(rel: string): Promise<WorkspaceFile> {
-    const wire = this.toVfsPath(rel);
+  /** Capture the active workspace scope for a multi-call operation. */
+  captureScope(): string {
+    return this.scopedRoot();
+  }
+
+  async read(rel: string, scopeRoot?: string): Promise<WorkspaceFile> {
+    const wire = this.toVfsPath(rel, true, scopeRoot);
     const info = unwrap(
       await this.vfs().vfs({ t: "vfs.stat", path: wire }),
       `reading ${rel}`,
@@ -184,6 +189,34 @@ export class WorkspaceFsService {
         dataB64,
       }),
       `saving ${rel}`,
+    );
+    return { ok: true };
+  }
+
+  /**
+   * Exact compare-and-replace for assistant edits. `wire` is captured before
+   * the request, so an active-space switch cannot redirect the write after
+   * the caller read from a different scope. The agent performs the compare
+   * and atomic rename under its mutation lock; concurrent VFS editor or
+   * second-assistant writes therefore fail with vfs_conflict.
+   */
+  async replace(
+    rel: string,
+    expectedContents: string,
+    contents: string,
+    scopeRoot?: string,
+  ): Promise<{ ok: true }> {
+    const wire = this.toVfsPath(rel, false, scopeRoot);
+    unwrap(
+      await this.vfs().vfs({
+        t: "vfs.replace",
+        path: wire,
+        expectedDataB64: Buffer.from(expectedContents, "utf8").toString(
+          "base64",
+        ),
+        dataB64: Buffer.from(contents, "utf8").toString("base64"),
+      }),
+      `editing ${rel}`,
     );
     return { ok: true };
   }
@@ -267,14 +300,18 @@ export class WorkspaceFsService {
    * scope. Same trust model as ever: absolute paths and escapes are refused
    * with the messages the store already surfaces.
    */
-  private toVfsPath(rel: string, allowWorkspaceRoot = true): string {
+  private toVfsPath(
+    rel: string,
+    allowWorkspaceRoot = true,
+    scopeRoot?: string,
+  ): string {
     if (rel.startsWith("/")) throw new Error(`absolute path refused: ${rel}`);
     const normalized = normalizeVfsPath(rel);
     if (normalized === null) throw new Error(`path escapes workspace: ${rel}`);
     if (!allowWorkspaceRoot && normalized === "/") {
       throw new Error(`workspace root refused: ${rel}`);
     }
-    const base = this.scopedRoot();
+    const base = scopeRoot ?? this.scopedRoot();
     if (base === "/") return normalized;
     return normalized === "/" ? base : `${base}${normalized}`;
   }

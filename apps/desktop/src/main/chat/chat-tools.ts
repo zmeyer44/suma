@@ -25,6 +25,10 @@ import {
 import type { TabInfo } from "../../shared/ipc";
 import { createMemoryTools } from "../memory/memory-tools";
 import type { MemoryService } from "../memory/memory-service";
+import { createFileTools } from "../files/assistant-fs-tools";
+import { createShellTools } from "../shell/shell-tools";
+import type { AssistantShellService } from "../shell/assistant-shell-service";
+import type { WorkspaceFsService } from "../workspace-fs";
 import type { SpaceManager } from "../spaces";
 import type { TabManager } from "../tabs";
 import {
@@ -471,19 +475,36 @@ export function createBrowserTools(deps: BrowserToolDeps): ToolSet {
   return all;
 }
 
+/** Everything the assistant loop can be given: browser access (always), and
+ *  the memory/shell/file services when wired and reachable. A null or
+ *  unavailable service simply contributes no tools. */
+export interface AssistantToolContext {
+  browser: BrowserToolDeps;
+  memory?: MemoryService | null;
+  shell?: AssistantShellService | null;
+  workspaceFs?: WorkspaceFsService | null;
+}
+
 /** The subset of tools the user has left enabled (settings page toggles):
- *  the browser tools plus, when a memory service is wired, the memory tools
- *  — one ToolSet, filtered by the same capability groups. */
+ *  browser + memory + shell + file tools, one ToolSet, filtered by the same
+ *  capability groups. A service that is absent or not connected drops out. */
 export function enabledAssistantTools(
-  deps: BrowserToolDeps,
+  ctx: AssistantToolContext,
   settings: ChatSettings,
-  memory: MemoryService | null = null,
 ): ToolSet {
-  const memoryTools =
-    memory === null || !memory.available() ? {} : createMemoryTools(memory);
+  const memory =
+    ctx.memory != null && ctx.memory.available() ? createMemoryTools(ctx.memory) : {};
+  const shell =
+    ctx.shell != null && ctx.shell.available() ? createShellTools(ctx.shell) : {};
+  const files =
+    ctx.workspaceFs != null && ctx.workspaceFs.connectionStatus(null).connected
+      ? createFileTools(ctx.workspaceFs)
+      : {};
   const tools: ToolSet = {
-    ...createBrowserTools(deps),
-    ...memoryTools,
+    ...createBrowserTools(ctx.browser),
+    ...memory,
+    ...shell,
+    ...files,
   };
   const enabled: ToolSet = {};
   for (const group of CHAT_TOOL_GROUPS) {

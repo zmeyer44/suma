@@ -24,6 +24,7 @@
     "@suma/egress-policy": "workspace:*",
     "@suma/protocol": "workspace:*",
     "@suma/sync-engine": "workspace:*",
+    "@xterm/headless": "^6.0.0",
     "ai": "^7.0.58",
     "electron-updater": "^6.8.9",
     "lucide-react": "^1.31.0",

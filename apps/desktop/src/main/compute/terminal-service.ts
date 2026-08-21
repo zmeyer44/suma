@@ -36,8 +36,24 @@ interface TerminalRecord {
   decoder: StringDecoder;
 }
 
+/**
+ * What an in-main observer of one PTY sees. `reset` fires when an attach is
+ * about to replay the whole scrollback — observers holding a terminal model
+ * must clear it or the replay would double-feed them (the same contract the
+ * renderer's xterm follows).
+ */
+export type TerminalTapEvent =
+  | { kind: "data"; text: string }
+  | { kind: "reset" }
+  | { kind: "resize"; cols: number; rows: number }
+  | { kind: "exited"; code: number };
+
 export class TerminalService {
   private readonly records = new Map<string, TerminalRecord>();
+  private readonly taps = new Map<
+    string,
+    Set<(event: TerminalTapEvent) => void>
+  >();
   private counter = 0;
 
   constructor(private readonly deps: TerminalDeps) {
@@ -46,8 +62,38 @@ export class TerminalService {
       const record = this.records.get(event.ptyId);
       if (record === undefined || record.info.exited) return;
       record.info.exited = true;
+      this.tap(event.ptyId, { kind: "exited", code: event.code });
       this.pushUpdated();
     });
+  }
+
+  /**
+   * Observe one PTY's stream from MAIN (the assistant's shells): decoded
+   * output, attach resets, resizes, and the exit. The renderer keeps its own
+   * path (emitData); taps are additive and never buffer.
+   */
+  subscribe(
+    ptyId: string,
+    listener: (event: TerminalTapEvent) => void,
+  ): () => void {
+    let set = this.taps.get(ptyId);
+    if (set === undefined) {
+      set = new Set();
+      this.taps.set(ptyId, set);
+    }
+    set.add(listener);
+    return () => {
+      const listeners = this.taps.get(ptyId);
+      if (listeners === undefined) return;
+      listeners.delete(listener);
+      if (listeners.size === 0) this.taps.delete(ptyId);
+    };
+  }
+
+  private tap(ptyId: string, event: TerminalTapEvent): void {
+    const listeners = this.taps.get(ptyId);
+    if (listeners === undefined) return;
+    for (const listener of [...listeners]) listener(event);
   }
 
   list(): TerminalInfo[] {
@@ -98,7 +144,11 @@ export class TerminalService {
     return this.list();
   }
 
-  async create(cwd?: string): Promise<TerminalInfo> {
+  async create(
+    cwd?: string,
+    title?: string,
+    command?: string,
+  ): Promise<TerminalInfo> {
     const ptyId = randomUUID();
     if (cwd === undefined) {
       // Terminal and explorer open onto the same tree: new shells start in
@@ -119,13 +169,15 @@ export class TerminalService {
       // the shell inherits whatever the agent process was started with.
       env: { TERM: "xterm-256color", COLORTERM: "truecolor" },
       ...(cwd === undefined ? {} : { cwd }),
+      ...(command === undefined ? {} : { command }),
     });
-    if (response?.t === "error") throw new Error(`terminal: ${response.message}`);
+    if (response?.t === "error")
+      throw new Error(`terminal: ${response.message}`);
     this.counter += 1;
     const record: TerminalRecord = {
       info: {
         ptyId,
-        title: `Shell ${this.counter}`,
+        title: title ?? `Shell ${this.counter}`,
         cwd: cwd ?? "~",
         restore: null,
         jobMode: false,
@@ -160,7 +212,8 @@ export class TerminalService {
       sinceByte: 0,
       ...(cols === undefined || rows === undefined ? {} : { cols, rows }),
     });
-    if (response?.t === "error") throw new Error(`terminal: ${response.message}`);
+    if (response?.t === "error")
+      throw new Error(`terminal: ${response.message}`);
     if (response?.t === "pty.attached") {
       if (response.ptyId !== ptyId)
         throw new Error(
@@ -170,6 +223,9 @@ export class TerminalService {
       record.info.cwd = response.cwd;
       record.info.exited = response.restore !== "resumed";
     }
+    // The channel reopens below and the agent replays the whole scrollback —
+    // main-side observers must clear their models first.
+    this.tap(ptyId, { kind: "reset" });
     this.openChannel(record);
     this.pushUpdated();
     return { ...record.info };
@@ -182,12 +238,19 @@ export class TerminalService {
   async resize(ptyId: string, cols: number, rows: number): Promise<void> {
     this.require(ptyId);
     await this.deps.link.ctl({ t: "pty.resize", ptyId, cols, rows });
+    this.tap(ptyId, { kind: "resize", cols, rows });
   }
 
   async close(ptyId: string): Promise<void> {
     const record = this.require(ptyId);
     record.channel?.close();
+    // Main-side observers (notably AssistantShellService) must learn about a
+    // renderer-initiated close before the registry entry disappears. The
+    // eventual agent pty.exited event cannot do that: it arrives after this
+    // record has been removed and is intentionally ignored as stale.
+    this.tap(ptyId, { kind: "exited", code: -1 });
     this.records.delete(ptyId);
+    this.taps.delete(ptyId);
     try {
       await this.deps.link.ctl({ t: "pty.kill", ptyId, signal: "TERM" });
     } catch {
@@ -208,8 +271,10 @@ export class TerminalService {
       await client.setJobMode(ptyId, enabled);
     }
     const response = await this.deps.link.ctl({ t: "job.set", ptyId, enabled });
-    if (response?.t === "error") throw new Error(`terminal: ${response.message}`);
-    record.info.jobMode = response?.t === "job.ack" ? response.enabled : enabled;
+    if (response?.t === "error")
+      throw new Error(`terminal: ${response.message}`);
+    record.info.jobMode =
+      response?.t === "job.ack" ? response.enabled : enabled;
     this.pushUpdated();
     return { ...record.info };
   }
@@ -221,7 +286,10 @@ export class TerminalService {
     record.decoder = new StringDecoder("utf8");
     record.channel = this.deps.link.openPty(record.info.ptyId, (chunk) => {
       const text = record.decoder.write(chunk);
-      if (text.length > 0) this.deps.emitData({ ptyId: record.info.ptyId, data: text });
+      if (text.length > 0) {
+        this.deps.emitData({ ptyId: record.info.ptyId, data: text });
+        this.tap(record.info.ptyId, { kind: "data", text });
+      }
     });
   }
 

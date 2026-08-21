@@ -58,6 +58,8 @@ import {
 } from "../chat/chat-tools";
 import { GATEWAY_ENV_KEYS } from "../chat/chat-service";
 import type { MemoryService } from "../memory/memory-service";
+import type { AssistantShellService } from "../shell/assistant-shell-service";
+import type { WorkspaceFsService } from "../workspace-fs";
 import { VoiceAgentSession, type Gateway } from "./agent-session";
 import { BlandRealtimeTts } from "./tts-realtime";
 import type { RealtimeTtsProvider } from "./tts-realtime-core";
@@ -91,6 +93,9 @@ export interface VoiceServiceDeps {
   /** Long-term memory — same instance the chat sidebar uses, so both mouths
    *  of the assistant remember the same things. */
   memory?: MemoryService;
+  /** The computer — same shell + workspace the chat sidebar uses. */
+  shell?: AssistantShellService;
+  workspaceFs?: WorkspaceFsService;
   emit: VoiceEmitter;
   /** The stored gateway key (TTS's Vercel key), read per session — the
    *  chat sidebar's exact sharing. */
@@ -373,9 +378,13 @@ export class VoiceService {
         ? this.deps.memory
         : null;
     const tools = enabledAssistantTools(
-      this.deps.browser,
+      {
+        browser: this.deps.browser,
+        memory,
+        shell: this.deps.shell ?? null,
+        workspaceFs: this.deps.workspaceFs ?? null,
+      },
       chatToolSettings,
-      memory,
     );
     void Promise.all([
       this.resolveGateway(),
