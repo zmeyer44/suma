@@ -66,8 +66,8 @@ async function pathExists(target: string): Promise<boolean> {
 }
 
 export class LocalVfs {
-  /** Serializes the check-and-rename critical section within this filesystem. */
-  private renameTail: Promise<void> = Promise.resolve();
+  /** Serializes conditional writes/appends and no-overwrite renames. */
+  private mutationTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly root: string) {}
 
@@ -125,9 +125,13 @@ export class LocalVfs {
       case "vfs.read":
         return this.read(wire, target, request.offset, request.length);
       case "vfs.write":
-        return this.write(wire, target, request.dataB64);
+        return this.withMutationLock(() =>
+          this.write(wire, target, request.dataB64, request.expectedSizeBytes),
+        );
       case "vfs.append":
-        return this.append(wire, target, request.dataB64);
+        return this.withMutationLock(() =>
+          this.append(wire, target, request.dataB64, request.expectedSizeBytes),
+        );
       case "vfs.delete":
         return this.delete(wire, target, request.recursive === true);
       case "vfs.mkdir":
@@ -306,6 +310,7 @@ export class LocalVfs {
     wire: string,
     target: string,
     dataB64: string,
+    expectedSizeBytes: number | undefined,
   ): Promise<VfsResponse> {
     const tooLarge = error(
       "vfs_too_large",
@@ -321,6 +326,26 @@ export class LocalVfs {
     if (bytes.byteLength > VFS_MAX_WRITE_BYTES) return tooLarge;
     if (wire === "/")
       return error("vfs_path_refused", "cannot write to the Files root itself");
+    if (expectedSizeBytes !== undefined) {
+      let current: import("node:fs").Stats;
+      try {
+        current = await fs.lstat(target);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          return error(
+            "vfs_conflict",
+            `${wire} no longer has the expected size ${expectedSizeBytes}: it is missing`,
+          );
+        }
+        return ioError(`checking ${wire} before writing`, err);
+      }
+      if (!current.isFile() || current.size !== expectedSizeBytes) {
+        return error(
+          "vfs_conflict",
+          `${wire} no longer has the expected size ${expectedSizeBytes}`,
+        );
+      }
+    }
     const parent = path.dirname(target);
     if (!(await isDirectory(parent))) {
       return error(
@@ -348,6 +373,7 @@ export class LocalVfs {
     wire: string,
     target: string,
     dataB64: string,
+    expectedSizeBytes: number | undefined,
   ): Promise<VfsResponse> {
     const tooLarge = error(
       "vfs_too_large",
@@ -371,6 +397,12 @@ export class LocalVfs {
     }
     if (before.isDirectory())
       return error("vfs_is_a_directory", `${wire} is a directory`);
+    if (expectedSizeBytes !== undefined && before.size !== expectedSizeBytes) {
+      return error(
+        "vfs_conflict",
+        `${wire} no longer has the expected size ${expectedSizeBytes} (now ${before.size})`,
+      );
+    }
     try {
       await fs.appendFile(target, bytes);
     } catch (err) {
@@ -495,7 +527,7 @@ export class LocalVfs {
     fromTarget: string,
     to: string,
   ): Promise<VfsResponse> {
-    return this.withRenameLock(async () => {
+    return this.withMutationLock(async () => {
       const resolved = await this.resolve(to);
       if (typeof resolved === "string")
         return error("vfs_path_refused", resolved);
@@ -536,13 +568,13 @@ export class LocalVfs {
     });
   }
 
-  private async withRenameLock<T>(operation: () => Promise<T>): Promise<T> {
-    const previous = this.renameTail;
+  private async withMutationLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationTail;
     let release = (): void => undefined;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    this.renameTail = previous.then(() => gate);
+    this.mutationTail = previous.then(() => gate);
     await previous;
     try {
       return await operation();

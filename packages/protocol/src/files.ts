@@ -348,8 +348,20 @@ export const vfsRequestSchema = z.discriminatedUnion("t", [
   z.object({ t: z.literal("vfs.list"), path: z.string().max(4096) }),
   z.object({ t: z.literal("vfs.stat"), path: z.string().max(4096) }),
   z.object({ t: z.literal("vfs.read"), path: z.string().max(4096), offset: z.number().int().nonnegative(), length: z.number().int().positive().max(64 * 1024 * 1024) }),
-  z.object({ t: z.literal("vfs.write"), path: z.string().max(4096), dataB64: z.string() }),
-  z.object({ t: z.literal("vfs.append"), path: z.string().max(4096), dataB64: z.string() }),
+  z.object({
+    t: z.literal("vfs.write"),
+    path: z.string().max(4096),
+    dataB64: z.string(),
+    /** Optimistic concurrency: overwrite only when the current file has this size. */
+    expectedSizeBytes: z.number().int().nonnegative().optional(),
+  }),
+  z.object({
+    t: z.literal("vfs.append"),
+    path: z.string().max(4096),
+    dataB64: z.string(),
+    /** Optimistic concurrency: append only when the current file has this size. */
+    expectedSizeBytes: z.number().int().nonnegative().optional(),
+  }),
   z.object({ t: z.literal("vfs.delete"), path: z.string().max(4096), recursive: z.boolean().optional() }),
   z.object({ t: z.literal("vfs.mkdir"), path: z.string().max(4096) }),
   z.object({ t: z.literal("vfs.tree"), path: z.string().max(4096) }),

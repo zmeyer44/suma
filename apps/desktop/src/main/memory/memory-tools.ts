@@ -51,13 +51,13 @@ export function createMemoryTools(memory: MemoryService): ToolSet {
 
     search_memory: tool({
       description:
-        "Search your permanent memory of the user. The query is a case-insensitive regular expression (plain words work) matched against full memory lines of the form \"#id YYYY-MM-DD text\" — so ids and dates match too. Use it when the answer may live in a summarized (#lo-hi) part of your memory context, or before saving something that might already be known.",
+        "Search your permanent memory of the user. The query is a case-insensitive word or phrase matched against full memory lines of the form \"#id YYYY-MM-DD text\" — so ids and dates match too. Use it when the answer may live in a summarized (#lo-hi) part of your memory context, or before saving something that might already be known.",
       inputSchema: jsonSchema<{ query: string }>({
         type: "object",
         properties: {
           query: {
             type: "string",
-            description: "Regex or plain words, e.g. \"birthday\" or \"allerg\".",
+            description: "A word or phrase, e.g. \"birthday\" or \"shellfish allergy\".",
           },
         },
         required: ["query"],

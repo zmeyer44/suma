@@ -11,14 +11,14 @@
  *                a rebuildable cache — corrupt entries are dropped and the
  *                next compressions rebuild them
  *
- * Mutations are serialized through an in-process queue. There is no
- * cross-process lock (the VFS has none): ids are re-read under the queue, a
- * lost race on a summary is detected by the dense-prefix position check and
- * reported as "already settled" — the same benign outcome OptMem gives
- * parallel sessions.
+ * Mutations are serialized through an in-process queue and use conditional
+ * VFS writes/appends keyed to the file size. Competing devices therefore
+ * cannot claim the same log id or dense summary slot: the loser re-reads and
+ * retries, or reports an already-settled summary.
  */
 
 import { Buffer } from "node:buffer";
+import { randomUUID } from "node:crypto";
 import type { VfsRequest, VfsResponse } from "@suma/protocol";
 import {
   decodeRecord,
@@ -55,6 +55,9 @@ const SCAN_RECORDS_PER_READ = 4096;
  *  place — at 8 MiB that is ~26k memories with a torn tail, effectively
  *  unreachable; refuse rather than guess. */
 const MAX_REPAIR_BYTES = 8 * 1024 * 1024;
+/** A competing device should win quickly; retry a bounded number of times so
+ *  a pathological writer cannot hold an assistant turn forever. */
+const MAX_CONFLICT_RETRIES = 8;
 
 function treeLevelPath(size: number): string {
   return `${TREE_DIR}/${size}`;
@@ -62,6 +65,10 @@ function treeLevelPath(size: number): string {
 
 function isNotFound(resp: VfsResponse): boolean {
   return resp.t === "error" && resp.code === "vfs_not_found";
+}
+
+function isConflict(resp: VfsResponse): boolean {
+  return resp.t === "error" && resp.code === "vfs_conflict";
 }
 
 function unwrap<T extends VfsResponse["t"]>(
@@ -76,7 +83,6 @@ function unwrap<T extends VfsResponse["t"]>(
 
 export class MemoryStore {
   private queue: Promise<unknown> = Promise.resolve();
-  private initialized = false;
 
   constructor(private readonly link: () => MemoryVfsLink | null) {}
 
@@ -105,22 +111,48 @@ export class MemoryStore {
     return run;
   }
 
-  /** The dir and an (empty) log exist after this. mkdir is recursive and
-   *  cheap; the flag only skips the stat/write round trips. */
-  private async ensureInit(): Promise<void> {
-    if (this.initialized) return;
-    unwrap(await this.call({ t: "vfs.mkdir", path: TREE_DIR }), "vfs.created", "creating memory");
-    const stat = await this.call({ t: "vfs.stat", path: LOG_PATH });
-    if (isNotFound(stat)) {
-      unwrap(
-        await this.call({ t: "vfs.write", path: LOG_PATH, dataB64: "" }),
-        "vfs.wrote",
-        "creating memory log",
-      );
-    } else {
-      unwrap(stat, "vfs.info", "checking memory log");
+  /** Atomically create an empty file without replacing one another device
+   *  created meanwhile. vfs.rename is a no-overwrite operation. */
+  private async ensureFile(path: string, doing: string): Promise<void> {
+    const stat = await this.call({ t: "vfs.stat", path });
+    if (!isNotFound(stat)) {
+      const info = unwrap(stat, "vfs.info", `checking ${path}`);
+      if (info.entry.kind !== "file") {
+        throw new Error(`${doing}: ${path} is not a file`);
+      }
+      return;
     }
-    this.initialized = true;
+
+    const temporary = `${path}.init-${randomUUID()}`;
+    unwrap(
+      await this.call({ t: "vfs.write", path: temporary, dataB64: "" }),
+      "vfs.wrote",
+      doing,
+    );
+    const renamed = await this.call({
+      t: "vfs.rename",
+      from: temporary,
+      to: path,
+    });
+    if (renamed.t === "error" && renamed.code === "vfs_already_exists") {
+      await this.call({ t: "vfs.delete", path: temporary }).catch(() => null);
+      return;
+    }
+    if (renamed.t === "error") {
+      await this.call({ t: "vfs.delete", path: temporary }).catch(() => null);
+    }
+    unwrap(renamed, "vfs.renamed", doing);
+  }
+
+  /** Revalidated on every mutation because SwitchableAgentLink can move this
+   *  store from the simulator to a cloud/relay filesystem without rebinding. */
+  private async ensureInit(): Promise<void> {
+    unwrap(
+      await this.call({ t: "vfs.mkdir", path: TREE_DIR }),
+      "vfs.created",
+      "creating memory",
+    );
+    await this.ensureFile(LOG_PATH, "creating memory log");
   }
 
   private async fileSize(path: string): Promise<number | null> {
@@ -153,20 +185,36 @@ export class MemoryStore {
 
   /** Truncate a torn trailing record (there is no vfs truncate — the aligned
    *  prefix is read back and rewritten whole, atomic on the other side). */
-  private async repairIfTorn(path: string, recordBytes: number): Promise<number> {
-    const size = (await this.fileSize(path)) ?? 0;
-    const aligned = size - (size % recordBytes);
-    if (aligned === size) return size;
-    if (size > MAX_REPAIR_BYTES) {
-      throw new Error(`memory file ${path} is damaged (${size} bytes, misaligned)`);
+  private async repairIfTorn(
+    path: string,
+    recordBytes: number,
+  ): Promise<number> {
+    for (let attempt = 0; attempt < MAX_CONFLICT_RETRIES; attempt++) {
+      const size = (await this.fileSize(path)) ?? 0;
+      const aligned = size - (size % recordBytes);
+      if (aligned === size) return size;
+      if (size > MAX_REPAIR_BYTES) {
+        throw new Error(
+          `memory file ${path} is damaged (${size} bytes, misaligned)`,
+        );
+      }
+      const keep =
+        aligned === 0
+          ? Buffer.alloc(0)
+          : await this.readRange(path, 0, aligned);
+      const response = await this.call({
+        t: "vfs.write",
+        path,
+        dataB64: keep.toString("base64"),
+        expectedSizeBytes: size,
+      });
+      if (isConflict(response)) continue;
+      unwrap(response, "vfs.wrote", `repairing ${path}`);
+      return aligned;
     }
-    const keep = aligned === 0 ? Buffer.alloc(0) : await this.readRange(path, 0, aligned);
-    unwrap(
-      await this.call({ t: "vfs.write", path, dataB64: keep.toString("base64") }),
-      "vfs.wrote",
-      `repairing ${path}`,
+    throw new Error(
+      `memory file ${path} kept changing while it was being repaired`,
     );
-    return aligned;
   }
 
   /* -------------------------------- log ---------------------------------- */
@@ -176,23 +224,32 @@ export class MemoryStore {
     return size === null ? 0 : Math.floor(size / LOG_RECORD_BYTES);
   }
 
-  /** Append memories; ids are assigned from the freshly re-read length so
-   *  two queued notes never collide. Returns the first new id. */
+  /** Append memories; ids are assigned from the freshly re-read length and
+   *  claimed with a conditional append. Returns the first new id. */
   async append(texts: string[], date: string): Promise<number> {
     return this.locked(async () => {
-      await this.ensureInit();
-      const bytes = await this.repairIfTorn(LOG_PATH, LOG_RECORD_BYTES);
-      const base = Math.floor(bytes / LOG_RECORD_BYTES);
-      const records = texts.map((text, i) =>
-        padRecord(formatEntry({ id: base + i, date, text }), LOG_RECORD_BYTES),
-      );
-      const payload = Buffer.concat(records);
-      unwrap(
-        await this.call({ t: "vfs.append", path: LOG_PATH, dataB64: payload.toString("base64") }),
-        "vfs.wrote",
-        "saving memory",
-      );
-      return base;
+      for (let attempt = 0; attempt < MAX_CONFLICT_RETRIES; attempt++) {
+        await this.ensureInit();
+        const bytes = await this.repairIfTorn(LOG_PATH, LOG_RECORD_BYTES);
+        const base = Math.floor(bytes / LOG_RECORD_BYTES);
+        const records = texts.map((text, i) =>
+          padRecord(
+            formatEntry({ id: base + i, date, text }),
+            LOG_RECORD_BYTES,
+          ),
+        );
+        const payload = Buffer.concat(records);
+        const response = await this.call({
+          t: "vfs.append",
+          path: LOG_PATH,
+          dataB64: payload.toString("base64"),
+          expectedSizeBytes: bytes,
+        });
+        if (isConflict(response)) continue;
+        unwrap(response, "vfs.wrote", "saving memory");
+        return base;
+      }
+      throw new Error("memory changed too often while saving — try again");
     });
   }
 
@@ -286,25 +343,28 @@ export class MemoryStore {
     const size = hi - lo;
     const path = treeLevelPath(size);
     return this.locked(async () => {
-      await this.ensureInit();
-      const bytes = await this.repairIfTorn(path, TREE_RECORD_BYTES);
-      const count = Math.floor(bytes / TREE_RECORD_BYTES);
-      if (count !== Math.floor(lo / size)) return false;
-      const record = Buffer.from(padRecord(text, TREE_RECORD_BYTES)).toString("base64");
-      if (count === 0) {
-        unwrap(
-          await this.call({ t: "vfs.write", path, dataB64: record }),
-          "vfs.wrote",
-          "saving summary",
-        );
-      } else {
-        unwrap(
-          await this.call({ t: "vfs.append", path, dataB64: record }),
-          "vfs.wrote",
-          "saving summary",
-        );
+      const record = Buffer.from(padRecord(text, TREE_RECORD_BYTES)).toString(
+        "base64",
+      );
+      for (let attempt = 0; attempt < MAX_CONFLICT_RETRIES; attempt++) {
+        await this.ensureInit();
+        await this.ensureFile(path, "creating summary level");
+        const bytes = await this.repairIfTorn(path, TREE_RECORD_BYTES);
+        const count = Math.floor(bytes / TREE_RECORD_BYTES);
+        if (count !== Math.floor(lo / size)) return false;
+        const response = await this.call({
+          t: "vfs.append",
+          path,
+          dataB64: record,
+          expectedSizeBytes: bytes,
+        });
+        if (isConflict(response)) continue;
+        unwrap(response, "vfs.wrote", "saving summary");
+        return true;
       }
-      return true;
+      throw new Error(
+        "memory changed too often while saving a summary — try again",
+      );
     });
   }
 
@@ -316,19 +376,38 @@ export class MemoryStore {
     await this.locked(async () => {
       for (let size = hi - lo; size <= logLen; size *= 2) {
         const path = treeLevelPath(size);
-        const bytes = await this.fileSize(path);
-        if (bytes === null) continue;
-        const keepRecords = Math.floor(lo / size);
-        if (Math.floor(bytes / TREE_RECORD_BYTES) <= keepRecords) continue;
-        const keep =
-          keepRecords === 0
-            ? Buffer.alloc(0)
-            : await this.readRange(path, 0, keepRecords * TREE_RECORD_BYTES);
-        unwrap(
-          await this.call({ t: "vfs.write", path, dataB64: keep.toString("base64") }),
-          "vfs.wrote",
-          "dropping summaries",
-        );
+        let settled = false;
+        for (let attempt = 0; attempt < MAX_CONFLICT_RETRIES; attempt++) {
+          const bytes = await this.fileSize(path);
+          if (bytes === null) {
+            settled = true;
+            break;
+          }
+          const keepRecords = Math.floor(lo / size);
+          if (Math.floor(bytes / TREE_RECORD_BYTES) <= keepRecords) {
+            settled = true;
+            break;
+          }
+          const keep =
+            keepRecords === 0
+              ? Buffer.alloc(0)
+              : await this.readRange(path, 0, keepRecords * TREE_RECORD_BYTES);
+          const response = await this.call({
+            t: "vfs.write",
+            path,
+            dataB64: keep.toString("base64"),
+            expectedSizeBytes: bytes,
+          });
+          if (isConflict(response)) continue;
+          unwrap(response, "vfs.wrote", "dropping summaries");
+          settled = true;
+          break;
+        }
+        if (!settled) {
+          throw new Error(
+            `memory changed too often while dropping summaries from ${path}`,
+          );
+        }
       }
     });
   }

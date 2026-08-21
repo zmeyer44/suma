@@ -90,8 +90,8 @@ pub const VFS_TREE_SKIPPED_DIRS: &[&str] = &[
 ];
 pub const VFS_TREE_SKIPPED_FILES: &[&str] = &[".DS_Store"];
 
-/** Keeps the no-overwrite check atomic on platforms without renameat2. */
-static VFS_RENAME_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+/** Keeps conditional mutations and no-overwrite renames atomic in one agent. */
+static VFS_MUTATION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 /* ------------------------------------------------------------------ *
  * Wire shapes
@@ -112,9 +112,19 @@ pub enum VfsRequest {
         length: u64,
     },
     #[serde(rename = "vfs.write", rename_all = "camelCase")]
-    Write { path: String, data_b64: String },
+    Write {
+        path: String,
+        data_b64: String,
+        #[serde(default)]
+        expected_size_bytes: Option<u64>,
+    },
     #[serde(rename = "vfs.append", rename_all = "camelCase")]
-    Append { path: String, data_b64: String },
+    Append {
+        path: String,
+        data_b64: String,
+        #[serde(default)]
+        expected_size_bytes: Option<u64>,
+    },
     #[serde(rename = "vfs.delete")]
     Delete {
         path: String,
@@ -440,8 +450,16 @@ pub async fn handle(
         VfsRequest::List { .. } => list(&path, &target).await,
         VfsRequest::Stat { .. } => stat(&path, &target).await,
         VfsRequest::Read { offset, length, .. } => read(&path, &target, offset, length).await,
-        VfsRequest::Write { data_b64, .. } => write(&path, &target, &data_b64).await,
-        VfsRequest::Append { data_b64, .. } => append(&path, &target, &data_b64).await,
+        VfsRequest::Write {
+            data_b64,
+            expected_size_bytes,
+            ..
+        } => write(&path, &target, &data_b64, expected_size_bytes).await,
+        VfsRequest::Append {
+            data_b64,
+            expected_size_bytes,
+            ..
+        } => append(&path, &target, &data_b64, expected_size_bytes).await,
         VfsRequest::Delete { recursive, .. } => delete(root, &path, &target, recursive).await,
         VfsRequest::Mkdir { .. } => mkdir(&path, &target).await,
         VfsRequest::Tree { .. } => tree(&path, &target).await,
@@ -585,7 +603,12 @@ async fn read(path: &str, target: &Path, offset: u64, length: u64) -> VfsRespons
     }
 }
 
-async fn write(path: &str, target: &Path, data_b64: &str) -> VfsResponse {
+async fn write(
+    path: &str,
+    target: &Path,
+    data_b64: &str,
+    expected_size_bytes: Option<u64>,
+) -> VfsResponse {
     // Reject before decoding: base64 is 4/3 of its payload, so the length of
     // the text bounds the bytes without allocating them.
     if data_b64.len() / 4 * 3 > VFS_MAX_WRITE_BYTES {
@@ -608,6 +631,28 @@ async fn write(path: &str, target: &Path, data_b64: &str) -> VfsResponse {
             "vfs_too_large",
             format!("a single write is limited to {VFS_MAX_WRITE_BYTES} bytes"),
         );
+    }
+    let _mutation_guard = VFS_MUTATION_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    if let Some(expected) = expected_size_bytes {
+        let metadata = match tokio::fs::symlink_metadata(target).await {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return error(
+                    "vfs_conflict",
+                    format!("{path} no longer has the expected size {expected}: it is missing"),
+                )
+            }
+            Err(err) => return io_error(&format!("checking {path} before writing"), err),
+        };
+        if !metadata.is_file() || metadata.len() != expected {
+            return error(
+                "vfs_conflict",
+                format!("{path} no longer has the expected size {expected}"),
+            );
+        }
     }
     let Some(parent) = target.parent() else {
         return error("vfs_path_refused", "cannot write to the Files root itself");
@@ -698,7 +743,12 @@ async fn mkdir(path: &str, target: &Path) -> VfsResponse {
     }
 }
 
-async fn append(path: &str, target: &Path, data_b64: &str) -> VfsResponse {
+async fn append(
+    path: &str,
+    target: &Path,
+    data_b64: &str,
+    expected_size_bytes: Option<u64>,
+) -> VfsResponse {
     if data_b64.len() / 4 * 3 > VFS_MAX_WRITE_BYTES {
         return error(
             "vfs_too_large",
@@ -720,6 +770,10 @@ async fn append(path: &str, target: &Path, data_b64: &str) -> VfsResponse {
             format!("a single append is limited to {VFS_MAX_WRITE_BYTES} bytes"),
         );
     }
+    let _mutation_guard = VFS_MUTATION_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     // Append extends a file that already exists — creating one is `vfs.write`'s
     // job, so a typo'd path fails loudly instead of starting a stray file.
     let metadata = match tokio::fs::symlink_metadata(target).await {
@@ -728,6 +782,17 @@ async fn append(path: &str, target: &Path, data_b64: &str) -> VfsResponse {
     };
     if metadata.is_dir() {
         return error("vfs_is_a_directory", format!("{path} is a directory"));
+    }
+    if let Some(expected) = expected_size_bytes {
+        if metadata.len() != expected {
+            return error(
+                "vfs_conflict",
+                format!(
+                    "{path} no longer has the expected size {expected} (now {})",
+                    metadata.len()
+                ),
+            );
+        }
     }
     let mut file = match tokio::fs::OpenOptions::new()
         .append(true)
@@ -835,7 +900,7 @@ async fn rename(root: &VfsRoot, from: &str, from_target: &Path, to: &str) -> Vfs
     // `rename(2)` replaces an existing destination. Serialize the fallback
     // check+rename path, and on Linux additionally ask the kernel for an
     // atomic no-replace operation so another process cannot win the race.
-    let _rename_guard = VFS_RENAME_LOCK
+    let _rename_guard = VFS_MUTATION_LOCK
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
         .await;
@@ -1076,6 +1141,7 @@ mod tests {
                 VfsRequest::Write {
                     path: path.into(),
                     data_b64: b64::encode(b"clobbered"),
+                    expected_size_bytes: None,
                 },
             )
             .await;
@@ -1128,6 +1194,7 @@ mod tests {
             VfsRequest::Write {
                 path: "/escape/planted.txt".into(),
                 data_b64: b64::encode(b"x"),
+                expected_size_bytes: None,
             },
         )
         .await;
@@ -1218,6 +1285,7 @@ mod tests {
             VfsRequest::Write {
                 path: "/notes/2026/a.txt".into(),
                 data_b64: b64::encode(&body),
+                expected_size_bytes: None,
             },
         )
         .await;
@@ -1366,6 +1434,7 @@ mod tests {
             VfsRequest::Write {
                 path: "/x.txt".into(),
                 data_b64: b64::encode(b"x"),
+                expected_size_bytes: None,
             },
             VfsRequest::Delete {
                 path: "/x.txt".into(),
@@ -1462,6 +1531,7 @@ mod tests {
             VfsRequest::Write {
                 path: "/big.bin".into(),
                 data_b64: "A".repeat((VFS_MAX_WRITE_BYTES + 1024) / 3 * 4),
+                expected_size_bytes: None,
             },
         )
         .await;
@@ -1479,6 +1549,7 @@ mod tests {
             VfsRequest::Write {
                 path: "/nope/a.txt".into(),
                 data_b64: b64::encode(b"x"),
+                expected_size_bytes: None,
             },
         )
         .await;
@@ -1503,7 +1574,8 @@ mod tests {
             write,
             VfsRequest::Write {
                 path: "/a.txt".into(),
-                data_b64: "aGVsbG8=".into()
+                data_b64: "aGVsbG8=".into(),
+                expected_size_bytes: None,
             }
         );
         let read: VfsRequest =
@@ -1921,6 +1993,7 @@ mod tests {
             VfsRequest::Append {
                 path: "/log.txt".into(),
                 data_b64: b64::encode(b"one"),
+                expected_size_bytes: None,
             },
         )
         .await;
@@ -1936,6 +2009,7 @@ mod tests {
             VfsRequest::Append {
                 path: "/log.txt".into(),
                 data_b64: b64::encode(b" two"),
+                expected_size_bytes: None,
             },
         )
         .await;
@@ -1951,6 +2025,64 @@ mod tests {
             "one two"
         );
 
+        let stale_write = run(
+            &root,
+            &c,
+            VfsRequest::Write {
+                path: "/log.txt".into(),
+                data_b64: b64::encode(b"replacement"),
+                expected_size_bytes: Some(3),
+            },
+        )
+        .await;
+        assert!(
+            matches!(&stale_write, VfsResponse::Error { code, .. } if code == "vfs_conflict"),
+            "{stale_write:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("log.txt")).unwrap(),
+            "one two"
+        );
+
+        // A size precondition turns allocation into one atomic claim across
+        // concurrent client connections.
+        let (first, second) = tokio::join!(
+            run(
+                &root,
+                &c,
+                VfsRequest::Append {
+                    path: "/log.txt".into(),
+                    data_b64: b64::encode(b" A"),
+                    expected_size_bytes: Some(7),
+                },
+            ),
+            run(
+                &root,
+                &c,
+                VfsRequest::Append {
+                    path: "/log.txt".into(),
+                    data_b64: b64::encode(b" B"),
+                    expected_size_bytes: Some(7),
+                },
+            ),
+        );
+        let responses = [first, second];
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|response| matches!(response, VfsResponse::Wrote { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|response| matches!(response, VfsResponse::Error { code, .. } if code == "vfs_conflict"))
+                .count(),
+            1
+        );
+        assert_eq!(std::fs::read(root.path().join("log.txt")).unwrap().len(), 9);
+
         // A directory is not appendable, and fs.write is required.
         std::fs::create_dir_all(root.path().join("d")).unwrap();
         let resp = run(
@@ -1959,6 +2091,7 @@ mod tests {
             VfsRequest::Append {
                 path: "/d".into(),
                 data_b64: b64::encode(b"x"),
+                expected_size_bytes: None,
             },
         )
         .await;
@@ -1984,13 +2117,16 @@ mod tests {
                 to: "/b".into()
             }
         );
-        let append: VfsRequest =
-            serde_json::from_str(r#"{"t":"vfs.append","path":"/a","dataB64":"aGk="}"#).unwrap();
+        let append: VfsRequest = serde_json::from_str(
+            r#"{"t":"vfs.append","path":"/a","dataB64":"aGk=","expectedSizeBytes":7}"#,
+        )
+        .unwrap();
         assert_eq!(
             append,
             VfsRequest::Append {
                 path: "/a".into(),
-                data_b64: "aGk=".into()
+                data_b64: "aGk=".into(),
+                expected_size_bytes: Some(7),
             }
         );
         // The old delete shape (no flag) still parses, defaulting to false.

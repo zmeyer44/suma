@@ -195,6 +195,47 @@ describe("LocalVfs operations", () => {
     );
   });
 
+  it("conditionally writes and allows only one concurrent append at a size", async () => {
+    const { vfs, root } = tempVfs();
+    await vfs.handle({ t: "vfs.write", path: "/log", dataB64: b64("one") });
+
+    expectError(
+      await vfs.handle({
+        t: "vfs.write",
+        path: "/log",
+        dataB64: b64("wrong"),
+        expectedSizeBytes: 2,
+      }),
+      "vfs_conflict",
+    );
+    const responses = await Promise.all([
+      vfs.handle({
+        t: "vfs.append",
+        path: "/log",
+        dataB64: b64(" A"),
+        expectedSizeBytes: 3,
+      }),
+      vfs.handle({
+        t: "vfs.append",
+        path: "/log",
+        dataB64: b64(" B"),
+        expectedSizeBytes: 3,
+      }),
+    ]);
+    expect(
+      responses.filter((response) => response.t === "vfs.wrote"),
+    ).toHaveLength(1);
+    expect(
+      responses.filter(
+        (response) =>
+          response.t === "error" && response.code === "vfs_conflict",
+      ),
+    ).toHaveLength(1);
+    expect(await fs.readFile(path.join(root, "log"), "utf8")).toMatch(
+      /^one [AB]$/,
+    );
+  });
+
   it("delete refuses a populated directory unless recursive", async () => {
     const { vfs, root } = tempVfs();
     await fs.mkdir(path.join(root, "sub/deep"), { recursive: true });

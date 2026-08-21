@@ -8,6 +8,7 @@ import {
   compileRecallPattern,
   formatBlock,
   LOG_RECORD_BYTES,
+  TREE_RECORD_BYTES,
 } from "../src/main/memory/memory-core";
 import { MemoryService } from "../src/main/memory/memory-service";
 import { MemoryStore } from "../src/main/memory/memory-store";
@@ -48,10 +49,56 @@ describe("MemoryStore over the VFS", () => {
 
   it("keeps queued appends collision-free", async () => {
     const ids = await Promise.all(
-      Array.from({ length: 16 }, (_, i) => store.append([`note ${i}`], "2026-08-21")),
+      Array.from({ length: 16 }, (_, i) =>
+        store.append([`note ${i}`], "2026-08-21"),
+      ),
     );
-    expect([...ids].sort((a, b) => a - b)).toEqual(Array.from({ length: 16 }, (_, i) => i));
+    expect([...ids].sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 16 }, (_, i) => i),
+    );
     expect(await store.logLen()).toBe(16);
+  });
+
+  it("allocates log ids and summary slots atomically across store instances", async () => {
+    const rival = new MemoryStore(() => link);
+    const ids = await Promise.all([
+      store.append(["from one device"], "2026-08-21"),
+      rival.append(["from another device"], "2026-08-21"),
+    ]);
+    expect(ids.sort((a, b) => a - b)).toEqual([0, 1]);
+    expect((await store.logSlice(0, 2)).map((entry) => entry.id)).toEqual([
+      0, 1,
+    ]);
+
+    await store.append(["third", "fourth"], "2026-08-21");
+    expect(await store.putSummary(0, 2, "first half")).toBe(true);
+    const settled = await Promise.all([
+      store.putSummary(2, 4, "second half A"),
+      rival.putSummary(2, 4, "second half B"),
+    ]);
+    expect(settled.filter(Boolean)).toHaveLength(1);
+    expect(statSync(treePath(2)).size).toBe(2 * TREE_RECORD_BYTES);
+    expect(await store.summary(2, 4)).toMatch(/^second half [AB]$/);
+  });
+
+  it("reinitializes when the backing VFS target changes", async () => {
+    const otherRoot = await mkdtemp(
+      path.join(os.tmpdir(), "suma-memory-switch-"),
+    );
+    const otherLink = new SimAgent({ root: () => otherRoot });
+    let active: SimAgent = link;
+    const switching = new MemoryStore(() => active);
+    try {
+      expect(await switching.append(["local"], "2026-08-21")).toBe(0);
+      active = otherLink;
+      expect(await switching.append(["remote"], "2026-08-21")).toBe(0);
+      expect(
+        statSync(path.join(otherRoot, ".suma", "memory", "LOG.txt")).size,
+      ).toBe(LOG_RECORD_BYTES);
+    } finally {
+      otherLink.stop();
+      await rm(otherRoot, { recursive: true, force: true });
+    }
   });
 
   it("repairs a torn trailing record before appending", async () => {
@@ -118,19 +165,30 @@ describe("MemoryStore over the VFS", () => {
 
   it("recalls by text, id, and date, newest first under the cap", async () => {
     await store.append(
-      ["loves sushi", "daughter Maya born", "allergic to shellfish", "moved to Lisbon"],
+      [
+        "loves sushi",
+        "daughter Maya born",
+        "allergic to shellfish",
+        "moved to Lisbon",
+      ],
       "2026-08-21",
     );
-    const byText = await store.scanMatches(compileRecallPattern("shellfish"), 6000);
+    const byText = await store.scanMatches(
+      compileRecallPattern("shellfish"),
+      6000,
+    );
     expect(byText.total).toBe(1);
     expect(byText.lines[0]).toContain("#2 2026-08-21 allergic to shellfish");
-    const byId = await store.scanMatches(compileRecallPattern("^#1 "), 6000);
+    const byId = await store.scanMatches(compileRecallPattern("#1 "), 6000);
     expect(byId.total).toBe(1);
     expect(byId.lines[0]).toContain("Maya");
-    const byDate = await store.scanMatches(compileRecallPattern("2026-08-21"), 6000);
+    const byDate = await store.scanMatches(
+      compileRecallPattern("2026-08-21"),
+      6000,
+    );
     expect(byDate.total).toBe(4);
     // The cap keeps the NEWEST matches.
-    const capped = await store.scanMatches(compileRecallPattern("."), 80);
+    const capped = await store.scanMatches(compileRecallPattern("2026-08-21"), 80);
     expect(capped.total).toBe(4);
     expect(capped.lines.length).toBeLessThan(4);
     expect(capped.lines[capped.lines.length - 1]).toContain("Lisbon");
@@ -143,7 +201,10 @@ describe("MemoryService", () => {
       const result = await service.note(`note ${i}`);
       expect(result.id).toBe(i);
       if (result.pending !== null) {
-        await service.compress(result.pending.block, `sum ${result.pending.block}`);
+        await service.compress(
+          result.pending.block,
+          `sum ${result.pending.block}`,
+        );
       }
     }
     // #0-1 completed at the second note and was paid.
@@ -153,14 +214,19 @@ describe("MemoryService", () => {
 
   it("rejects an out-of-order compression naming the right block", async () => {
     await store.append(["a", "b", "c", "d"], "2026-08-21");
-    await expect(service.compress("2-3", "cd")).rejects.toThrow(/next owed is "0-1"/);
+    await expect(service.compress("2-3", "cd")).rejects.toThrow(
+      /next owed is "0-1"/,
+    );
     const done = await service.compress("0-1", "ab");
     expect(done.message).toContain("saved");
     expect(done.next?.block).toBe("2-3");
   });
 
   it("expands summarized blocks down to raw memories", async () => {
-    await store.append(Array.from({ length: 4 }, (_, i) => `note ${i}`), "2026-08-21");
+    await store.append(
+      Array.from({ length: 4 }, (_, i) => `note ${i}`),
+      "2026-08-21",
+    );
     const raw = await service.expand("0-3");
     expect(raw).toEqual([
       "#0 2026-08-21 note 0",
@@ -173,7 +239,10 @@ describe("MemoryService", () => {
 
   it("builds a wake context with instructions, lines, and a pending note", async () => {
     expect(await service.wakeContext()).toContain("no saved memories");
-    await store.append(["likes tea", "cat named Möbius", "lives in Lisbon"], "2026-08-21");
+    await store.append(
+      ["likes tea", "cat named Möbius", "lives in Lisbon"],
+      "2026-08-21",
+    );
     const context = await service.wakeContext();
     expect(context).toContain("## Long-term memory");
     expect(context).toContain("#1 2026-08-21 cat named Möbius");

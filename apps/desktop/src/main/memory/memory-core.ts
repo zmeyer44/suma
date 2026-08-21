@@ -306,31 +306,83 @@ export async function renderWakeLines(
   source: WakeSource,
   budget = WAKE_LINES,
 ): Promise<string[]> {
+  const blocks = cover(T, budget);
   const lines: string[] = [];
   const state = { emitted: 0 };
+  const prefetchedRawIds = new Set<number>();
+  const rawEntries = new Map<number, MemoryEntry>();
+  const summaryPromises = new Map<string, Promise<string | null>>();
   const emit = (line: string): void => {
     lines.push(line);
     state.emitted += 1;
   };
+  const summaryFor = (lo: number, hi: number): Promise<string | null> => {
+    const key = `${lo}-${hi}`;
+    let pending = summaryPromises.get(key);
+    if (pending === undefined) {
+      pending = source.summary(lo, hi);
+      summaryPromises.set(key, pending);
+    }
+    return pending;
+  };
+
+  // Prime every top-level summary concurrently and read adjacent verbatim
+  // blocks as one range. TcpAgentClient pipelines these requests on its FIFO
+  // channel, eliminating a network round trip per wake line while preserving
+  // the deterministic, sequential rendering below.
+  const prefetches: Array<Promise<unknown>> = [];
+  let singletonRun: Block | null = null;
+  const flushSingletonRun = (): void => {
+    if (singletonRun === null) return;
+    const { lo, hi } = singletonRun;
+    for (let id = lo; id < hi; id++) prefetchedRawIds.add(id);
+    prefetches.push(
+      source.logSlice(lo, hi).then((entries) => {
+        for (const entry of entries) rawEntries.set(entry.id, entry);
+      }),
+    );
+    singletonRun = null;
+  };
+  for (const block of blocks) {
+    if (block.hi - block.lo === 1) {
+      if (singletonRun !== null && singletonRun.hi === block.lo) {
+        singletonRun.hi = block.hi;
+      } else {
+        flushSingletonRun();
+        singletonRun = { ...block };
+      }
+      continue;
+    }
+    flushSingletonRun();
+    prefetches.push(summaryFor(block.lo, block.hi));
+  }
+  flushSingletonRun();
+  await Promise.all(prefetches);
 
   async function render(lo: number, hi: number): Promise<void> {
     const size = hi - lo;
     if (size === 1) {
-      const [entry] = await source.logSlice(lo, hi);
+      const entry = prefetchedRawIds.has(lo)
+        ? rawEntries.get(lo)
+        : (await source.logSlice(lo, hi))[0];
       emit(entry === undefined ? `#${lo} (unreadable)` : formatEntry(entry));
       return;
     }
-    const summary = await source.summary(lo, hi);
+    const summary = await summaryFor(lo, hi);
     if (summary !== null) {
       emit(`#${formatBlock(lo, hi)} ${summary}`);
       return;
     }
     if (state.emitted + size <= WAKE_EXPANSION_CAP && size <= RAW_MAX) {
-      for (const entry of await source.logSlice(lo, hi)) emit(formatEntry(entry));
+      for (const entry of await source.logSlice(lo, hi))
+        emit(formatEntry(entry));
       return;
     }
     if (state.emitted + 2 <= WAKE_EXPANSION_CAP && size > RAW_MAX) {
       const mid = lo + size / 2;
+      // The halves are independent VFS reads; pipeline both before rendering
+      // them oldest-first.
+      await Promise.all([summaryFor(lo, mid), summaryFor(mid, hi)]);
       await render(lo, mid);
       await render(mid, hi);
       return;
@@ -338,19 +390,15 @@ export async function renderWakeLines(
     emit(`#${formatBlock(lo, hi)} (${size} memories, not compressed yet)`);
   }
 
-  for (const block of cover(T, budget)) await render(block.lo, block.hi);
+  for (const block of blocks) await render(block.lo, block.hi);
   return lines;
 }
 
 /* --------------------------------- recall --------------------------------- */
 
-/** The model's query, as a case-insensitive regex; a query that is not a
- *  valid regex is taken literally instead of erroring — models often pass
- *  plain words. */
+/** The model's query as a case-insensitive literal pattern. Recall runs in the
+ *  Electron main process, so model-controlled regular expressions are never
+ *  executed there: a catastrophic backtracking pattern could freeze the app. */
 export function compileRecallPattern(query: string): RegExp {
-  try {
-    return new RegExp(query, "iu");
-  } catch {
-    return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "iu");
-  }
+  return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "iu");
 }

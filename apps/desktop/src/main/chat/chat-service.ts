@@ -199,7 +199,9 @@ export class ChatService {
     try {
       const settings = this.settingsCache;
       const memory =
-        isToolGroupEnabled(settings, "memory") && this.deps.memory !== undefined
+        isToolGroupEnabled(settings, "memory") &&
+        this.deps.memory !== undefined &&
+        this.deps.memory.available()
           ? this.deps.memory
           : null;
       const tools = enabledAssistantTools(this.deps.browser, settings, memory);

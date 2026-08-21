@@ -34,12 +34,14 @@ describe("fixed-width records", () => {
   });
 
   it("refuses a line that overflows its slot", () => {
-    expect(() => padRecord("x".repeat(LOG_RECORD_BYTES), LOG_RECORD_BYTES)).toThrow(
-      /overflow/,
-    );
+    expect(() =>
+      padRecord("x".repeat(LOG_RECORD_BYTES), LOG_RECORD_BYTES),
+    ).toThrow(/overflow/);
     // Multi-byte characters count in BYTES: 140 é fit a 288-byte slot, 150 don't.
     expect(() => padRecord("é".repeat(140), TREE_RECORD_BYTES)).not.toThrow();
-    expect(() => padRecord("é".repeat(150), TREE_RECORD_BYTES)).toThrow(/overflow/);
+    expect(() => padRecord("é".repeat(150), TREE_RECORD_BYTES)).toThrow(
+      /overflow/,
+    );
   });
 
   it("reports invalid UTF-8 as null, blank as empty", () => {
@@ -49,7 +51,11 @@ describe("fixed-width records", () => {
   });
 
   it("formats and parses entries", () => {
-    const entry: MemoryEntry = { id: 12, date: "2026-08-21", text: "likes tea" };
+    const entry: MemoryEntry = {
+      id: 12,
+      date: "2026-08-21",
+      text: "likes tea",
+    };
     expect(parseEntry(formatEntry(entry))).toEqual(entry);
     expect(parseEntry("garbage")).toBeNull();
   });
@@ -60,10 +66,14 @@ describe("checkEntry", () => {
     expect(checkEntry("  likes tea  ")).toBe("likes tea");
     expect(() => checkEntry("   ")).toThrow(/empty/);
     expect(() => checkEntry("a\nb")).toThrow(/one line/);
-    expect(() => checkEntry("x".repeat(ENTRY_MAX_BYTES + 1))).toThrow(/too long/);
+    expect(() => checkEntry("x".repeat(ENTRY_MAX_BYTES + 1))).toThrow(
+      /too long/,
+    );
     // é is 2 bytes: 150 of them clear the char count but not the byte count.
     expect(() => checkEntry("é".repeat(150))).toThrow(/too long/);
-    expect(checkEntry("x".repeat(ENTRY_MAX_BYTES)).length).toBe(ENTRY_MAX_BYTES);
+    expect(checkEntry("x".repeat(ENTRY_MAX_BYTES)).length).toBe(
+      ENTRY_MAX_BYTES,
+    );
   });
 });
 
@@ -175,12 +185,18 @@ describe("pending compressions", () => {
       }
     }
     let expected = 0;
-    for (let size = 2; size <= 500; size *= 2) expected += Math.floor(500 / size);
+    for (let size = 2; size <= 500; size *= 2)
+      expected += Math.floor(500 / size);
     expect(naps).toBe(expected);
   });
 
   it("words the ask with the block id and the remaining count", () => {
-    const text = napInstruction(16, 32, ["#16 2026-01-01 a", "#17 2026-01-02 b"], 2);
+    const text = napInstruction(
+      16,
+      32,
+      ["#16 2026-01-01 a", "#17 2026-01-02 b"],
+      2,
+    );
     expect(text).toContain('compress_memory with block "16-31"');
     expect(text).toContain("2 compressions remain after this one.");
     expect(napInstruction(0, 2, [], 0)).not.toContain("remain");
@@ -198,8 +214,7 @@ function fakeSource(T: number, summaries: Map<string, string>): WakeSource {
       }
       return Promise.resolve(out);
     },
-    summary: (lo, hi) =>
-      Promise.resolve(summaries.get(`${lo}-${hi}`) ?? null),
+    summary: (lo, hi) => Promise.resolve(summaries.get(`${lo}-${hi}`) ?? null),
   };
 }
 
@@ -220,7 +235,9 @@ describe("renderWakeLines", () => {
     const lines = await renderWakeLines(T, fakeSource(T, summaries));
     expect(lines.length).toBeLessThanOrEqual(WAKE_LINES);
     expect(lines[0]).toMatch(/^#0-\d+ sum of 0\.\./);
-    expect(lines[lines.length - 1]).toBe(`#${T - 1} 2026-01-01 memory ${T - 1}`);
+    expect(lines[lines.length - 1]).toBe(
+      `#${T - 1} 2026-01-01 memory ${T - 1}`,
+    );
   });
 
   it("degrades missing summaries without exceeding the expansion cap", async () => {
@@ -230,22 +247,56 @@ describe("renderWakeLines", () => {
     // The present stays verbatim regardless.
     expect(lines[lines.length - 1]).toBe("#999 2026-01-01 memory 999");
   });
+
+  it("batches adjacent raw blocks and pipelines independent summaries", async () => {
+    let rawCalls = 0;
+    const raw = fakeSource(50, new Map());
+    const lines = await renderWakeLines(50, {
+      logSlice: (lo, hi) => {
+        rawCalls += 1;
+        return raw.logSlice(lo, hi);
+      },
+      summary: raw.summary,
+    });
+    expect(lines).toHaveLength(50);
+    expect(rawCalls).toBe(1);
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const settled = fakeSource(1000, new Map());
+    await renderWakeLines(1000, {
+      logSlice: settled.logSlice,
+      summary: async (lo, hi) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await Promise.resolve();
+        inFlight -= 1;
+        return `sum ${lo}-${hi}`;
+      },
+    });
+    expect(maxInFlight).toBeGreaterThan(1);
+  });
 });
 
 /* -------------------------------- recall ----------------------------------- */
 
 describe("compileRecallPattern", () => {
-  it("compiles a regex, case-insensitively", () => {
-    expect(compileRecallPattern("allerg").test("#3 2026-01-01 Shellfish ALLERGY")).toBe(
-      true,
-    );
-    expect(compileRecallPattern("^#7 ").test("#7 2026-01-01 x")).toBe(true);
-    expect(compileRecallPattern("^#7 ").test("#17 2026-01-01 x")).toBe(false);
+  it("matches literal text case-insensitively", () => {
+    expect(
+      compileRecallPattern("allerg").test("#3 2026-01-01 Shellfish ALLERGY"),
+    ).toBe(true);
+    expect(compileRecallPattern("#7 ").test("#7 2026-01-01 x")).toBe(true);
+    expect(compileRecallPattern("#7 ").test("#17 2026-01-01 x")).toBe(false);
   });
 
-  it("falls back to a literal match on an invalid regex", () => {
-    expect(compileRecallPattern("c++ (the").test("#1 2026-01-01 loves c++ (the language)")).toBe(
-      true,
-    );
+  it("never executes regex syntax", () => {
+    expect(
+      compileRecallPattern("c++ (the").test(
+        "#1 2026-01-01 loves c++ (the language)",
+      ),
+    ).toBe(true);
+    expect(
+      compileRecallPattern("(a+)+$").test("#1 2026-01-01 (a+)+$ literal"),
+    ).toBe(true);
   });
 });

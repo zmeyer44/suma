@@ -479,9 +479,11 @@ export function enabledAssistantTools(
   settings: ChatSettings,
   memory: MemoryService | null = null,
 ): ToolSet {
+  const memoryTools =
+    memory === null || !memory.available() ? {} : createMemoryTools(memory);
   const tools: ToolSet = {
     ...createBrowserTools(deps),
-    ...(memory === null ? {} : createMemoryTools(memory)),
+    ...memoryTools,
   };
   const enabled: ToolSet = {};
   for (const group of CHAT_TOOL_GROUPS) {

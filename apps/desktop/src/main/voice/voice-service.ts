@@ -368,7 +368,8 @@ export class VoiceService {
     const chatToolSettings = this.deps.chatToolSettings();
     const memory =
       isToolGroupEnabled(chatToolSettings, "memory") &&
-      this.deps.memory !== undefined
+      this.deps.memory !== undefined &&
+      this.deps.memory.available()
         ? this.deps.memory
         : null;
     const tools = enabledAssistantTools(

@@ -188,6 +188,17 @@ describe("vfs paths", () => {
     expect(parseVfsRequest(JSON.stringify({ t: "vfs.tree", path: "/" })).t).toBe("vfs.tree");
     expect(parseVfsRequest(JSON.stringify({ t: "vfs.rename", from: "/a", to: "/b" })).t).toBe("vfs.rename");
     expect(parseVfsRequest(JSON.stringify({ t: "vfs.append", path: "/a", dataB64: "" })).t).toBe("vfs.append");
+    expect(parseVfsRequest(JSON.stringify({
+      t: "vfs.append",
+      path: "/a",
+      dataB64: "",
+      expectedSizeBytes: 12,
+    }))).toEqual({
+      t: "vfs.append",
+      path: "/a",
+      dataB64: "",
+      expectedSizeBytes: 12,
+    });
     const bare = parseVfsRequest(JSON.stringify({ t: "vfs.delete", path: "/d" }));
     expect(bare).toEqual({ t: "vfs.delete", path: "/d" });
     const recursive = parseVfsRequest(JSON.stringify({ t: "vfs.delete", path: "/d", recursive: true }));
