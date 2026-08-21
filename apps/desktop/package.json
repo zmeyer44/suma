@@ -15,6 +15,7 @@
     "release:mac": "pnpm --filter @suma/files build && electron-vite build && electron-builder --mac --arm64 --config electron-builder.prod.yml --publish always",
     "check-types": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
+    "bench:memory": "SUMA_MEMORY_BENCH=1 vitest run test/memory-bench.live.test.ts",
     "lint": "eslint src test --max-warnings 0",
     "postinstall": "node scripts/fix-node-pty-helper.mjs"
   },

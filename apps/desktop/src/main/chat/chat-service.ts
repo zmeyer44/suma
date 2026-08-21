@@ -40,6 +40,7 @@ import {
   CHAT_SETTINGS_FILENAME,
   chatSettingsInfo,
   DEFAULT_CHAT_SETTINGS,
+  isToolGroupEnabled,
   mergeChatSettings,
   parseChatSettings,
   type ChatKeyState,
@@ -48,7 +49,8 @@ import {
   type ChatSettingsPatch,
   type ChatStreamRequest,
 } from "../../shared/chat";
-import { enabledBrowserTools, type BrowserToolDeps } from "./chat-tools";
+import type { MemoryService } from "../memory/memory-service";
+import { enabledAssistantTools, type BrowserToolDeps } from "./chat-tools";
 
 /** The gateway env var names the AI SDK and Vercel's docs use. Exported so
  *  the voice assistant resolves the SAME chain (voice-service.ts). */
@@ -83,6 +85,9 @@ export interface ChatServiceDeps {
   } | null>;
   /** Live browser access for the tools. */
   browser: BrowserToolDeps;
+  /** Long-term memory (bound to the agent link after the graph is built);
+   *  absent or unavailable ⇒ the assistant simply runs memoryless. */
+  memory?: MemoryService;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -193,12 +198,22 @@ export class ChatService {
 
     try {
       const settings = this.settingsCache;
-      const tools = enabledBrowserTools(this.deps.browser, settings);
+      const memory =
+        isToolGroupEnabled(settings, "memory") && this.deps.memory !== undefined
+          ? this.deps.memory
+          : null;
+      const tools = enabledAssistantTools(this.deps.browser, settings, memory);
       const messages = request.messages as UIMessage[];
-      const system =
+      let system =
         request.context === null
           ? SYSTEM_PROMPT
           : `${SYSTEM_PROMPT}\n\nThe user is currently viewing: ${request.context.title || "Untitled"} — ${request.context.url}`;
+      // The wake view: the whole memory, logarithmically — recent verbatim,
+      // old summarized. Best-effort; a chat never fails for lack of memory.
+      const memoryContext = await memory?.wakeContext().catch(() => null);
+      if (memoryContext !== null && memoryContext !== undefined) {
+        system = `${system}\n\n${memoryContext}`;
+      }
 
       const result = streamText({
         model,

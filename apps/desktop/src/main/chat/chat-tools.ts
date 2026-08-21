@@ -23,6 +23,8 @@ import {
   type ChatSettings,
 } from "../../shared/chat";
 import type { TabInfo } from "../../shared/ipc";
+import { createMemoryTools } from "../memory/memory-tools";
+import type { MemoryService } from "../memory/memory-service";
 import type { SpaceManager } from "../spaces";
 import type { TabManager } from "../tabs";
 import {
@@ -469,12 +471,18 @@ export function createBrowserTools(deps: BrowserToolDeps): ToolSet {
   return all;
 }
 
-/** The subset of tools the user has left enabled (settings page toggles). */
-export function enabledBrowserTools(
+/** The subset of tools the user has left enabled (settings page toggles):
+ *  the browser tools plus, when a memory service is wired, the memory tools
+ *  — one ToolSet, filtered by the same capability groups. */
+export function enabledAssistantTools(
   deps: BrowserToolDeps,
   settings: ChatSettings,
+  memory: MemoryService | null = null,
 ): ToolSet {
-  const tools = createBrowserTools(deps);
+  const tools: ToolSet = {
+    ...createBrowserTools(deps),
+    ...(memory === null ? {} : createMemoryTools(memory)),
+  };
   const enabled: ToolSet = {};
   for (const group of CHAT_TOOL_GROUPS) {
     if (!isToolGroupEnabled(settings, group.id)) continue;

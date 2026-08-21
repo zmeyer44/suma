@@ -418,7 +418,7 @@ export const VFS_MAX_TREE_ENTRIES = 10_000;
 export const VFS_MAX_TREE_DEPTH = 12;
 /** Keep in step with SKIPPED_DIRS in agent/src/vfs.rs and local-vfs.ts. */
 export const VFS_TREE_SKIPPED_DIRS: ReadonlyArray<string> = [
-  ".git", ".hg", ".svn", "node_modules", ".pnpm-store", ".npm",
+  ".git", ".hg", ".svn", ".suma", "node_modules", ".pnpm-store", ".npm",
   ".cache", ".cargo", ".rustup", ".Trash", "Library",
 ];
 export const VFS_TREE_SKIPPED_FILES: ReadonlyArray<string> = [".DS_Store"];

@@ -33,6 +33,7 @@ import { TtsService } from "./audio/tts-service";
 import { AuthService } from "./auth-service";
 import { PROD_CONTROL_URL } from "./control-client";
 import { ChatService } from "./chat/chat-service";
+import { MemoryService } from "./memory/memory-service";
 import { loadDotEnv } from "./env";
 import { TcpAgentClient } from "./compute/agent-client";
 import { SwitchableAgentLink } from "./compute/agent-link-switch";
@@ -674,6 +675,12 @@ async function startServices(ctx: {
   // then the TTS service's stored Vercel key (same account-sharing the saves
   // extractor does), then — with neither — inference vended through the
   // signed-in control plane's /v1/ai/gateway proxy, keyless on this machine.
+  // The assistant's long-term memory — OptMem-style log + summary tree in
+  // the account computer's hidden /.suma/memory folder. Constructed here so
+  // chat and voice share one instance; bound to the agent link below (the
+  // link does not exist yet), the same deferral WorkspaceFsService uses.
+  const memory = new MemoryService();
+
   const chat = new ChatService({
     userDataDir: userData,
     storedApiKey: () => tts.apiKeyFor("vercel"),
@@ -685,6 +692,7 @@ async function startServices(ctx: {
       return token === null ? null : { baseUrl: client.url, token };
     },
     browser: { spaces, tabs },
+    memory,
   });
 
   /* ------------------- Saves: smart bookmarking (double-Shift) ------------ */
@@ -702,6 +710,7 @@ async function startServices(ctx: {
   const voice = new VoiceService({
     userDataDir: userData,
     browser: { spaces, tabs },
+    memory,
     chatToolSettings: () => {
       const info = chat.settings();
       return { model: info.model, tools: info.tools };
@@ -973,6 +982,9 @@ async function startServices(ctx: {
     agentUrl === null ? "sim" : agentUrl,
     agentUrl !== null,
   );
+  // Memory rides the same channel as the IDE and shells: locally ~/Suma,
+  // signed in the account computer's ~/cloud — cross-device by construction.
+  memory.bind(link);
   // Each space's folder in the shared filesystem (one folder per space).
   const spaceFs = new SpaceFsService({
     link,
@@ -1358,6 +1370,7 @@ async function startServices(ctx: {
     egress.stop();
     gateway.stop();
     workspaceFs.unbind();
+    memory.unbind();
     homeBridge?.stop();
     relayClient?.stop();
     link.stop();

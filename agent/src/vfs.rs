@@ -78,6 +78,7 @@ pub const VFS_TREE_SKIPPED_DIRS: &[&str] = &[
     ".git",
     ".hg",
     ".svn",
+    ".suma",
     "node_modules",
     ".pnpm-store",
     ".npm",

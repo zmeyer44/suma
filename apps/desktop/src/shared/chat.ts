@@ -53,6 +53,13 @@ export const CHAT_TOOL_GROUPS = [
       "Click, type, scroll, and press keys on pages — acting on the page as if it were using the mouse and keyboard.",
     tools: ["click", "type_text", "press_key", "scroll"],
   },
+  {
+    id: "memory",
+    label: "Memory",
+    description:
+      "Remember lasting details about you across conversations — preferences, people, plans — and search what it has remembered. Stored in your own files (.suma/memory).",
+    tools: ["add_memory", "search_memory", "expand_memory", "compress_memory"],
+  },
 ] as const;
 
 export type ChatToolGroupId = (typeof CHAT_TOOL_GROUPS)[number]["id"];

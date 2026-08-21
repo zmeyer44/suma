@@ -196,6 +196,10 @@ const TOOL_LABELS: Record<string, { running: string; done: string }> = {
   type_text: { running: "Typing…", done: "Typed on the page" },
   press_key: { running: "Pressing a key…", done: "Pressed a key" },
   scroll: { running: "Scrolling…", done: "Scrolled the page" },
+  add_memory: { running: "Remembering…", done: "Saved a memory" },
+  search_memory: { running: "Searching memories…", done: "Searched memories" },
+  expand_memory: { running: "Recalling details…", done: "Recalled details" },
+  compress_memory: { running: "Tidying memories…", done: "Tidied memories" },
 };
 
 /**

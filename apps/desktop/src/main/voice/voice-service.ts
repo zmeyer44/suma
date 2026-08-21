@@ -15,8 +15,9 @@
  *
  * Model access rides the chat sidebar's exact credential chain — env
  * gateway key, the stored Vercel key, then the signed-in control plane's
- * gateway proxy — and the browser tools ARE the chat sidebar's own
- * (enabledBrowserTools), so the Assistant settings page's per-capability
+ * gateway proxy — and the tools ARE the chat sidebar's own
+ * (enabledAssistantTools, browser + memory), so the Assistant settings
+ * page's per-capability
  * toggles govern the voice exactly as they govern the chat. The realtime
  * TTS provider's key is the one Settings → Voice & audio stores (Bland
  * today), resolved through TtsService.
@@ -36,7 +37,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { createGateway } from "ai";
-import type { ChatSettings } from "../../shared/chat";
+import { isToolGroupEnabled, type ChatSettings } from "../../shared/chat";
 import {
   mergeVoiceSettings,
   parseVoiceSettings,
@@ -52,10 +53,11 @@ import {
   type WakeWordState,
 } from "../../shared/voice";
 import {
-  enabledBrowserTools,
+  enabledAssistantTools,
   type BrowserToolDeps,
 } from "../chat/chat-tools";
 import { GATEWAY_ENV_KEYS } from "../chat/chat-service";
+import type { MemoryService } from "../memory/memory-service";
 import { VoiceAgentSession, type Gateway } from "./agent-session";
 import { BlandRealtimeTts } from "./tts-realtime";
 import type { RealtimeTtsProvider } from "./tts-realtime-core";
@@ -86,6 +88,9 @@ export interface VoiceServiceDeps {
   /** The Assistant page's live tool-group toggles — read per session so a
    *  revoked capability is gone from the very next conversation. */
   chatToolSettings: () => ChatSettings;
+  /** Long-term memory — same instance the chat sidebar uses, so both mouths
+   *  of the assistant remember the same things. */
+  memory?: MemoryService;
   emit: VoiceEmitter;
   /** The stored gateway key (TTS's Vercel key), read per session — the
    *  chat sidebar's exact sharing. */
@@ -360,12 +365,24 @@ export class VoiceService {
     const settings = this.settingsCache;
     // Resolved per session, exactly like the chat run: a key added (or a
     // capability revoked) in settings applies to the next conversation.
-    const tools = enabledBrowserTools(
+    const chatToolSettings = this.deps.chatToolSettings();
+    const memory =
+      isToolGroupEnabled(chatToolSettings, "memory") &&
+      this.deps.memory !== undefined
+        ? this.deps.memory
+        : null;
+    const tools = enabledAssistantTools(
       this.deps.browser,
-      this.deps.chatToolSettings(),
+      chatToolSettings,
+      memory,
     );
-    void this.resolveGateway()
-      .then((gateway) => {
+    void Promise.all([
+      this.resolveGateway(),
+      // Best-effort, like the chat run: a session never fails for lack of
+      // memory, it just runs memoryless.
+      memory?.wakeContext().catch(() => null) ?? Promise.resolve(null),
+    ])
+      .then(([gateway, memoryContext]) => {
         if (this.generation !== generation) return;
         if (gateway === null) {
           throw new Error(
@@ -381,7 +398,10 @@ export class VoiceService {
           sttModel: settings.sttModel,
           narratorModel: settings.narratorModel,
           tools,
-          systemInstruction: voiceSystemInstruction(settings.wakeWord),
+          systemInstruction:
+            memoryContext === null
+              ? voiceSystemInstruction(settings.wakeWord)
+              : `${voiceSystemInstruction(settings.wakeWord)}\n\n${memoryContext}`,
           tts: this.ttsProvider(settings),
           callbacks: {
             onAudio: (data) => {
