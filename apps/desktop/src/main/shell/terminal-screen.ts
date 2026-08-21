@@ -13,7 +13,16 @@
  * a ring buffer + stripAnsi and nothing else changes.
  */
 
-import { Terminal } from "@xterm/headless";
+import { createRequire } from "node:module";
+import type { Terminal as XtermTerminal } from "@xterm/headless";
+
+// @xterm/headless advertises an ESM build in `module`, but Electron's Node
+// resolver follows its CommonJS `main`. A named ESM import therefore builds
+// cleanly and then crashes the packaged main bundle before app ready. Keep the
+// CJS boundary explicit; the type-only import still checks our API usage.
+const { Terminal } = createRequire(import.meta.url)(
+  "@xterm/headless",
+) as typeof import("@xterm/headless");
 
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
@@ -21,7 +30,7 @@ const DEFAULT_ROWS = 24;
 const SCROLLBACK_LINES = 5_000;
 
 export class TerminalScreen {
-  private readonly term: Terminal;
+  private readonly term: XtermTerminal;
   /** xterm parses writes asynchronously; readers await the queue. */
   private pending: Promise<void> = Promise.resolve();
   private disposed = false;
