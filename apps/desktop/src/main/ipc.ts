@@ -1068,8 +1068,23 @@ export function registerIpc(deps: IpcDeps): void {
   });
 
   handle("terminal:attach", (args) => {
+    const a = requireRecord(args, "terminal:attach");
+    const clampDim = (value: number): number =>
+      Math.max(1, Math.min(1000, Math.round(value)));
+    const cols =
+      a["cols"] === undefined
+        ? undefined
+        : clampDim(requireFinite(a["cols"], "cols"));
+    const rows =
+      a["rows"] === undefined
+        ? undefined
+        : clampDim(requireFinite(a["rows"], "rows"));
+    if ((cols === undefined) !== (rows === undefined))
+      throw new Error("cols and rows must be provided together");
     return deps.terminals.attach(
-      requireString(requireRecord(args, "terminal:attach")["ptyId"], "ptyId"),
+      requireString(a["ptyId"], "ptyId"),
+      cols,
+      rows,
     );
   });
 

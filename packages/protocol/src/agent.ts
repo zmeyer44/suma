@@ -167,6 +167,10 @@ export const ptyAttachSchema = z.object({
   ptyId: z.string().min(1),
   /** Resume scrollback from this byte offset; 0 replays the whole buffer. */
   sinceByte: z.number().int().nonnegative().optional(),
+  /** Optional target grid. New agents apply it before capturing tmux replay;
+   * older agents safely ignore these additive fields. */
+  cols: z.number().int().min(1).max(1000).optional(),
+  rows: z.number().int().min(1).max(1000).optional(),
 });
 
 /** Job Mode: mark this PTY's workload as "keep running" (§8.5). */

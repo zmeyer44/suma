@@ -197,8 +197,14 @@ pub async fn dispatch(
             Ok(()) => None,
             Err(e) => Some(error("pty_kill_failed", e.to_string())),
         },
-        AgentCtlRequest::PtyAttach { pty_id, since_byte } => {
-            match state.ptys.attach(&pty_id, since_byte.unwrap_or(0)) {
+        AgentCtlRequest::PtyAttach {
+            pty_id,
+            since_byte,
+            cols,
+            rows,
+        } => {
+            let size = cols.zip(rows);
+            match state.ptys.attach(&pty_id, since_byte.unwrap_or(0), size) {
                 Ok(attach) => Some(AgentCtlResponse::PtyAttached {
                     pty_id,
                     restore: attach.restore,

@@ -136,6 +136,11 @@ export function TerminalPage() {
   const mainColRef = useRef<HTMLDivElement | null>(null);
 
   const activePtyRef = useRef<string | null>(null);
+  // Only a successfully attached live shell may receive fire-and-forget
+  // resizes. An exited shell returns an error; sending that before its attach
+  // can otherwise corrupt the ctl FIFO by looking like the attach response.
+  const attachedPtyRef = useRef<string | null>(null);
+  const selectionGenerationRef = useRef(0);
   const activeTabElRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   // State, not a ref: the callback ref re-renders when the host div lands, and
@@ -152,10 +157,16 @@ export function TerminalPage() {
     });
   }, [activePty]);
 
-  /** Attach replays the whole scrollback, so the display resets first. */
+  /**
+   * Attach replays the whole scrollback, so the display resets first. The
+   * visible grid travels with the attach request, letting the agent resize
+   * tmux atomically before it captures the pane.
+   */
   const selectPty = (ptyId: string): void => {
+    const generation = ++selectionGenerationRef.current;
     // Eager, not render-time: replayed terminal:data can beat the re-render.
     activePtyRef.current = ptyId;
+    attachedPtyRef.current = null;
     termRef.current?.reset();
     setActivePty(ptyId);
     // Also handle selecting the already-active shell: React will elide the
@@ -167,7 +178,30 @@ export function TerminalPage() {
         inline: "nearest",
       });
     });
-    void attachTerminal(ptyId);
+    void (async () => {
+      const term = termRef.current;
+      const info = await attachTerminal(
+        ptyId,
+        term?.cols,
+        term?.rows,
+      );
+      // A rapid second click supersedes this selection while its remote
+      // attach is in flight. Never let the stale result own the new tab.
+      if (
+        selectionGenerationRef.current !== generation ||
+        activePtyRef.current !== ptyId
+      )
+        return;
+      if (info !== undefined && !info.exited) {
+        attachedPtyRef.current = ptyId;
+        // Backward compatibility for an older agent that ignores the new
+        // additive attach dimensions; new agents are already at this size.
+        const current = termRef.current;
+        if (current !== null)
+          resizeTerminal(ptyId, current.cols, current.rows);
+      }
+      termRef.current?.focus();
+    })();
   };
 
   /**
@@ -224,7 +258,8 @@ export function TerminalPage() {
     });
     const resize = term.onResize(({ cols, rows }) => {
       const pty = activePtyRef.current;
-      if (pty !== null) resizeTerminal(pty, cols, rows);
+      if (pty !== null && attachedPtyRef.current === pty)
+        resizeTerminal(pty, cols, rows);
     });
     fit.fit();
     const ro = new ResizeObserver(() => fit.fit());
@@ -245,11 +280,23 @@ export function TerminalPage() {
     // Discovery may already have picked a pty before the host div landed.
     const pty = activePtyRef.current;
     if (pty !== null) {
-      resizeTerminal(pty, term.cols, term.rows);
       term.focus();
-      if (needsReattach.current) {
-        // Fresh instance, so no reset needed before the replay lands.
-        void attachTerminal(pty);
+      const shouldReattach = needsReattach.current;
+      if (shouldReattach) {
+        attachedPtyRef.current = null;
+        void (async () => {
+          // Fresh instance, so no reset needed before the replay lands.
+          const info = await attachTerminal(pty, term.cols, term.rows);
+          if (
+            activePtyRef.current === pty &&
+            termRef.current === term &&
+            info !== undefined &&
+            !info.exited
+          ) {
+            attachedPtyRef.current = pty;
+            resizeTerminal(pty, term.cols, term.rows);
+          }
+        })();
       }
     }
     needsReattach.current = false;
@@ -259,6 +306,7 @@ export function TerminalPage() {
       data.dispose();
       resize.dispose();
       termRef.current = null;
+      attachedPtyRef.current = null;
       term.dispose();
       needsReattach.current = true;
     };
@@ -343,15 +391,6 @@ export function TerminalPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingPtyId, consumePendingTerminal]);
 
-  // A fresh attach inherits whatever size the pty had; push the pane's real
-  // grid and land the keyboard in the shell (§8.5 resize contract).
-  useEffect(() => {
-    const term = termRef.current;
-    if (term === null || activePty === null) return;
-    resizeTerminal(activePty, term.cols, term.rows);
-    term.focus();
-  }, [activePty, resizeTerminal]);
-
   const active = terminals.find((t) => t.ptyId === activePty) ?? null;
   const accrued = accruedCostLabel(machine);
 
@@ -396,6 +435,7 @@ export function TerminalPage() {
               <button
                 type="button"
                 data-testid={`terminal-select-${t.ptyId}`}
+                aria-pressed={t.ptyId === activePty}
                 onClick={() => selectPty(t.ptyId)}
                 className="cursor-pointer"
                 title={t.cwd}
@@ -424,6 +464,7 @@ export function TerminalPage() {
                   void closeTerminal(t.ptyId);
                   if (activePty === t.ptyId) {
                     activePtyRef.current = null;
+                    attachedPtyRef.current = null;
                     termRef.current?.reset();
                     setActivePty(null);
                   }

@@ -149,9 +149,15 @@ describe("TerminalService.discover", () => {
     await terminals.discover();
     link.operations.length = 0;
 
-    const attached = await terminals.attach("tmux-shell");
+    const attached = await terminals.attach("tmux-shell", 132, 41);
 
     expect(link.operations).toEqual(["ctl:pty.attach", "open:tmux-shell"]);
+    expect(link.requests.at(-1)).toMatchObject({
+      t: "pty.attach",
+      ptyId: "tmux-shell",
+      cols: 132,
+      rows: 41,
+    });
     expect(attached).toMatchObject({ restore: "resumed", exited: false });
   });
 

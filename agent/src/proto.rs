@@ -88,6 +88,12 @@ pub enum AgentCtlRequest {
         /// Resume scrollback from this byte offset; 0 replays the whole buffer.
         #[serde(skip_serializing_if = "Option::is_none")]
         since_byte: Option<u64>,
+        /// Apply the visible grid before tmux capture so replay wraps exactly
+        /// as it will be displayed. Both fields must be present together.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cols: Option<u16>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rows: Option<u16>,
     },
     /// Job Mode: mark this PTY's workload as "keep running" (§8.5).
     #[serde(rename = "job.set", rename_all = "camelCase")]
@@ -185,8 +191,16 @@ impl AgentCtlRequest {
                 pty_id_ok(pty_id)?;
                 dims_ok(*cols, *rows)
             }
-            AgentCtlRequest::PtyKill { pty_id, .. } | AgentCtlRequest::PtyAttach { pty_id, .. } => {
-                pty_id_ok(pty_id)
+            AgentCtlRequest::PtyKill { pty_id, .. } => pty_id_ok(pty_id),
+            AgentCtlRequest::PtyAttach {
+                pty_id, cols, rows, ..
+            } => {
+                pty_id_ok(pty_id)?;
+                match (cols, rows) {
+                    (Some(cols), Some(rows)) => dims_ok(*cols, *rows),
+                    (None, None) => Ok(()),
+                    _ => Err("cols/rows must be provided together".to_string()),
+                }
             }
             AgentCtlRequest::JobSet { pty_id, label, .. } => {
                 pty_id_ok(pty_id)?;
@@ -375,8 +389,23 @@ mod tests {
             attach,
             AgentCtlRequest::PtyAttach {
                 pty_id: "term-1".into(),
-                since_byte: Some(0)
+                since_byte: Some(0),
+                cols: None,
+                rows: None,
             }
+        );
+
+        let sized_attach: AgentCtlRequest = serde_json::from_str(
+            r#"{"t":"pty.attach","ptyId":"term-1","sinceByte":0,"cols":132,"rows":41}"#,
+        )
+        .unwrap();
+        assert!(sized_attach.validate().is_ok());
+        let half_sized_attach: AgentCtlRequest =
+            serde_json::from_str(r#"{"t":"pty.attach","ptyId":"term-1","sinceByte":0,"cols":132}"#)
+                .unwrap();
+        assert_eq!(
+            half_sized_attach.validate(),
+            Err("cols/rows must be provided together".to_string())
         );
 
         let job: AgentCtlRequest = serde_json::from_str(

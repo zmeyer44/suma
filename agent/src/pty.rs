@@ -381,7 +381,33 @@ impl TmuxRuntime {
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        Ok(output.stdout)
+        // `capture-pane -p` is plain text and therefore uses Unix LF line
+        // endings. A terminal LF moves the cursor down without returning it
+        // to column zero, so replaying that output verbatim produces a
+        // diagonal/staircase display in xterm. Preserve real CRLF pairs and
+        // make every bare LF safe to replay as terminal output.
+        Ok(normalize_terminal_newlines(&output.stdout))
+    }
+
+    fn resize_window(&self, pty_id: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
+        let status = Command::new(&self.executable)
+            .args([
+                "resize-window",
+                "-x",
+                &cols.to_string(),
+                "-y",
+                &rows.to_string(),
+                "-t",
+                &Self::window_target(pty_id),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("resizing tmux window before capture")?;
+        if !status.success() {
+            bail!("tmux resize-window failed");
+        }
+        Ok(())
     }
 
     fn kill_session(&self, pty_id: &str) -> bool {
@@ -401,6 +427,19 @@ impl TmuxRuntime {
             .status()
             .is_ok_and(|status| status.success())
     }
+}
+
+fn normalize_terminal_newlines(data: &[u8]) -> Vec<u8> {
+    let mut normalized = Vec::with_capacity(data.len());
+    let mut previous = None;
+    for &byte in data {
+        if byte == b'\n' && previous != Some(b'\r') {
+            normalized.push(b'\r');
+        }
+        normalized.push(byte);
+        previous = Some(byte);
+    }
+    normalized
 }
 
 /* ------------------------------------------------------------------ *
@@ -787,7 +826,12 @@ impl PtyManager {
     /// still alive); `reconstructed` when only the persisted context was
     /// found. Never pretends a dead process is running — an exited session is
     /// reaped and reported as reconstructed, because that is what it is.
-    pub fn attach(&mut self, pty_id: &str, since_byte: u64) -> anyhow::Result<AttachResult> {
+    pub fn attach(
+        &mut self,
+        pty_id: &str,
+        since_byte: u64,
+        size: Option<(u16, u16)>,
+    ) -> anyhow::Result<AttachResult> {
         Self::check_id(pty_id)?;
 
         let exited = match self.sessions.get_mut(pty_id) {
@@ -808,6 +852,15 @@ impl PtyManager {
                 .is_some_and(|tmux| tmux.has_session(pty_id))
             {
                 self.exited_pending.push((pty_id.to_string(), code));
+            }
+        }
+
+        if self.sessions.contains_key(pty_id) {
+            if let Some((cols, rows)) = size {
+                self.resize(pty_id, cols, rows)?;
+                if let Some(tmux) = &self.tmux {
+                    tmux.resize_window(pty_id, cols, rows)?;
+                }
             }
         }
 
@@ -842,6 +895,12 @@ impl PtyManager {
             .as_ref()
             .is_some_and(|tmux| tmux.has_session(pty_id))
         {
+            let (cols, rows) = size.unwrap_or((80, 24));
+            if size.is_some() {
+                if let Some(tmux) = &self.tmux {
+                    tmux.resize_window(pty_id, cols, rows)?;
+                }
+            }
             let capture = self
                 .tmux
                 .as_ref()
@@ -851,8 +910,8 @@ impl PtyManager {
                 pty_id.to_string(),
                 meta.cwd.clone(),
                 meta.command.clone(),
-                80,
-                24,
+                cols,
+                rows,
                 None,
                 capture,
             )?;
@@ -1094,6 +1153,15 @@ mod tests {
     }
 
     #[test]
+    fn tmux_capture_newlines_return_to_column_zero_for_terminal_replay() {
+        assert_eq!(
+            normalize_terminal_newlines(b"first\nsecond\r\nthird\rprogress"),
+            b"first\r\nsecond\r\nthird\rprogress"
+        );
+        assert_eq!(normalize_terminal_newlines(b"no newline"), b"no newline");
+    }
+
+    #[test]
     fn production_cap_is_100k_lines() {
         // §8.5 names the number; the constant and the TS side must agree.
         assert_eq!(PTY_SCROLLBACK_LINES, 100_000);
@@ -1135,14 +1203,14 @@ mod tests {
 
         // A fresh manager — as after a cold boot — has no live sessions.
         let mut mgr = PtyManager::new(&base);
-        let attach = mgr.attach("term-1", 0).unwrap();
+        let attach = mgr.attach("term-1", 0, None).unwrap();
         assert_eq!(attach.restore, PtyRestoreKind::Reconstructed);
         assert_eq!(attach.cwd, "/home/u");
         assert_eq!(attach.scrollback, b"$ echo hello\nhello\n");
         assert_eq!(attach.scrollback_bytes, 19);
 
         // since_byte replays only the missing suffix.
-        let attach = mgr.attach("term-1", 13).unwrap();
+        let attach = mgr.attach("term-1", 13, None).unwrap();
         assert_eq!(attach.scrollback, b"hello\n");
         fs::remove_dir_all(&base).unwrap();
     }
@@ -1162,14 +1230,14 @@ mod tests {
         })
         .unwrap();
 
-        let attach = mgr.attach("live-1", 0).unwrap();
+        let attach = mgr.attach("live-1", 0, None).unwrap();
         assert_eq!(attach.restore, PtyRestoreKind::Resumed);
 
         mgr.kill("live-1", Some(PtySignal::Kill)).unwrap();
         // Reap: after the child exits, attach must stop claiming "resumed".
         let mut reaped = false;
         for _ in 0..200 {
-            let a = mgr.attach("live-1", 0).unwrap();
+            let a = mgr.attach("live-1", 0, None).unwrap();
             if a.restore == PtyRestoreKind::Reconstructed {
                 reaped = true;
                 break;
@@ -1201,6 +1269,7 @@ case "$1" in
   has-session) test -f "$marker" ;;
   new-session) : > "$marker"; exit 0 ;;
   set-option) exit 0 ;;
+  resize-window) exit 0 ;;
   attach-session) test -f "$marker" || exit 1; exec /bin/cat ;;
   capture-pane) printf 'captured tmux scrollback\n' ;;
   kill-session) rm -f "$marker"; exit 0 ;;
@@ -1226,7 +1295,7 @@ esac
             })
             .unwrap();
         wait_for(|| marker.exists().then_some(()));
-        let configured = fs::read_to_string(calls).unwrap();
+        let configured = fs::read_to_string(&calls).unwrap();
         assert!(
             configured.contains("set-option -t suma-stable-shell status off"),
             "tmux's own status bar must stay hidden behind the Suma shell tab"
@@ -1248,8 +1317,15 @@ esac
             .list()
             .iter()
             .any(|entry| entry.pty_id == "stable-shell" && entry.live));
-        let attached = restarted.attach("stable-shell", 0).unwrap();
+        let attached = restarted
+            .attach("stable-shell", 0, Some((132, 41)))
+            .unwrap();
         assert_eq!(attached.restore, PtyRestoreKind::Resumed);
+        let resized = fs::read_to_string(&calls).unwrap();
+        assert!(
+            resized.contains("resize-window -x 132 -y 41 -t suma-stable-shell:0"),
+            "reattach must size tmux before capture"
+        );
         restarted.write_input("stable-shell", b"after\n").unwrap();
         wait_for(|| {
             restarted
@@ -1466,7 +1542,7 @@ esac
     fn attach_of_a_never_seen_pty_fails() {
         let base = test_dir("missing");
         let mut mgr = PtyManager::new(base);
-        assert!(mgr.attach("nope", 0).is_err());
+        assert!(mgr.attach("nope", 0, None).is_err());
     }
 
     #[test]
@@ -1486,7 +1562,7 @@ esac
                 .is_err(),
                 "{id:?} must be refused"
             );
-            assert!(mgr.attach(id, 0).is_err(), "{id:?} must be refused");
+            assert!(mgr.attach(id, 0, None).is_err(), "{id:?} must be refused");
         }
     }
 }

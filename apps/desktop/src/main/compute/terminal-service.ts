@@ -145,14 +145,27 @@ export class TerminalService {
    * survived or only its context did, and replays scrollback through the pty
    * channel. Callers reset their display before invoking (§8.5).
    */
-  async attach(ptyId: string): Promise<TerminalInfo> {
+  async attach(
+    ptyId: string,
+    cols?: number,
+    rows?: number,
+  ): Promise<TerminalInfo> {
     const record = this.require(ptyId);
     // Let the agent recreate a disposable tmux client first when necessary.
     // Opening pty/<id> afterwards is still gap-free: the agent subscribes to
     // live output before replaying the retained ring onto the new channel.
-    const response = await this.deps.link.ctl({ t: "pty.attach", ptyId, sinceByte: 0 });
+    const response = await this.deps.link.ctl({
+      t: "pty.attach",
+      ptyId,
+      sinceByte: 0,
+      ...(cols === undefined || rows === undefined ? {} : { cols, rows }),
+    });
     if (response?.t === "error") throw new Error(`terminal: ${response.message}`);
     if (response?.t === "pty.attached") {
+      if (response.ptyId !== ptyId)
+        throw new Error(
+          `terminal: attach response for ${response.ptyId} while selecting ${ptyId}`,
+        );
       record.info.restore = response.restore;
       record.info.cwd = response.cwd;
       record.info.exited = response.restore !== "resumed";

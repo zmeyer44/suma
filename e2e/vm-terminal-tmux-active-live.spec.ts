@@ -245,6 +245,32 @@ async function terminalList(
   );
 }
 
+async function selectShell(
+  cdp: CdpClient,
+  sessionId: string,
+  ptyId: string,
+): Promise<void> {
+  const selector = `[data-testid="terminal-select-${ptyId}"]`;
+  const clicked = await cdp.evaluate<boolean>(
+    sessionId,
+    `(() => {
+      const button = document.querySelector(${JSON.stringify(selector)});
+      if (!(button instanceof HTMLButtonElement)) return false;
+      button.click();
+      return true;
+    })()`,
+  );
+  expect(clicked).toBe(true);
+  await expect
+    .poll(() =>
+      cdp.evaluate<boolean>(
+        sessionId,
+        `document.querySelector(${JSON.stringify(selector)})?.getAttribute("aria-pressed") === "true"`,
+      ),
+    )
+    .toBe(true);
+}
+
 async function tmuxHasSession(ptyId: string): Promise<boolean> {
   try {
     await execFileAsync("fly", [
@@ -487,6 +513,64 @@ test("a VM shell automatically resumes through tmux after the desktop restarts",
       .toBe(true);
     await second.cdp.screenshot(second.sessionId, "02-tmux-shell-resumed.png");
 
+    // Regression journey for active → exited → active switching. Each return
+    // waits for the live shell's captured sentinel, proving replay completed
+    // before the screenshot is taken. Repeating catches stale async attaches
+    // and the old resize-after-capture race rather than only a lucky pass.
+    const exited = (await terminalList(second.cdp, second.sessionId)).find(
+      (terminal) => terminal.exited && terminal.ptyId !== ptyId,
+    );
+    if (exited === undefined) throw new Error("an exited shell is required");
+    for (let pass = 1; pass <= 3; pass += 1) {
+      await selectShell(second.cdp, second.sessionId, exited.ptyId);
+      await expect
+        .poll(async () => {
+          const terminal = (
+            await terminalList(second.cdp, second.sessionId)
+          ).find((candidate) => candidate.ptyId === exited.ptyId);
+          return terminal?.restore;
+        })
+        .toBe("reconstructed");
+      await expect.poll(() => tmuxHasSession(ptyId)).toBe(true);
+      await second.cdp.evaluate(
+        second.sessionId,
+        "window.__sumaTmuxE2e.length = 0",
+      );
+      await selectShell(second.cdp, second.sessionId, ptyId);
+      await expect
+        .poll(() =>
+          second.cdp.evaluate<boolean>(
+            second.sessionId,
+            'window.__sumaTmuxE2e.join("").includes("TMUX_AFTER_RESTART")',
+          ),
+        )
+        .toBe(true);
+      await expect
+        .poll(async () => {
+          const terminal = (
+            await terminalList(second.cdp, second.sessionId)
+          ).find((candidate) => candidate.ptyId === ptyId);
+          return {
+            restore: terminal?.restore,
+            exited: terminal?.exited,
+          };
+        })
+        .toEqual({ restore: "resumed", exited: false });
+      await expect.poll(() => tmuxHasSession(ptyId)).toBe(true);
+      await expect
+        .poll(() =>
+          second.cdp.evaluate<boolean>(
+            second.sessionId,
+            '!document.body.innerText.includes("terminal:attach failed")',
+          ),
+        )
+        .toBe(true);
+      await second.cdp.screenshot(
+        second.sessionId,
+        `${String(pass + 2).padStart(2, "0")}-active-after-exited-${pass}.png`,
+      );
+    }
+
     // Closing through the UI destroys the named session rather than leaving
     // a hidden shell behind in the VM.
     await second.cdp.evaluate(
@@ -494,7 +578,7 @@ test("a VM shell automatically resumes through tmux after the desktop restarts",
       `document.querySelector(${JSON.stringify(`[data-testid="terminal-close-${ptyId}"]`)})?.click()`,
     );
     await expect.poll(() => tmuxHasSession(ptyId)).toBe(false);
-    await second.cdp.screenshot(second.sessionId, "03-tmux-session-closed.png");
+    await second.cdp.screenshot(second.sessionId, "06-tmux-session-closed.png");
   } finally {
     second.cdp.close();
     await stopDesktop(desktop);

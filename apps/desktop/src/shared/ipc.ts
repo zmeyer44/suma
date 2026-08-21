@@ -845,7 +845,10 @@ export interface SumaInvokeMap {
    *  shells, cold-boot leftovers) and adopt them so attach works (§8.5). */
   "terminal:discover": { args: void; result: TerminalInfo[] };
   "terminal:create": { args: { cwd?: string }; result: TerminalInfo };
-  "terminal:attach": { args: { ptyId: string }; result: TerminalInfo };
+  "terminal:attach": {
+    args: { ptyId: string; cols?: number; rows?: number };
+    result: TerminalInfo;
+  };
   "terminal:input": { args: { ptyId: string; data: string }; result: void };
   "terminal:resize": {
     args: { ptyId: string; cols: number; rows: number };

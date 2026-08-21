@@ -547,7 +547,11 @@ interface SumaState {
   pendingPtyId: string | null;
   /** Read-and-clear `pendingPtyId` — atomic, so only one claimant wins. */
   consumePendingTerminal: () => string | null;
-  attachTerminal: (ptyId: string) => Promise<TerminalInfo | undefined>;
+  attachTerminal: (
+    ptyId: string,
+    cols?: number,
+    rows?: number,
+  ) => Promise<TerminalInfo | undefined>;
   closeTerminal: (ptyId: string) => Promise<void>;
   setJobMode: (ptyId: string, enabled: boolean) => Promise<void>;
   sendTerminalInput: (ptyId: string, data: string) => void;
@@ -2062,8 +2066,11 @@ export const useSumaStore = create<SumaState>()((set, get) => {
       return info;
     },
 
-    attachTerminal: async (ptyId) => {
-      const info = await call("terminal:attach", { ptyId });
+    attachTerminal: async (ptyId, cols, rows) => {
+      const info = await call("terminal:attach", {
+        ptyId,
+        ...(cols === undefined || rows === undefined ? {} : { cols, rows }),
+      });
       if (info !== undefined) {
         set((s) => ({
           terminals: s.terminals.map((t) => (t.ptyId === ptyId ? info : t)),
