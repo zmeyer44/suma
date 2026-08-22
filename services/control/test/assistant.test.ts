@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   ASSISTANT_FEATURE,
+  assistantOptionsFromEnv,
   type AssistantControlOptions,
 } from "../src/assistant.js";
 import { createApp } from "../src/app.js";
@@ -17,6 +18,7 @@ const SERVICE_TOKEN = "assistant-service-test-token";
 const OPTIONS: AssistantControlOptions = {
   serviceToken: SERVICE_TOKEN,
   defaultModel: "test/remote-model",
+  publicUrl: "https://assistant.example/mounted/",
 };
 
 let db: Db;
@@ -287,6 +289,68 @@ describe("assistant channel linking", () => {
     expect(forgedLink.status).toBe(404);
   });
 
+  it("hands browser state to the public gateway with a one-use opaque ticket", async () => {
+    const { userId, token } = await signupAndEnable();
+    const beforeLink = await app.request(
+      "/v1/assistant/browser-session-ticket",
+      requestInit("POST", token),
+    );
+    expect(beforeLink.status).toBe(409);
+
+    const code = await mintCode(token);
+    await app.request(
+      "/v1/assistant/link-redeem",
+      requestInit("POST", SERVICE_TOKEN, { code, ...identity }),
+    );
+
+    const minted = await app.request(
+      "/v1/assistant/browser-session-ticket",
+      requestInit("POST", token),
+    );
+    expect(minted.status).toBe(201);
+    const handoff = (await minted.json()) as {
+      ticket: string;
+      expiresAt: string;
+      uploadUrl: string;
+    };
+    expect(handoff.ticket).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+    expect(handoff.uploadUrl).toBe(
+      "https://assistant.example/mounted/v1/browser-sessions/import",
+    );
+    expect(Date.parse(handoff.expiresAt)).toBeGreaterThan(Date.now());
+
+    const stored = await db.select().from(schema.assistantBrowserTickets);
+    expect(stored).toHaveLength(1);
+    expect(JSON.stringify(stored)).not.toContain(handoff.ticket);
+
+    const redeemed = await app.request(
+      "/v1/assistant/browser-session-redeem",
+      requestInit("POST", SERVICE_TOKEN, { ticket: handoff.ticket }),
+    );
+    expect(redeemed.status).toBe(200);
+    await expect(redeemed.json()).resolves.toEqual({ userId });
+
+    const replay = await app.request(
+      "/v1/assistant/browser-session-redeem",
+      requestInit("POST", SERVICE_TOKEN, { ticket: handoff.ticket }),
+    );
+    expect(replay.status).toBe(401);
+  });
+
+  it("normalizes a path-mounted assistant gateway URL", () => {
+    expect(
+      assistantOptionsFromEnv({
+        ASSISTANT_SERVICE_TOKEN: SERVICE_TOKEN,
+        SUMA_ASSISTANT_PUBLIC_URL: "https://assistant.example/mounted?ignored=1",
+      }).publicUrl,
+    ).toBe("https://assistant.example/mounted/");
+    expect(() =>
+      assistantOptionsFromEnv({
+        SUMA_ASSISTANT_PUBLIC_URL: "http://assistant.example",
+      }),
+    ).toThrow("must use HTTPS outside loopback development");
+  });
+
   it("keeps assistant, device, and capability credential families disjoint", async () => {
     const { token } = await signupAndEnable();
     const deviceOnServiceRoute = await app.request(
@@ -305,12 +369,28 @@ describe("assistant channel linking", () => {
         )
       ).status,
     ).toBe(401);
+    expect(
+      (
+        await app.request(
+          "/v1/assistant/browser-session-redeem",
+          requestInit("POST", token, { ticket: "x".repeat(40) }),
+        )
+      ).status,
+    ).toBe(401);
 
     const serviceOnDeviceRoute = await app.request(
       "/v1/me",
       requestInit("GET", SERVICE_TOKEN),
     );
     expect(serviceOnDeviceRoute.status).toBe(401);
+    expect(
+      (
+        await app.request(
+          "/v1/assistant/browser-session-ticket",
+          requestInit("POST", SERVICE_TOKEN),
+        )
+      ).status,
+    ).toBe(401);
 
     const capabilityShapedToken = "header.payload.signature";
     const capabilityOnServiceRoute = await app.request(

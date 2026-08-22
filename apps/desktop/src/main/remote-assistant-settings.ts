@@ -1,4 +1,5 @@
 import type {
+  RemoteAssistantBrowserShareResult,
   RemoteAssistantLinkCode,
   RemoteAssistantOverview,
   RemoteAssistantPolicy,
@@ -7,7 +8,12 @@ import type {
 import type { ControlClient } from "./control-client";
 
 export class RemoteAssistantSettingsService {
-  constructor(private readonly control: () => ControlClient | null) {}
+  constructor(
+    private readonly control: () => ControlClient | null,
+    private readonly browserContinuity?: {
+      shareActiveSpace(): Promise<RemoteAssistantBrowserShareResult>;
+    },
+  ) {}
 
   async overview(): Promise<RemoteAssistantOverview> {
     const client = this.control();
@@ -43,6 +49,13 @@ export class RemoteAssistantSettingsService {
     patch: RemoteAssistantPolicyPatch,
   ): Promise<RemoteAssistantPolicy> {
     return this.requireControl().updateAssistantPolicy(patch);
+  }
+
+  shareBrowserSession(): Promise<RemoteAssistantBrowserShareResult> {
+    if (this.browserContinuity === undefined) {
+      throw new Error("Browser session sharing is not available.");
+    }
+    return this.browserContinuity.shareActiveSpace();
   }
 
   private requireControl(): ControlClient {

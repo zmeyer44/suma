@@ -38,6 +38,7 @@ import type {
 import type { SavedItem, SavedItemPatch } from "./saves";
 import type { SavedVideo, VideoPipCommand, VideoPipState } from "./videos";
 import type {
+  RemoteAssistantBrowserShareResult,
   RemoteAssistantLinkCode,
   RemoteAssistantOverview,
   RemoteAssistantPolicy,
@@ -712,6 +713,10 @@ export interface SumaInvokeMap {
     args: RemoteAssistantPolicyPatch;
     result: RemoteAssistantPolicy;
   };
+  "remoteAssistant:shareBrowserSession": {
+    args: void;
+    result: RemoteAssistantBrowserShareResult;
+  };
 
   /**
    * The voice assistant (shared/voice.ts). The wake-word engine and the
@@ -1342,6 +1347,7 @@ export const INVOKE_CHANNELS: ReadonlyArray<InvokeChannel> = [
   "remoteAssistant:createLinkCode",
   "remoteAssistant:revokeLink",
   "remoteAssistant:updatePolicy",
+  "remoteAssistant:shareBrowserSession",
   "voice:settings",
   "voice:updateSettings",
   "voice:status",

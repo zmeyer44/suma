@@ -122,4 +122,41 @@ describe("control assistant link client", () => {
       linkId: "link-1",
     });
   });
+
+  it("redeems a browser handoff ticket without losing a mounted control path", async () => {
+    let request: Request | undefined;
+    const client = new ControlAssistantLinkClient({
+      controlUrl: "https://control.example/mounted/",
+      serviceToken: "service-token",
+      fetch: (input, init) => {
+        request = new Request(input, init);
+        return Promise.resolve(Response.json({ userId: "user-1" }));
+      },
+    });
+
+    await expect(
+      client.redeemBrowserSessionTicket("one-use-ticket"),
+    ).resolves.toEqual({ userId: "user-1" });
+    expect(request?.url).toBe(
+      "https://control.example/mounted/v1/assistant/browser-session-redeem",
+    );
+    await expect(request?.json()).resolves.toEqual({
+      ticket: "one-use-ticket",
+    });
+  });
+
+  it("treats an expired browser handoff ticket as unauthorized", async () => {
+    const client = new ControlAssistantLinkClient({
+      controlUrl: "https://control.example/",
+      serviceToken: "service-token",
+      fetch: () =>
+        Promise.resolve(
+          Response.json({ error: "invalid_or_expired_ticket" }, { status: 401 }),
+        ),
+    });
+
+    await expect(
+      client.redeemBrowserSessionTicket("expired-ticket"),
+    ).resolves.toBeNull();
+  });
 });

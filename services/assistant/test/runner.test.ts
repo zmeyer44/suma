@@ -111,7 +111,85 @@ describe("private assistant runner boundary", () => {
       });
     }
   });
+
+  it("authenticates and validates browser session imports", async () => {
+    const imported: Array<{ userId: string; state: unknown }> = [];
+    const harness: AssistantHarness = { run: () => Promise.resolve() };
+    const app = createAssistantRunnerApp({
+      token: "runner-token",
+      harness,
+      browserSessions: {
+        importBrowserSession(userId, state) {
+          imported.push({ userId, state });
+          return Promise.resolve();
+        },
+      },
+    });
+    const unauthorized = await app.request("/v1/browser-sessions/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: "user-1", state: storageState() }),
+    });
+    expect(unauthorized.status).toBe(401);
+
+    let requestedPath = "";
+    const client = new RemoteRunnerClient({
+      runnerUrl: "https://runner.internal/mounted/",
+      token: "runner-token",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requestedPath = new URL(request.url).pathname;
+        return app.request(
+          new Request("https://runner.internal/v1/browser-sessions/import", {
+            method: request.method,
+            headers: request.headers,
+            body: await request.text(),
+          }),
+        );
+      },
+    });
+    await client.importBrowserSession("user-1", storageState());
+    expect(requestedPath).toBe("/mounted/v1/browser-sessions/import");
+    expect(imported).toEqual([{ userId: "user-1", state: storageState() }]);
+
+    const invalid = await app.request("/v1/browser-sessions/import", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer runner-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        userId: "user-1",
+        state: { cookies: [], origins: [{ origin: "file:///tmp", localStorage: [] }] },
+      }),
+    });
+    expect(invalid.status).toBe(400);
+    expect(imported).toHaveLength(1);
+  });
 });
+
+function storageState() {
+  return {
+    cookies: [
+      {
+        name: "session",
+        value: "signed-in",
+        domain: "accounts.example",
+        path: "/",
+        expires: -1,
+        httpOnly: true,
+        secure: true,
+        sameSite: "Lax" as const,
+      },
+    ],
+    origins: [
+      {
+        origin: "https://accounts.example",
+        localStorage: [{ name: "workspace", value: "primary" }],
+      },
+    ],
+  };
+}
 
 function makeTask(): AssistantTaskRecord {
   return {

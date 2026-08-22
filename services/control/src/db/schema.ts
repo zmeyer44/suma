@@ -86,6 +86,19 @@ export const assistantLinkCodes = pgTable("assistant_link_codes", {
   redeemedAt: timestamp("redeemed_at", { withTimezone: true, mode: "date" }),
 });
 
+// One-use bearer tickets let an enrolled desktop hand browser state to the
+// assistant gateway without disclosing its broad device credential. Only the
+// digest is stored; the state itself never passes through control.
+export const assistantBrowserTickets = pgTable("assistant_browser_tickets", {
+  ticketHash: text("ticket_hash").primaryKey(),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }).notNull(),
+  redeemedAt: timestamp("redeemed_at", { withTimezone: true, mode: "date" }),
+});
+
 // External identities are unique within a configured channel account. The
 // gateway re-resolves this row for every inbound message so DELETE is an
 // immediate kill switch rather than a cache invalidation promise.

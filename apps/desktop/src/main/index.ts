@@ -62,6 +62,7 @@ import { createDownloadPolicyReader } from "./files/prefs";
 import { HistoryService } from "./history";
 import { planeHealthFor, presentSpaces, registerIpc } from "./ipc";
 import { RemoteAssistantSettingsService } from "./remote-assistant-settings";
+import { RemoteBrowserContinuityService } from "./remote-browser-continuity";
 import { MigrationService } from "./migration";
 import { BuzzService } from "./nostr/buzz-service";
 import { registerNostrGuestPreload } from "./nostr/guest-preload";
@@ -703,8 +704,14 @@ async function startServices(ctx: {
     shell: assistantShell,
     workspaceFs,
   });
-  const remoteAssistant = new RemoteAssistantSettingsService(() =>
-    auth.controlClient(),
+  const remoteBrowserContinuity = new RemoteBrowserContinuityService({
+    control: () => auth.controlClient(),
+    spaces,
+    tabs,
+  });
+  const remoteAssistant = new RemoteAssistantSettingsService(
+    () => auth.controlClient(),
+    remoteBrowserContinuity,
   );
 
   /* ------------------- Saves: smart bookmarking (double-Shift) ------------ */

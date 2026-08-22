@@ -7,7 +7,7 @@
  * for every inbound message, so revocation and feature removal bite at once.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { zValidator } from "@hono/zod-validator";
 import {
   TERMINAL_CAPABILITIES,
@@ -20,13 +20,14 @@ import {
   isAssistantToolGroupId,
   type AssistantToolGroupId,
 } from "@suma/assistant-core";
-import { and, desc, eq, gt, isNull } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, lte } from "drizzle-orm";
 import { Hono, type MiddlewareHandler } from "hono";
 import { z } from "zod";
 import type { AuthEnv } from "./auth.js";
 import type { Db } from "./db/client.js";
 import {
   assistantLinkCodes,
+  assistantBrowserTickets,
   assistantPolicies,
   auditEvents,
   channelLinks,
@@ -43,6 +44,7 @@ export const ASSISTANT_FEATURE = "assistant";
 export const ASSISTANT_SERVICE_TOKEN_ENV = "ASSISTANT_SERVICE_TOKEN";
 
 const LINK_CODE_TTL_MS = 10 * 60_000;
+const BROWSER_TICKET_TTL_MS = 5 * 60_000;
 const LINK_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4.5";
 
@@ -51,16 +53,19 @@ export const ASSISTANT_SERVICE_PATHS: ReadonlySet<string> = new Set([
   "/v1/assistant/links/resolve",
   "/v1/assistant/links/revoke",
   "/v1/assistant/machine-session",
+  "/v1/assistant/browser-session-redeem",
 ]);
 
 export interface AssistantControlOptions {
   serviceToken: string | null;
   defaultModel: string;
+  publicUrl?: string | null;
 }
 
 export const ASSISTANT_DISABLED: AssistantControlOptions = {
   serviceToken: null,
   defaultModel: DEFAULT_MODEL,
+  publicUrl: null,
 };
 
 export function assistantOptionsFromEnv(
@@ -69,7 +74,31 @@ export function assistantOptionsFromEnv(
   return {
     serviceToken: env[ASSISTANT_SERVICE_TOKEN_ENV]?.trim() || null,
     defaultModel: env["SUMA_ASSISTANT_MODEL"]?.trim() || DEFAULT_MODEL,
+    publicUrl: assistantPublicUrl(env["SUMA_ASSISTANT_PUBLIC_URL"]),
   };
+}
+
+function assistantPublicUrl(value: string | undefined): string | null {
+  if (value === undefined || value.trim() === "") return null;
+  const url = new URL(value);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("SUMA_ASSISTANT_PUBLIC_URL must be an HTTP(S) URL");
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new Error("SUMA_ASSISTANT_PUBLIC_URL must not contain credentials");
+  }
+  if (
+    url.protocol === "http:" &&
+    !new Set(["127.0.0.1", "[::1]", "localhost"]).has(url.hostname)
+  ) {
+    throw new Error(
+      "SUMA_ASSISTANT_PUBLIC_URL must use HTTPS outside loopback development",
+    );
+  }
+  url.hash = "";
+  url.search = "";
+  if (!url.pathname.endsWith("/")) url.pathname += "/";
+  return url.href;
 }
 
 export function bearerAssistantService(
@@ -107,6 +136,10 @@ const redeemSchema = channelIdentitySchema.extend({
 const machineSessionSchema = z.object({
   userId: z.string().uuid(),
   linkId: z.string().uuid(),
+});
+
+const browserTicketRedeemSchema = z.object({
+  ticket: z.string().trim().min(32).max(256),
 });
 
 const policyPatchSchema = z
@@ -192,6 +225,19 @@ function createLinkCode(): string {
   return `${chars.slice(0, 4)}-${chars.slice(4)}`;
 }
 
+function hashBrowserTicket(ticket: string): string {
+  return createHash("sha256")
+    .update("assistant-browser-session\0")
+    .update(ticket)
+    .digest("hex");
+}
+
+function browserSessionUploadUrl(publicUrl: string): string {
+  const base = new URL(publicUrl);
+  if (!base.pathname.endsWith("/")) base.pathname += "/";
+  return new URL("v1/browser-sessions/import", base).href;
+}
+
 async function audit(
   db: Db,
   userId: string,
@@ -268,6 +314,56 @@ export function assistantRoutes(
       .where(eq(channelLinks.userId, userId))
       .orderBy(desc(channelLinks.createdAt), desc(channelLinks.id));
     return context.json({ links });
+  });
+
+  routes.post("/assistant/browser-session-ticket", async (context) => {
+    const userId = context.get("userId");
+    if (!(await assistantEnabled(db, userId))) {
+      return context.json(
+        { error: "feature_required", feature: ASSISTANT_FEATURE },
+        403,
+      );
+    }
+    if (options.serviceToken === null || options.publicUrl == null) {
+      return context.json(
+        { error: "unavailable", reason: "assistant_browser_unconfigured" },
+        503,
+      );
+    }
+    const [link] = await db
+      .select({ id: channelLinks.id })
+      .from(channelLinks)
+      .where(eq(channelLinks.userId, userId))
+      .limit(1);
+    if (link === undefined) {
+      return context.json({ error: "no_linked_channels" }, 409);
+    }
+    const now = new Date();
+    await db
+      .delete(assistantBrowserTickets)
+      .where(lte(assistantBrowserTickets.expiresAt, now));
+    const ticket = randomBytes(32).toString("base64url");
+    const expiresAt = new Date(now.getTime() + BROWSER_TICKET_TTL_MS);
+    await db.insert(assistantBrowserTickets).values({
+      ticketHash: hashBrowserTicket(ticket),
+      userId,
+      expiresAt,
+    });
+    await audit(
+      db,
+      userId,
+      "assistant.browser_session_ticket_created",
+      { expiresAt: expiresAt.toISOString() },
+      context.get("deviceId"),
+    );
+    return context.json(
+      {
+        ticket,
+        expiresAt: expiresAt.toISOString(),
+        uploadUrl: browserSessionUploadUrl(options.publicUrl),
+      },
+      201,
+    );
   });
 
   routes.delete("/channels/links/:linkId", async (context) => {
@@ -366,6 +462,42 @@ export function assistantRoutes(
         context.get("deviceId"),
       );
       return context.json({ policy: await policyFor(db, userId, options) });
+    },
+  );
+
+  routes.post(
+    "/assistant/browser-session-redeem",
+    zValidator("json", browserTicketRedeemSchema),
+    async (context) => {
+      const { ticket } = context.req.valid("json");
+      const now = new Date();
+      const [redeemed] = await db
+        .update(assistantBrowserTickets)
+        .set({ redeemedAt: now })
+        .where(
+          and(
+            eq(assistantBrowserTickets.ticketHash, hashBrowserTicket(ticket)),
+            isNull(assistantBrowserTickets.redeemedAt),
+            gt(assistantBrowserTickets.expiresAt, now),
+          ),
+        )
+        .returning({ userId: assistantBrowserTickets.userId });
+      if (redeemed === undefined) {
+        return context.json({ error: "invalid_or_expired_ticket" }, 401);
+      }
+      if (!(await assistantEnabled(db, redeemed.userId))) {
+        return context.json(
+          { error: "feature_required", feature: ASSISTANT_FEATURE },
+          403,
+        );
+      }
+      await audit(
+        db,
+        redeemed.userId,
+        "assistant.browser_session_ticket_redeemed",
+        {},
+      );
+      return context.json({ userId: redeemed.userId });
     },
   );
 

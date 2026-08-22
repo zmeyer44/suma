@@ -173,6 +173,88 @@ describe("BlueBubbles channel", () => {
     ).toEqual([]);
   });
 
+  it("redeems a one-use ticket before forwarding browser state", async () => {
+    const validTicket = "v".repeat(40);
+    const expiredTicket = "x".repeat(40);
+    const adapter = new BlueBubblesAdapter({
+      accountId: "personal",
+      serverUrl,
+      password: "bb-password",
+    });
+    const imported: Array<{ userId: string; state: unknown }> = [];
+    const app = createAssistantGatewayApp({
+      blueBubbles: adapter,
+      blueBubblesAccountId: "personal",
+      blueBubblesWebhookSecret: "webhook-secret",
+      links: {
+        resolve: () => Promise.resolve(null),
+        redeem: () => Promise.resolve({ kind: "invalid" }),
+        revoke: () => Promise.resolve(false),
+      },
+      processor: {} as AssistantTaskProcessor,
+      browserSessions: {
+        redeemTicket: (ticket) =>
+          Promise.resolve(ticket === validTicket ? { userId: "user-1" } : null),
+        importSession: (userId, state) => {
+          imported.push({ userId, state });
+          return Promise.resolve();
+        },
+      },
+    });
+    const state = {
+      cookies: [],
+      origins: [
+        {
+          origin: "https://accounts.example",
+          localStorage: [{ name: "workspace", value: "primary" }],
+        },
+      ],
+    };
+
+    const unauthorized = await app.request("/v1/browser-sessions/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticket: expiredTicket, state }),
+    });
+    expect(unauthorized.status).toBe(401);
+
+    const malformed = await app.request("/v1/browser-sessions/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ticket: validTicket,
+        state: {
+          cookies: [],
+          origins: [{ origin: "file:///tmp", localStorage: [] }],
+        },
+      }),
+    });
+    expect(malformed.status).toBe(400);
+    expect(imported).toHaveLength(0);
+
+    const importedResponse = await app.request(
+      "/v1/browser-sessions/import",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ticket: validTicket, state }),
+      },
+    );
+    expect(importedResponse.status).toBe(201);
+    expect(imported).toEqual([{ userId: "user-1", state }]);
+
+    const oversized = await app.request("/v1/browser-sessions/import", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": String(10 * 1024 * 1024),
+      },
+      body: "{}",
+    });
+    expect(oversized.status).toBe(413);
+    expect(imported).toHaveLength(1);
+  });
+
   it("handles link commands without invoking the model and deduplicates delivery", async () => {
     const adapter = new BlueBubblesAdapter({
       accountId: "personal",

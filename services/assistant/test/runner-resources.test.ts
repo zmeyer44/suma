@@ -52,6 +52,41 @@ describe("production runner resources", () => {
     expect(issuer.machineSession).toHaveBeenCalledTimes(1);
     expect(seen[0]).toBe("auth:signed-runner-capability");
   });
+
+  it("replaces a user's cached browser state before the next remote action", async () => {
+    const resources = new ProductionAssistantResources({
+      control: {
+        machineSession: vi.fn().mockRejectedValue(new Error("not used")),
+      },
+      dataDirectory: await mkdtemp(join(tmpdir(), "suma-browser-import-")),
+      masterKey: Buffer.alloc(32, 9),
+    });
+    cleanups.push(() => resources.close());
+
+    const before = await resources.browserForTask(task());
+    const state = {
+      cookies: [
+        {
+          name: "session",
+          value: "shared",
+          domain: "example.com",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
+      ],
+      origins: [],
+    };
+    await resources.importBrowserSession("user-1", state);
+    const after = await resources.browserForTask(task());
+
+    expect(after).toBe(before);
+    await expect(
+      resources.store.load({ userId: "user-1", spaceId: "remote" }),
+    ).resolves.toEqual(state);
+  });
 });
 
 function task(): AssistantTaskRecord {

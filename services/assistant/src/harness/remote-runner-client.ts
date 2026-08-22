@@ -14,11 +14,16 @@ export interface RemoteRunnerClientOptions {
 /** Public gateway client for the private browser/VM runner plane. */
 export class RemoteRunnerClient implements AssistantHarness {
   readonly #runnerUrl: URL;
+  readonly #browserSessionUrl: URL;
   readonly #token: string;
   readonly #fetch: typeof fetch;
 
   constructor(options: RemoteRunnerClientOptions) {
     this.#runnerUrl = appendServicePath(options.runnerUrl, "v1/tasks/run");
+    this.#browserSessionUrl = appendServicePath(
+      options.runnerUrl,
+      "v1/browser-sessions/import",
+    );
     this.#token = options.token;
     this.#fetch = options.fetch ?? fetch;
   }
@@ -58,6 +63,23 @@ export class RemoteRunnerClient implements AssistantHarness {
     }
     if (buffered.trim() !== "") {
       await emit(parseOutboundLine(buffered.trim()));
+    }
+  }
+
+  async importBrowserSession(userId: string, state: unknown): Promise<void> {
+    const response = await this.#fetch(this.#browserSessionUrl, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${this.#token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ userId, state }),
+      redirect: "error",
+    });
+    if (!response.ok) {
+      throw new Error(
+        `assistant runner browser import failed with HTTP ${String(response.status)}`,
+      );
     }
   }
 }

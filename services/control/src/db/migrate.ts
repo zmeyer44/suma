@@ -92,6 +92,13 @@ const STATEMENTS: ReadonlyArray<string> = [
     expires_at timestamptz NOT NULL,
     redeemed_at timestamptz
   )`,
+  `CREATE TABLE IF NOT EXISTS assistant_browser_tickets (
+    ticket_hash text PRIMARY KEY,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz NOT NULL,
+    redeemed_at timestamptz
+  )`,
   `CREATE TABLE IF NOT EXISTS channel_links (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,

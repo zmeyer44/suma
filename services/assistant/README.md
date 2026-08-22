@@ -31,8 +31,9 @@ second tool implementation.
   independently enforced remote policy for model, tools, step count, and VM
   wake limits.
 - Desktop Settings for creating link codes, listing and revoking linked
-  channels, and editing every remote permission without changing the local
-  chat assistant's permissions.
+  channels, explicitly sharing the active space's authenticated browser state,
+  and editing every remote permission without changing the local chat
+  assistant's permissions.
 - An encrypted, crash-recoverable task queue and encrypted conversation
   history. Failed tasks return a user-visible channel reply, and drain/store
   failures are contained instead of becoming unhandled process rejections.
@@ -61,8 +62,10 @@ The real-browser suite launches Chrome and proves click/type/screenshot,
 HttpOnly cookie and local-storage restart persistence, custom bearer-token
 injection, redirect-hop policy enforcement, popup policy enforcement, and an
 already-authenticated desktop session handoff. The external-assistant E2E
-also exercises BlueBubbles ingress through the private runner with browser
-and custom-auth actions.
+also launches the real desktop Settings UI, transfers its active space through
+a one-use control-authorized ticket, closes the desktop, and exercises
+BlueBubbles ingress through the private runner with authenticated browser
+actions.
 
 ## Local development
 
@@ -112,6 +115,12 @@ must receive `SUMA_AGENT_VERIFY_KEY`, which is the control plane's Ed25519
 public key; provisioning now migrates existing machines away from the legacy
 static `SUMA_AGENT_CLAIMS` environment value.
 
+Control must also receive `SUMA_ASSISTANT_PUBLIC_URL`, the public HTTPS base
+URL of the channel gateway. It may include a deployment path prefix. Control
+uses it to vend five-minute, one-use browser-session upload tickets; only the
+ticket digest is stored, and browser state bypasses control on its way to the
+private runner.
+
 ## Remaining production integration
 
 The runner and signed VM transport exist, but no hosted gateway/runner
@@ -119,10 +128,10 @@ deployment is configured by this repository yet. Before enabling real users:
 
 - Deploy the public gateway and private runner as separate trust zones and
   keep the agent port private even though mux authentication is now required.
-- Connect the validated browser-session transfer to desktop/SessionHub account
-  changes so a remote browser automatically inherits a shareable signed-in
-  session. The transfer primitive is implemented and tested; the production
-  continuity trigger is not.
+- Decide whether selected spaces should opt into automatic browser-session
+  refresh after the explicit Settings handoff. V1 intentionally requires a
+  user action so the expanded runner trust boundary is visible; the complete
+  one-use transfer path is implemented and tested.
 - Replace the runner-wide `AI_GATEWAY_API_KEY` with a control-vended,
   per-user inference lease if per-account metering and revocation are required.
 - Add cumulative daily wake accounting and the idle auto-suspend reaper. The

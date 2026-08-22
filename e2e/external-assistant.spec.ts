@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import {
   createServer,
   type IncomingMessage,
@@ -10,16 +10,23 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
+import { _electron as electron, type ElectronApplication } from "playwright";
 import { PGlite } from "@electric-sql/pglite";
 import { serve } from "@hono/node-server";
 import { drizzle } from "drizzle-orm/pglite";
 import type { AssistantHarness } from "@suma/assistant-core/channel";
+import {
+  generateDeviceKeypair,
+  generateSpaceRootSecret,
+  toBase64,
+} from "@suma/protocol";
 import { createApp as createControlApp } from "../services/control/src/app";
 import { ensureSchema } from "../services/control/src/db/migrate";
 import * as controlSchema from "../services/control/src/db/schema";
 import { StubSandboxProvider } from "../services/control/src/providers/sandbox";
 import { createAssistantGatewayApp } from "../services/assistant/src/app";
 import {
+  BrowserSessionTransferService,
   EncryptedFileBrowserSessionStore,
   PlaywrightBrowserBackend,
   PlaywrightBrowserRuntime,
@@ -77,10 +84,11 @@ interface BridgeServer extends RunningServer {
 
 test.skip(chromePath === undefined, "Chrome is required for remote browser E2E");
 
-test("BlueBubbles drives an authenticated remote browser while desktop is closed", async ({
+test("desktop session handoff lets BlueBubbles drive an authenticated remote browser", async ({
   page,
 }) => {
   test.setTimeout(120_000);
+  await rm(SCREENSHOTS, { recursive: true, force: true });
   await mkdir(SCREENSHOTS, { recursive: true });
   const closers: Array<() => Promise<void>> = [];
   let releaseWork: () => void = () => undefined;
@@ -88,6 +96,7 @@ test("BlueBubbles drives an authenticated remote browser while desktop is closed
   let harnessStarted = false;
   const streamedMessages: string[] = [];
   const adapterRequests: string[] = [];
+  let desktop: ElectronApplication | undefined;
 
   try {
     const pglite = new PGlite();
@@ -104,6 +113,11 @@ test("BlueBubbles drives an authenticated remote browser while desktop is closed
     if (user === undefined) throw new Error("failed to create E2E user");
     const deviceToken = `hbr_dev_${user.id}`;
 
+    const assistantOptions = {
+      serviceToken: SERVICE_TOKEN,
+      defaultModel: "e2e/model",
+      publicUrl: null as string | null,
+    };
     const control = await startFetchServer(
       createControlApp(
         db,
@@ -114,7 +128,7 @@ test("BlueBubbles drives an authenticated remote browser while desktop is closed
         undefined,
         undefined,
         undefined,
-        { serviceToken: SERVICE_TOKEN, defaultModel: "e2e/model" },
+        assistantOptions,
       ).fetch,
     );
     closers.push(control.close);
@@ -131,24 +145,6 @@ test("BlueBubbles drives an authenticated remote browser while desktop is closed
     const browserStore = new EncryptedFileBrowserSessionStore(
       browserDirectory,
       randomBytes(32),
-    );
-    await browserStore.save(
-      { userId: user.id, spaceId: SPACE_ID },
-      {
-        cookies: [
-          {
-            name: "suma_e2e_session",
-            value: "authenticated",
-            domain: new URL(account.url).hostname,
-            path: "/",
-            expires: -1,
-            httpOnly: true,
-            secure: false,
-            sameSite: "Lax",
-          },
-        ],
-        origins: [],
-      },
     );
     const browserRuntime = new PlaywrightBrowserRuntime({
       executablePath: chromePath,
@@ -192,7 +188,7 @@ test("BlueBubbles drives an authenticated remote browser while desktop is closed
         expect(result.text).toContain("Signed in as Remote Suma");
         const screenshot = await browser.screenshot(tab.tabId);
         await writeFile(
-          path.join(SCREENSHOTS, "04-remote-account-updated.jpg"),
+          path.join(SCREENSHOTS, "06-remote-account-updated.jpg"),
           Buffer.from(screenshot.data, "base64"),
         );
         await emit({
@@ -203,7 +199,17 @@ test("BlueBubbles drives an authenticated remote browser while desktop is closed
     };
 
     const runner = await startFetchServer(
-      createAssistantRunnerApp({ token: RUNNER_TOKEN, harness }).fetch,
+      createAssistantRunnerApp({
+        token: RUNNER_TOKEN,
+        harness,
+        browserSessions: {
+          importBrowserSession: (userId, state) =>
+            new BrowserSessionTransferService(browserStore).import(
+              { userId, spaceId: SPACE_ID },
+              state,
+            ),
+        },
+      }).fetch,
     );
     closers.push(runner.close);
 
@@ -239,19 +245,26 @@ test("BlueBubbles drives an authenticated remote browser while desktop is closed
       },
       adapters: [blueBubbles],
     });
+    const links = new ControlAssistantLinkClient({
+      controlUrl: control.url,
+      serviceToken: SERVICE_TOKEN,
+    });
     const gateway = await startFetchServer(
       createAssistantGatewayApp({
         blueBubbles,
         blueBubblesAccountId: ACCOUNT_ID,
         blueBubblesWebhookSecret: WEBHOOK_SECRET,
-        links: new ControlAssistantLinkClient({
-          controlUrl: control.url,
-          serviceToken: SERVICE_TOKEN,
-        }),
+        links,
         processor,
+        browserSessions: {
+          redeemTicket: (ticket) => links.redeemBrowserSessionTicket(ticket),
+          importSession: (userId, state) =>
+            remoteRunner.importBrowserSession(userId, state),
+        },
       }).fetch,
     );
     closers.push(gateway.close);
+    assistantOptions.publicUrl = gateway.url;
     bridge.setGatewayUrl(gateway.url);
 
     const codeResponse = await fetch(`${control.url}/v1/channels/link-code`, {
@@ -281,6 +294,108 @@ test("BlueBubbles drives an authenticated remote browser while desktop is closed
       fullPage: true,
     });
 
+    // A real desktop space holds the account cookie and live local storage;
+    // Settings makes the sensitive transfer explicit before the app closes.
+    const profile = await prepareDesktopProfile({
+      controlUrl: control.url,
+      deviceToken,
+      userId: user.id,
+    });
+    desktop = await electron.launch({
+      executablePath: path.join(
+        REPO,
+        "apps/desktop/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+      ),
+      args: [
+        path.join(REPO, "apps/desktop/out/main/index.js"),
+        `--user-data-dir=${profile}`,
+      ],
+      env: safeDesktopEnv(profile),
+    });
+    const desktopPage = await chromePage(desktop);
+    await desktop.evaluate(
+      async ({ session }, value) => {
+        await session
+          .fromPartition(`persist:space-${value.spaceId}`)
+          .cookies.set({
+            url: value.accountUrl,
+            name: "suma_e2e_session",
+            value: "authenticated",
+            path: "/",
+            httpOnly: true,
+            sameSite: "lax",
+          });
+      },
+      { accountUrl: account.url, spaceId: SPACE_ID },
+    );
+    await desktopPage.evaluate(
+      (value) =>
+        window.suma.invoke("tabs:create", {
+          spaceId: value.spaceId,
+          url: `${value.accountUrl}/account`,
+        }),
+      { accountUrl: account.url, spaceId: SPACE_ID },
+    );
+    await expect
+      .poll(() => hasLiveTabUrl(desktop!, `${account.url}/account`))
+      .toBe(true);
+    await desktop.evaluate(
+      async ({ webContents }, value) => {
+        const tab = webContents
+          .getAllWebContents()
+          .find((contents) => contents.getURL() === `${value.accountUrl}/account`);
+        if (tab === undefined) throw new Error("authenticated desktop tab missing");
+        await tab.executeJavaScript(
+          `localStorage.setItem("workspace", "primary")`,
+        );
+      },
+      { accountUrl: account.url },
+    );
+    await desktopPage.evaluate(
+      (spaceId) =>
+        window.suma.invoke("tabs:create", {
+          spaceId,
+          url: "suma://settings/assistant",
+        }),
+      SPACE_ID,
+    );
+    await expect(
+      desktopPage.getByRole("heading", { name: "Assistant", exact: true }),
+    ).toBeVisible();
+    await expect(
+      desktopPage.getByRole("button", { name: "Share active space sessions" }),
+    ).toBeVisible();
+    await desktopPage.screenshot({
+      path: path.join(SCREENSHOTS, "03-desktop-share-ready.png"),
+      fullPage: true,
+    });
+
+    // The button performs the complete ticket → gateway → private-runner
+    // handoff; its receipt and the encrypted runner state are both observed.
+    await desktopPage
+      .getByRole("button", { name: "Share active space sessions" })
+      .evaluate((button: HTMLButtonElement) => button.click());
+    await expect
+      .poll(() => browserStore.load({ userId: user.id, spaceId: SPACE_ID }))
+      .toMatchObject({
+        cookies: [expect.objectContaining({ name: "suma_e2e_session" })],
+        origins: [
+          {
+            origin: account.url,
+            localStorage: [{ name: "workspace", value: "primary" }],
+          },
+        ],
+      });
+    await expect(
+      desktopPage.getByTestId("remote-browser-share-receipt"),
+    ).toContainText("Personal · 1 cookie · 1 site");
+    await desktopPage.screenshot({
+      path: path.join(SCREENSHOTS, "04-desktop-share-complete.png"),
+      fullPage: true,
+    });
+    await desktop.close();
+    desktop = undefined;
+
     // A streamed status proves the public gateway does not wait for the browser turn to finish.
     await page
       .getByLabel("Message")
@@ -296,7 +411,7 @@ test("BlueBubbles drives an authenticated remote browser while desktop is closed
       .toContain("Working…");
     await expect(page.getByText("Working…", { exact: true })).toBeVisible();
     await page.screenshot({
-      path: path.join(SCREENSHOTS, "03-working-bridge.png"),
+      path: path.join(SCREENSHOTS, "05-working-bridge.png"),
       fullPage: true,
     });
 
@@ -312,15 +427,152 @@ test("BlueBubbles drives an authenticated remote browser while desktop is closed
       .poll(() => account.profileName())
       .toBe("Remote Suma");
     await page.screenshot({
-      path: path.join(SCREENSHOTS, "05-final-bridge.png"),
+      path: path.join(SCREENSHOTS, "07-final-bridge.png"),
       fullPage: true,
     });
   } finally {
     releaseWork();
+    await desktop?.close().catch(() => undefined);
     await processor?.drain().catch(() => undefined);
     for (const close of closers.reverse()) await close().catch(() => undefined);
   }
 });
+
+function workspaceFile() {
+  return {
+    version: 1,
+    spaces: [
+      {
+        id: SPACE_ID,
+        name: "Personal",
+        color: "#5b8cff",
+        position: 0,
+        egressPolicy: "direct",
+        createdAtMs: 1,
+      },
+    ],
+    pins: [],
+    archives: [],
+    settings: {
+      historySyncEnabled: false,
+      autoArchiveAfterHours: 12,
+      keyMode: "e2ee",
+      newTabUrl: "about:blank",
+    },
+    originOverrides: {},
+    signInQueue: [],
+    permissionGrants: [],
+    deviceLocal: {
+      activeSpaceId: SPACE_ID,
+      activeTabBySpace: {},
+      todayTabsBySpace: {},
+      realtimeTabsMigratedBySpace: { [SPACE_ID]: true },
+      splitTabBySpace: {},
+      nativeTransportDomains: [],
+    },
+    history: [],
+    lww: {},
+    downloads: [],
+    egress: {},
+  };
+}
+
+async function prepareDesktopProfile(options: {
+  controlUrl: string;
+  deviceToken: string;
+  userId: string;
+}): Promise<string> {
+  const userData = await mkdtemp(
+    path.join(tmpdir(), "suma-external-desktop-e2e-"),
+  );
+  const keys = await generateDeviceKeypair();
+  const spaceSecret = generateSpaceRootSecret();
+  const workspaceSecret = generateSpaceRootSecret();
+  await Promise.all([
+    writeFile(
+      path.join(userData, "workspace.json"),
+      JSON.stringify(workspaceFile()),
+    ),
+    writeFile(
+      path.join(userData, "device.json"),
+      JSON.stringify({
+        deviceId: "external-assistant-device",
+        privateKeyJwk: await crypto.subtle.exportKey("jwk", keys.privateKey),
+        publicKeyJwk: await crypto.subtle.exportKey("jwk", keys.publicKey),
+        spaceSecrets: { [SPACE_ID]: toBase64(spaceSecret) },
+        workspaceSecret: toBase64(workspaceSecret),
+        enrollment: {
+          state: "enrolled",
+          controlUrl: options.controlUrl,
+          email: "external-assistant@example.com",
+          displayName: "External Assistant E2E",
+          userId: options.userId,
+          deviceName: "External Assistant Mac",
+          credentialKind: "device-key",
+          controlDeviceId: null,
+          authToken: options.deviceToken,
+          computeMode: "local",
+          isHomeMachine: true,
+        },
+      }),
+    ),
+  ]);
+  return userData;
+}
+
+function safeDesktopEnv(userData: string): NodeJS.ProcessEnv {
+  const env = {
+    ...process.env,
+    SUMA_USER_DATA: userData,
+    SUMA_NO_DOTENV: "1",
+  };
+  for (const key of [
+    "SUMA_CONTROL_URL",
+    "SUMA_HUB_URL",
+    "SUMA_SESSION_GATEWAY_URL",
+    "SUMA_SESSION_GATEWAY_DEV_TOKEN",
+    "SUMA_AGENT_URL",
+    "SUMA_EGRESS_URL",
+  ]) {
+    delete env[key];
+  }
+  return env;
+}
+
+async function chromePage(app: ElectronApplication) {
+  await expect
+    .poll(() =>
+      app
+        .windows()
+        .find(
+          (candidate) =>
+            candidate.url().startsWith("file:") &&
+            !candidate.url().includes("#"),
+        ),
+    )
+    .not.toBeUndefined();
+  const page = app
+    .windows()
+    .find(
+      (candidate) =>
+        candidate.url().startsWith("file:") && !candidate.url().includes("#"),
+    );
+  if (page === undefined) throw new Error("Suma chrome page missing");
+  await expect
+    .poll(() => page.evaluate(() => typeof window.suma === "object"))
+    .toBe(true);
+  return page;
+}
+
+function hasLiveTabUrl(app: ElectronApplication, url: string): Promise<boolean> {
+  return app.evaluate(
+    ({ webContents }, expected) =>
+      webContents
+        .getAllWebContents()
+        .some((contents) => contents.getURL() === expected),
+    url,
+  );
+}
 
 async function startAccountServer(): Promise<
   RunningServer & { profileName(): string }

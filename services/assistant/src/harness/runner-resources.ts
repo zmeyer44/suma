@@ -11,7 +11,9 @@ import {
 import {
   EncryptedFileBrowserSessionStore,
   type BrowserSessionStore,
+  type BrowserStorageState,
 } from "../browser/session-store";
+import { BrowserSessionTransferService } from "../browser/session-transfer";
 import type { AssistantMachineSession } from "../control-client";
 import type { RemoteAssistantResources } from "./remote-tool-provider";
 
@@ -38,6 +40,7 @@ export class ProductionAssistantResources implements RemoteAssistantResources {
   readonly #control: MachineSessionIssuer;
   readonly #authProviderForUser: (userId: string) => BrowserAuthProvider;
   readonly #browsers = new Map<string, PlaywrightBrowserBackend>();
+  readonly #browserImports = new Map<string, Promise<void>>();
   readonly #agents = new Map<string, PooledAgent>();
 
   constructor(options: {
@@ -63,8 +66,9 @@ export class ProductionAssistantResources implements RemoteAssistantResources {
       options.authProviderForUser ?? (() => new EmptyBrowserAuthProvider());
   }
 
-  browserForTask(task: AssistantTaskRecord): Promise<BrowserBackend> {
+  async browserForTask(task: AssistantTaskRecord): Promise<BrowserBackend> {
     const userId = task.authorization.userId;
+    await this.#browserImports.get(userId);
     let browser = this.#browsers.get(userId);
     if (browser === undefined) {
       browser = new PlaywrightBrowserBackend({
@@ -76,7 +80,31 @@ export class ProductionAssistantResources implements RemoteAssistantResources {
       });
       this.#browsers.set(userId, browser);
     }
-    return Promise.resolve(browser);
+    return browser;
+  }
+
+  async importBrowserSession(
+    userId: string,
+    state: BrowserStorageState,
+  ): Promise<void> {
+    const previous = this.#browserImports.get(userId) ?? Promise.resolve();
+    const pending = previous.catch(() => undefined).then(async () => {
+      const browser = this.#browsers.get(userId);
+      if (browser !== undefined) {
+        await browser.importStorageState(state);
+        return;
+      }
+      const transfer = new BrowserSessionTransferService(this.store);
+      await transfer.import({ userId, spaceId: SESSION_SPACE }, state);
+    });
+    this.#browserImports.set(userId, pending);
+    try {
+      await pending;
+    } finally {
+      if (this.#browserImports.get(userId) === pending) {
+        this.#browserImports.delete(userId);
+      }
+    }
   }
 
   async agentForTask(task: AssistantTaskRecord): Promise<AgentLink> {
@@ -112,6 +140,7 @@ export class ProductionAssistantResources implements RemoteAssistantResources {
   }
 
   async close(): Promise<void> {
+    await Promise.allSettled(this.#browserImports.values());
     for (const browser of this.#browsers.values()) await browser.close();
     this.#browsers.clear();
     for (const agent of this.#agents.values()) agent.link.stop();

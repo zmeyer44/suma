@@ -33,7 +33,11 @@ const harness = new AiSdkAssistantHarness({
   conversations,
   toolsForTask: (task) => tools.toolsForTask(task),
 });
-const app = createAssistantRunnerApp({ token: config.runnerToken, harness });
+const app = createAssistantRunnerApp({
+  token: config.runnerToken,
+  harness,
+  browserSessions: resources,
+});
 const server = serve({ fetch: app.fetch, port: config.port });
 
 function stop(): void {

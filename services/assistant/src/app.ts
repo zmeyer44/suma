@@ -7,6 +7,18 @@ import type { BlueBubblesAdapter } from "./channels/bluebubbles";
 import { verifyBlueBubblesWebhookSecret } from "./channels/bluebubbles";
 import type { AssistantLinkService, LinkCommandResult } from "./control-client";
 import type { AssistantTaskProcessor } from "./tasks/task-processor";
+import { parseBrowserStorageState } from "./browser/session-transfer";
+import {
+  readJsonBody,
+  RequestBodyTooLargeError,
+} from "./request-body";
+
+const MAX_BROWSER_SESSION_REQUEST_BYTES = 9 * 1024 * 1024;
+
+export interface AssistantBrowserSessionGateway {
+  redeemTicket(ticket: string): Promise<{ userId: string } | null>;
+  importSession(userId: string, state: unknown): Promise<void>;
+}
 
 export interface AssistantGatewayAppOptions {
   blueBubbles: BlueBubblesAdapter;
@@ -14,6 +26,7 @@ export interface AssistantGatewayAppOptions {
   blueBubblesWebhookSecret: string;
   links: AssistantLinkService;
   processor: AssistantTaskProcessor;
+  browserSessions?: AssistantBrowserSessionGateway;
   onBackgroundError?: (error: unknown) => void;
   now?: () => number;
 }
@@ -25,6 +38,55 @@ export function createAssistantGatewayApp(options: AssistantGatewayAppOptions) {
   const unlinkedNoticeAt = new Map<string, number>();
 
   app.get("/healthz", (context) => context.json({ ok: true }));
+
+  app.post("/v1/browser-sessions/import", async (context) => {
+    if (options.browserSessions === undefined) {
+      return context.json({ error: "unavailable" }, 503);
+    }
+    let body: unknown;
+    try {
+      body = await readJsonBody(
+        context.req.raw,
+        MAX_BROWSER_SESSION_REQUEST_BYTES,
+      );
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        return context.json({ error: "payload_too_large" }, 413);
+      }
+      return context.json({ error: "invalid JSON" }, 400);
+    }
+    if (
+      !isRecord(body) ||
+      typeof body["ticket"] !== "string" ||
+      body["ticket"].length < 32 ||
+      body["ticket"].length > 256
+    ) {
+      return context.json({ error: "invalid browser session handoff" }, 400);
+    }
+    let state: ReturnType<typeof parseBrowserStorageState>;
+    try {
+      state = parseBrowserStorageState(body["state"]);
+    } catch (error) {
+      return context.json(
+        {
+          error: "invalid browser session handoff",
+          reason: error instanceof Error ? error.message : String(error),
+        },
+        400,
+      );
+    }
+    const authorization = await options.browserSessions.redeemTicket(
+      body["ticket"],
+    );
+    if (authorization === null) {
+      return context.json({ error: "invalid_or_expired_ticket" }, 401);
+    }
+    await options.browserSessions.importSession(
+      authorization.userId,
+      state,
+    );
+    return context.json({ imported: true }, 201);
+  });
 
   app.post(
     "/v1/channels/bluebubbles/:accountId/webhook",
@@ -152,4 +214,8 @@ function rememberBounded(set: Set<string>, value: string): void {
   if (set.size <= 10_000) return;
   const oldest = set.values().next().value as string | undefined;
   if (oldest !== undefined) set.delete(oldest);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

@@ -20,12 +20,13 @@ const store = new EncryptedFileAssistantTaskStore(
   join(config.dataDirectory, "tasks.enc"),
   config.masterKey,
 );
+const runner = new RemoteRunnerClient({
+  runnerUrl: config.runnerUrl,
+  token: config.runnerToken,
+});
 const processor = new AssistantTaskProcessor({
   store,
-  harness: new RemoteRunnerClient({
-    runnerUrl: config.runnerUrl,
-    token: config.runnerToken,
-  }),
+  harness: runner,
   adapters: [blueBubbles],
 });
 const links = new ControlAssistantLinkClient({
@@ -38,6 +39,11 @@ const app = createAssistantGatewayApp({
   blueBubblesWebhookSecret: config.blueBubblesWebhookSecret,
   links,
   processor,
+  browserSessions: {
+    redeemTicket: (ticket) => links.redeemBrowserSessionTicket(ticket),
+    importSession: (userId, state) =>
+      runner.importBrowserSession(userId, state),
+  },
 });
 
 const server = serve({ fetch: app.fetch, port: config.port });

@@ -43,3 +43,19 @@ export interface RemoteAssistantLinkCode {
   code: string;
   expiresAt: string;
 }
+
+/** Short-lived control-plane authorization for one browser-state upload. */
+export interface RemoteAssistantBrowserSessionTicket {
+  ticket: string;
+  expiresAt: string;
+  uploadUrl: string;
+}
+
+export interface RemoteAssistantBrowserShareResult {
+  sharedAt: string;
+  spaceId: string;
+  spaceName: string;
+  cookieCount: number;
+  originCount: number;
+  localStorageItemCount: number;
+}

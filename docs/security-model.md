@@ -251,9 +251,17 @@ user's request even while the desktop is closed.
 - Channel text and page content are untrusted inputs. Tool permissions and
   step caps are server-owned policy, independent from desktop chat settings,
   and the VM capability token contains only the groups enabled for that turn.
-- The validated desktop-session handoff and custom-auth provider are
-  implemented, but their production configuration/continuity trigger is not;
-  neither should be advertised as automatic until that wiring ships.
+- The validated desktop-session handoff is wired as an explicit Settings
+  action. Control vends a five-minute, one-use opaque ticket and stores only
+  its digest; the desktop sends cookies and live-tab local storage directly to
+  the public gateway, which forwards them to the authenticated private runner
+  for validation and encrypted storage. The desktop device credential never
+  leaves control, redirects are disabled, and non-loopback uploads require
+  HTTPS. This is not automatic continuity: the user chooses when to replace
+  the remote browser's saved state.
+- The custom-auth provider is implemented but its stored configuration UI is
+  not. Token-backed integrations therefore remain an operator configuration
+  surface until that wiring ships.
 
 ## 8. Sections owed before beta (per PRD §9, not yet written)
 

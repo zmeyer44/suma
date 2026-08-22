@@ -779,6 +779,9 @@ export function registerIpc(deps: IpcDeps): void {
     }
     return deps.remoteAssistant.updatePolicy(patch);
   });
+  handle("remoteAssistant:shareBrowserSession", () =>
+    deps.remoteAssistant.shareBrowserSession(),
+  );
 
   /* ----------------------------- voice assistant ------------------------- */
 

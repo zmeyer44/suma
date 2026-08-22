@@ -18,6 +18,7 @@ import {
   tokenExpSeconds,
 } from "./auth-token";
 import type {
+  RemoteAssistantBrowserSessionTicket,
   RemoteAssistantLink,
   RemoteAssistantLinkCode,
   RemoteAssistantPolicy,
@@ -510,6 +511,14 @@ export class ControlClient {
 
   createAssistantLinkCode(): Promise<RemoteAssistantLinkCode> {
     return this.request("POST", "/v1/channels/link-code", {});
+  }
+
+  createAssistantBrowserSessionTicket(): Promise<RemoteAssistantBrowserSessionTicket> {
+    return this.request(
+      "POST",
+      "/v1/assistant/browser-session-ticket",
+      {},
+    );
   }
 
   async listAssistantLinks(): Promise<RemoteAssistantLink[]> {

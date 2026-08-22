@@ -6,13 +6,68 @@ import type {
 } from "@suma/assistant-core/channel";
 import { isAssistantToolGroupId } from "@suma/assistant-core/tool-groups";
 import { Hono } from "hono";
+import {
+  parseBrowserStorageState,
+  type BrowserStorageState,
+} from "../browser";
+import {
+  readJsonBody,
+  RequestBodyTooLargeError,
+} from "../request-body";
+
+const MAX_BROWSER_SESSION_REQUEST_BYTES = 9 * 1024 * 1024;
+
+export interface RunnerBrowserSessionImporter {
+  importBrowserSession(
+    userId: string,
+    state: BrowserStorageState,
+  ): Promise<void>;
+}
 
 export function createAssistantRunnerApp(options: {
   token: string;
   harness: AssistantHarness;
+  browserSessions?: RunnerBrowserSessionImporter;
 }) {
   const app = new Hono();
   app.get("/healthz", (context) => context.json({ ok: true }));
+  app.post("/v1/browser-sessions/import", async (context) => {
+    if (!bearerMatches(context.req.header("authorization"), options.token)) {
+      return context.json({ error: "unauthorized" }, 401);
+    }
+    if (options.browserSessions === undefined) {
+      return context.json({ error: "unavailable" }, 503);
+    }
+    let body: unknown;
+    try {
+      body = await readJsonBody(
+        context.req.raw,
+        MAX_BROWSER_SESSION_REQUEST_BYTES,
+      );
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        return context.json({ error: "payload_too_large" }, 413);
+      }
+      return context.json({ error: "invalid JSON" }, 400);
+    }
+    if (!isRecord(body) || typeof body["userId"] !== "string") {
+      return context.json({ error: "invalid browser session handoff" }, 400);
+    }
+    let state: BrowserStorageState;
+    try {
+      state = parseBrowserStorageState(body["state"]);
+    } catch (error) {
+      return context.json(
+        {
+          error: "invalid browser session handoff",
+          reason: error instanceof Error ? error.message : String(error),
+        },
+        400,
+      );
+    }
+    await options.browserSessions.importBrowserSession(body["userId"], state);
+    return context.json({ imported: true }, 201);
+  });
   app.post("/v1/tasks/run", async (context) => {
     if (!bearerMatches(context.req.header("authorization"), options.token)) {
       return context.json({ error: "unauthorized" }, 401);
@@ -47,6 +102,10 @@ export function createAssistantRunnerApp(options: {
     });
   });
   return app;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function bearerMatches(header: string | undefined, expected: string): boolean {

@@ -67,4 +67,25 @@ describe("remote assistant settings", () => {
       reason: "Remote assistant access is not enabled for this account.",
     });
   });
+
+  it("delegates an explicit browser-session share", async () => {
+    const result = {
+      sharedAt: "2026-08-22T13:00:00.000Z",
+      spaceId: "space-1",
+      spaceName: "Personal",
+      cookieCount: 3,
+      originCount: 1,
+      localStorageItemCount: 2,
+    };
+    const browserContinuity = {
+      shareActiveSpace: vi.fn().mockResolvedValue(result),
+    };
+    const service = new RemoteAssistantSettingsService(
+      () => null,
+      browserContinuity,
+    );
+
+    await expect(service.shareBrowserSession()).resolves.toEqual(result);
+    expect(browserContinuity.shareActiveSpace).toHaveBeenCalledOnce();
+  });
 });

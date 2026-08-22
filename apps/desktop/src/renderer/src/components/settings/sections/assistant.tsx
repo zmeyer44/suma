@@ -19,6 +19,7 @@ import {
   type ChatSettingsPatch,
 } from "../../../../../shared/chat";
 import type {
+  RemoteAssistantBrowserShareResult,
   RemoteAssistantLinkCode,
   RemoteAssistantOverview,
   RemoteAssistantPolicyPatch,
@@ -86,14 +87,18 @@ function useChatSettings(): {
 function useRemoteAssistant(): {
   overview: RemoteAssistantOverview | null;
   linkCode: RemoteAssistantLinkCode | null;
+  browserShare: RemoteAssistantBrowserShareResult | null;
   busy: boolean;
   createLinkCode: () => void;
   revokeLink: (linkId: string) => void;
+  shareBrowserSession: () => void;
   updatePolicy: (patch: RemoteAssistantPolicyPatch) => void;
 } {
   const pushToast = useSumaStore((s) => s.pushToast);
   const [overview, setOverview] = useState<RemoteAssistantOverview | null>(null);
   const [linkCode, setLinkCode] = useState<RemoteAssistantLinkCode | null>(null);
+  const [browserShare, setBrowserShare] =
+    useState<RemoteAssistantBrowserShareResult | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -146,7 +151,30 @@ function useRemoteAssistant(): {
     [pushToast],
   );
 
-  return { overview, linkCode, busy, createLinkCode, revokeLink, updatePolicy };
+  const shareBrowserSession = useCallback(() => {
+    setBusy(true);
+    void window.suma
+      .invoke("remoteAssistant:shareBrowserSession", undefined)
+      .then((result) => {
+        setBrowserShare(result);
+        pushToast("Remote browser sessions updated.", "success");
+      })
+      .catch(() =>
+        pushToast("Could not share the active browser sessions.", "error"),
+      )
+      .finally(() => setBusy(false));
+  }, [pushToast]);
+
+  return {
+    overview,
+    linkCode,
+    browserShare,
+    busy,
+    createLinkCode,
+    revokeLink,
+    shareBrowserSession,
+    updatePolicy,
+  };
 }
 
 const KEY_NOTES: Record<ChatSettingsInfo["keyState"], string> = {
@@ -243,6 +271,32 @@ export function AssistantPage() {
                 </Row>
               ))
             )}
+            {remote.overview.links.length > 0 ? (
+              <Block
+                label="Authenticated remote browser"
+                note="Copy authentication cookies from the active Suma space and local storage from its open tabs into your private remote browser. This replaces its saved session so linked bots can act as you after this app closes."
+              >
+                <div className="flex items-center gap-2.5">
+                  <Button
+                    variant="secondary"
+                    disabled={remote.busy}
+                    onClick={remote.shareBrowserSession}
+                  >
+                    Share active space sessions
+                  </Button>
+                  {remote.browserShare === null ? null : (
+                    <span
+                      className="text-[10.5px] text-faint"
+                      data-testid="remote-browser-share-receipt"
+                    >
+                      {remote.browserShare.spaceName} ·{" "}
+                      {formatBrowserShare(remote.browserShare)} · shared{" "}
+                      {formatTime(remote.browserShare.sharedAt)}
+                    </span>
+                  )}
+                </div>
+              </Block>
+            ) : null}
           </>
         )}
       </Group>
@@ -468,4 +522,10 @@ function formatDate(value: string): string {
   return Number.isNaN(date.getTime())
     ? "recently"
     : date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function formatBrowserShare(result: RemoteAssistantBrowserShareResult): string {
+  const sites = `${String(result.originCount)} ${result.originCount === 1 ? "site" : "sites"}`;
+  const cookies = `${String(result.cookieCount)} ${result.cookieCount === 1 ? "cookie" : "cookies"}`;
+  return `${cookies} · ${sites}`;
 }

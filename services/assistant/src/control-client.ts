@@ -23,6 +23,10 @@ export interface AssistantLinkService {
   revoke(message: InboundAssistantMessage): Promise<boolean>;
 }
 
+export interface AssistantBrowserTicketService {
+  redeemBrowserSessionTicket(ticket: string): Promise<{ userId: string } | null>;
+}
+
 export interface ControlAssistantLinkClientOptions {
   controlUrl: string;
   serviceToken: string;
@@ -42,6 +46,7 @@ export class ControlAssistantLinkClient implements AssistantLinkService {
   readonly #redeemUrl: URL;
   readonly #revokeUrl: URL;
   readonly #machineSessionUrl: URL;
+  readonly #browserSessionRedeemUrl: URL;
   readonly #serviceToken: string;
   readonly #fetch: typeof fetch;
 
@@ -61,6 +66,10 @@ export class ControlAssistantLinkClient implements AssistantLinkService {
     this.#machineSessionUrl = appendServicePath(
       options.controlUrl,
       "v1/assistant/machine-session",
+    );
+    this.#browserSessionRedeemUrl = appendServicePath(
+      options.controlUrl,
+      "v1/assistant/browser-session-redeem",
     );
     this.#serviceToken = options.serviceToken;
     this.#fetch = options.fetch ?? fetch;
@@ -141,6 +150,23 @@ export class ControlAssistantLinkClient implements AssistantLinkService {
       exp: value["exp"],
       state,
     };
+  }
+
+  async redeemBrowserSessionTicket(
+    ticket: string,
+  ): Promise<{ userId: string } | null> {
+    const response = await this.#post(this.#browserSessionRedeemUrl, { ticket });
+    if (response.status === 401) return null;
+    if (!response.ok) {
+      throw new Error(
+        `browser session ticket redemption failed with HTTP ${String(response.status)}`,
+      );
+    }
+    const value = await response.json();
+    if (!isRecord(value) || typeof value["userId"] !== "string") {
+      throw new Error("control returned a malformed browser session authorization");
+    }
+    return { userId: value["userId"] };
   }
 
   #post(url: URL, body: unknown): Promise<Response> {
