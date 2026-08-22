@@ -1,0 +1,37 @@
+{
+  "name": "@suma/gala",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Gala — the external assistant control surface for Suma.",
+  "scripts": {
+    "dev": "next dev --port 3001",
+    "build": "next build",
+    "start": "next start --port 3001",
+    "test": "vitest run",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src test --max-warnings 0"
+  },
+  "dependencies": {
+    "@suma/assistant-core": "workspace:*",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.31.0",
+    "next": "16.3.0",
+    "radix-ui": "^1.6.7",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "tailwind-merge": "^3.4.1"
+  },
+  "devDependencies": {
+    "@suma/eslint-config": "workspace:*",
+    "@suma/typescript-config": "workspace:*",
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "eslint": "^9.39.1",
+    "tailwindcss": "^4.3.3",
+    "typescript": "5.9.2",
+    "vitest": "^3.2.0"
+  }
+}
