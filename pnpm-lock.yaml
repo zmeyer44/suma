@@ -23,6 +23,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@suma/assistant-core':
+        specifier: workspace:*
+        version: link:../../packages/assistant-core
       '@suma/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -267,6 +270,28 @@ importers:
         specifier: 5.9.2
         version: 5.9.2
 
+  packages/assistant-core:
+    dependencies:
+      ai:
+        specifier: ^7.0.58
+        version: 7.0.58(zod@3.25.76)
+    devDependencies:
+      '@suma/eslint-config':
+        specifier: workspace:*
+        version: link:../eslint-config
+      '@suma/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      eslint:
+        specifier: ^9.39.1
+        version: 9.39.1(jiti@2.7.0)
+      typescript:
+        specifier: 5.9.2
+        version: 5.9.2
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@22.15.3)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.23.5)
+
   packages/chunking:
     dependencies:
       '@noble/hashes':
@@ -423,6 +448,46 @@ importers:
         version: 3.2.7(@types/debug@4.1.13)(@types/node@22.15.3)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.23.5)
 
   packages/typescript-config: {}
+
+  services/assistant:
+    dependencies:
+      '@hono/node-server':
+        specifier: ^1.14.0
+        version: 1.19.17(hono@4.13.0)
+      '@suma/assistant-core':
+        specifier: workspace:*
+        version: link:../../packages/assistant-core
+      ai:
+        specifier: ^7.0.58
+        version: 7.0.58(zod@3.25.76)
+      hono:
+        specifier: ^4.7.0
+        version: 4.13.0
+      playwright-core:
+        specifier: ^1.62.1
+        version: 1.62.1
+    devDependencies:
+      '@suma/eslint-config':
+        specifier: workspace:*
+        version: link:../../packages/eslint-config
+      '@suma/typescript-config':
+        specifier: workspace:*
+        version: link:../../packages/typescript-config
+      '@types/node':
+        specifier: ^22.15.0
+        version: 22.15.3
+      eslint:
+        specifier: ^9.39.1
+        version: 9.39.1(jiti@2.7.0)
+      tsx:
+        specifier: ^4.19.0
+        version: 4.23.5
+      typescript:
+        specifier: 5.9.2
+        version: 5.9.2
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@22.15.3)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.23.5)
 
   services/control:
     dependencies:
@@ -2857,9 +2922,6 @@ packages:
 
   '@types/estree-jsx@1.0.5':
     resolution: {integrity: sha512-52CcUVNFyfb1A2ALocQw/Dd1BQFNmSdkuC3BkZ6iqhdMfQz7JWOFRuJFloOzjk+6WijU56m9oKXFAXc7o3Towg==}
-
-  '@types/estree@1.0.8':
-    resolution: {integrity: sha512-dWHzHa2WqEXI/O1E9OjrocMTKJl2mSrEolh1Iomrv6U+JuNwaHXsXx9bLu5gG7BUWFIN0skIQJQ/L1rIex4X6w==}
 
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
@@ -7860,8 +7922,6 @@ snapshots:
     dependencies:
       '@types/estree': 1.0.9
 
-  '@types/estree@1.0.8': {}
-
   '@types/estree@1.0.9': {}
 
   '@types/fs-extra@9.0.13':
@@ -8977,7 +9037,7 @@ snapshots:
 
   estree-walker@3.0.3:
     dependencies:
-      '@types/estree': 1.0.8
+      '@types/estree': 1.0.9
 
   esutils@2.0.3: {}
 

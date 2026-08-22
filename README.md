@@ -113,10 +113,12 @@ Five planes. The full product spec lives in [`docs/PRD.md`](docs/PRD.md).
 | `apps/www`          | Marketing site — Next.js App Router, Tailwind v4                                      |
 | `services/control`  | Control plane: Hono + Drizzle — accounts, devices, billing, lifecycle                 |
 | `services/sessionhub` | CF Worker + SessionHub Durable Object — sealed records, optional session gateway    |
+| `services/assistant` | External-channel gateway, private assistant runner, and authenticated remote browser |
 | `services/egressgw` | Identity egress gateway (Rust, CONNECT-only)                                          |
 | `agent/`            | suma-agent inside the VM (PTY, ports, VFS; scoped machine credential)                 |
 | `sidecar/`          | sumad client daemon (local proxy, QUIC, chunk cache)                                  |
 | `packages/protocol` | HLC, cookie identity tuple, key hierarchy, sealed records, wire messages              |
+| `packages/assistant-core` | Channel-neutral assistant, browser-tool, and capability contracts             |
 | `packages/sync-engine` | Cookie sync semantics: tombstones, causal ancestry, leases, fidelity harness       |
 | `packages/chunking` | FastCDC + BLAKE3 content-defined chunking (pinned against the Rust chunker)           |
 | `packages/egress-policy` | Per-space proxy routing policy                                                   |
@@ -142,6 +144,7 @@ pnpm check-types  # typecheck everything
 | ----------------------- | --------- | ------------------------------------------------------------------------ |
 | `services/control`      | 8787      | dev runs default here (`SUMA_CONTROL_URL`); packaged builds use `https://api.sumabrowser.com` |
 | `services/sessionhub`   | 8788      | `wrangler dev`; point the desktop at it with `SUMA_HUB_URL`              |
+| `services/assistant`    | 8790      | local health stub; external channels require explicit production credentials |
 | `apps/desktop` renderer | 5173/5174 | whichever port Vite finds free (`ELECTRON_RENDERER_URL`)                 |
 | `apps/files`            | 5173/5174 |                                                                          |
 | `apps/www`              | 3000      | marketing site                                                           |

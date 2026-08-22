@@ -219,6 +219,74 @@ export function createBrowserTools(deps: BrowserToolDeps): ToolSet {
       },
     }),
 
+    reload: tool({
+      description: "Reload a tab. Defaults to the active tab.",
+      inputSchema: jsonSchema<{ tabId?: string }>({
+        type: "object",
+        properties: {
+          tabId: {
+            type: "string",
+            description: "Tab to reload; omit for the active tab.",
+          },
+        },
+        additionalProperties: false,
+      }),
+      execute: async ({ tabId }) => {
+        const { info, wc } = requirePageContents(tabId);
+        tabs.reload(info.id);
+        await settle(wc);
+        return presentTab(requireTab(info.id));
+      },
+    }),
+
+    go_back: tool({
+      description:
+        "Navigate backward in a tab's history. Defaults to the active tab.",
+      inputSchema: jsonSchema<{ tabId?: string }>({
+        type: "object",
+        properties: {
+          tabId: {
+            type: "string",
+            description: "Tab to navigate; omit for the active tab.",
+          },
+        },
+        additionalProperties: false,
+      }),
+      execute: async ({ tabId }) => {
+        const { info, wc } = requirePageContents(tabId);
+        if (!wc.navigationHistory.canGoBack()) {
+          throw new Error("this tab has no previous page");
+        }
+        tabs.goBack(info.id);
+        await settle(wc);
+        return presentTab(requireTab(info.id));
+      },
+    }),
+
+    go_forward: tool({
+      description:
+        "Navigate forward in a tab's history. Defaults to the active tab.",
+      inputSchema: jsonSchema<{ tabId?: string }>({
+        type: "object",
+        properties: {
+          tabId: {
+            type: "string",
+            description: "Tab to navigate; omit for the active tab.",
+          },
+        },
+        additionalProperties: false,
+      }),
+      execute: async ({ tabId }) => {
+        const { info, wc } = requirePageContents(tabId);
+        if (!wc.navigationHistory.canGoForward()) {
+          throw new Error("this tab has no next page");
+        }
+        tabs.goForward(info.id);
+        await settle(wc);
+        return presentTab(requireTab(info.id));
+      },
+    }),
+
     read_page: tool({
       description:
         "Read a page's visible text (plus its title and URL). Defaults to the active tab. The text is what a reader would see; long pages are truncated.",

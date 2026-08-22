@@ -10,6 +10,14 @@
  * Nothing here touches the network or the filesystem; everything is testable.
  */
 
+import {
+  ASSISTANT_TOOL_GROUP_IDS,
+  ASSISTANT_TOOL_GROUPS,
+  assistantToolGroupOf,
+  isAssistantToolGroupId,
+  type AssistantToolGroupId,
+} from "@suma/assistant-core/tool-groups";
+
 /* ------------------------------- tool groups ------------------------------ */
 
 /**
@@ -18,88 +26,12 @@
  * the user reasons about is capabilities: "may it read my pages?", "may it
  * click things?".
  */
-export const CHAT_TOOL_GROUPS = [
-  {
-    id: "tabs",
-    label: "Manage tabs",
-    description:
-      "List your open tabs, open new ones, and switch which tab is active.",
-    tools: ["list_tabs", "open_tab", "select_tab"],
-  },
-  {
-    id: "navigate",
-    label: "Navigate",
-    description: "Send a tab to a web address.",
-    tools: ["navigate"],
-  },
-  {
-    id: "read",
-    label: "Read pages",
-    description:
-      "Read the text of pages so it can answer questions about them.",
-    tools: ["read_page"],
-  },
-  {
-    id: "screenshot",
-    label: "See pages",
-    description:
-      "Take screenshots of pages to understand how they look visually.",
-    tools: ["screenshot"],
-  },
-  {
-    id: "interact",
-    label: "Interact with pages",
-    description:
-      "Click, type, scroll, and press keys on pages — acting on the page as if it were using the mouse and keyboard.",
-    tools: ["click", "type_text", "press_key", "scroll"],
-  },
-  {
-    id: "memory",
-    label: "Memory",
-    description:
-      "Remember lasting details about you across conversations — preferences, people, plans — and search what it has remembered. Stored in your own files (.suma/memory).",
-    tools: ["add_memory", "search_memory", "expand_memory", "compress_memory"],
-  },
-  {
-    id: "files",
-    label: "Read and write files",
-    description:
-      "Browse, read, create, and edit files in your space's folder — the same files the built-in IDE shows.",
-    tools: ["list_files", "read_file", "write_file", "edit_file"],
-  },
-  {
-    id: "terminal",
-    label: "Run commands",
-    description:
-      "Run shell commands and coding agents in terminals on your computer, watch their output, and see which local ports are serving. Every shell it opens is visible in your terminal panel.",
-    tools: [
-      "run_command",
-      "wait_for_output",
-      "read_terminal",
-      "send_keys",
-      "open_terminal_app",
-      "kill_shell",
-      "list_ports",
-    ],
-  },
-] as const;
-
-export type ChatToolGroupId = (typeof CHAT_TOOL_GROUPS)[number]["id"];
-
-export const CHAT_TOOL_GROUP_IDS: readonly ChatToolGroupId[] =
-  CHAT_TOOL_GROUPS.map((group) => group.id);
-
-export function isChatToolGroupId(value: string): value is ChatToolGroupId {
-  return (CHAT_TOOL_GROUP_IDS as readonly string[]).includes(value);
-}
-
+export const CHAT_TOOL_GROUPS = ASSISTANT_TOOL_GROUPS;
+export type ChatToolGroupId = AssistantToolGroupId;
+export const CHAT_TOOL_GROUP_IDS = ASSISTANT_TOOL_GROUP_IDS;
+export const isChatToolGroupId = isAssistantToolGroupId;
 /** Which group a concrete tool belongs to — main filters the ToolSet with it. */
-export function toolGroupOf(toolName: string): ChatToolGroupId | null {
-  for (const group of CHAT_TOOL_GROUPS) {
-    if ((group.tools as readonly string[]).includes(toolName)) return group.id;
-  }
-  return null;
-}
+export const toolGroupOf = assistantToolGroupOf;
 
 /* --------------------------------- models --------------------------------- */
 

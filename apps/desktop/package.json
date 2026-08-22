@@ -20,6 +20,7 @@
     "postinstall": "node scripts/fix-node-pty-helper.mjs"
   },
   "dependencies": {
+    "@suma/assistant-core": "workspace:*",
     "@suma/config": "workspace:*",
     "@suma/egress-policy": "workspace:*",
     "@suma/protocol": "workspace:*",

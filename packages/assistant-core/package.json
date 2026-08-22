@@ -1,0 +1,28 @@
+{
+  "name": "@suma/assistant-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Channel-neutral contracts and tools for the Suma assistant.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./browser": "./src/browser.ts",
+    "./channel": "./src/channel.ts",
+    "./tool-groups": "./src/tool-groups.ts"
+  },
+  "scripts": {
+    "check-types": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src test --max-warnings 0"
+  },
+  "dependencies": {
+    "ai": "^7.0.58"
+  },
+  "devDependencies": {
+    "@suma/eslint-config": "workspace:*",
+    "@suma/typescript-config": "workspace:*",
+    "eslint": "^9.39.1",
+    "typescript": "5.9.2",
+    "vitest": "^3.2.0"
+  }
+}
