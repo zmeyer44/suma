@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ASSISTANT_TOOL_GROUP_IDS,
+  assistantToolGroupDefaultEnabled,
   assistantToolGroupOf,
   isAssistantToolGroupId,
 } from "../src/tool-groups";
@@ -8,7 +9,7 @@ import {
 describe("assistant tool groups", () => {
   it("keeps browser navigation and interaction capabilities explicit", () => {
     expect(assistantToolGroupOf("navigate")).toBe("navigate");
-    expect(assistantToolGroupOf("go_back")).toBe("navigate");
+    expect(assistantToolGroupOf("go_back")).toBe("history");
     expect(assistantToolGroupOf("click")).toBe("interact");
     expect(assistantToolGroupOf("type_text")).toBe("interact");
   });
@@ -19,5 +20,10 @@ describe("assistant tool groups", () => {
     expect(new Set(ASSISTANT_TOOL_GROUP_IDS).size).toBe(
       ASSISTANT_TOOL_GROUP_IDS.length,
     );
+  });
+
+  it("does not silently enable newly introduced history controls", () => {
+    expect(assistantToolGroupDefaultEnabled("navigate")).toBe(true);
+    expect(assistantToolGroupDefaultEnabled("history")).toBe(false);
   });
 });

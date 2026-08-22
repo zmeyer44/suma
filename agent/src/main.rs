@@ -5,22 +5,17 @@
 //! Transport is TCP + length-prefixed frames in this phase; MASQUE/QUIC with
 //! per-channel streams is the V2 path (PRD §8.4).
 //!
-//! **There is no per-request token verification in this binary yet.** One
-//! `CapabilityClaims` is read from the environment at startup and handed to
-//! every inbound connection, whoever opened it: nothing is signed, nothing is
-//! checked against an issuer, and no caller ever presents a token. What the
-//! claims do provide is the *shape* of the enforcement — [`dispatch`] and the
-//! `vfs`/`pty` channels refuse anything the claims do not name, and an
-//! unconfigured agent names nothing — but a claims set that grants a
-//! capability grants it to every connection that reaches this port. The real
-//! thing (control-plane-issued short-lived signed tokens, verified per request
-//! against the claims the caller presents) is still to be written; until it
-//! is, the port itself is the trust boundary and this stand-in must not be
-//! mistaken for authentication.
+//! Every production connection starts with an `auth` frame carrying a
+//! control-plane-issued `suma-cap+jws`. The agent verifies its Ed25519
+//! signature, expiry, and machine binding before reading another frame, then
+//! uses those connection-bound claims for every channel capability check.
+//! `SUMA_AGENT_CLAIMS` remains only as the explicit local-development mode
+//! when no verification key is configured.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use suma_agent::capability_token::{decode_public_key, verify_capability_token};
 use suma_agent::caps::CapabilityClaims;
 use suma_agent::dispatch::{check_fwd, check_pty_io, dispatch, pty_input, AgentState, CtlEvents};
 use suma_agent::fwd::FwdSession;
@@ -30,7 +25,7 @@ use suma_agent::ports::ProcSource;
 use suma_agent::proto::{AgentCtlRequest, AgentCtlResponse};
 use suma_agent::pty::PtyManager;
 use suma_agent::vfs::{self, VfsRoot};
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
@@ -40,22 +35,27 @@ async fn main() -> anyhow::Result<()> {
 
     let machine_id = std::env::var("SUMA_MACHINE_ID").unwrap_or_else(|_| "dev-machine".to_string());
 
-    // Dev stand-in for token delivery: claims come from the environment and
-    // are never verified — see the module docs for what that does and does not
-    // buy. With no claims configured the agent still runs, and every
-    // capability check refuses — on ctl requests *and* on `pty/<id>` frames,
-    // the two paths that can reach a PTY — because an empty capability list
-    // grants nothing.
-    let claims: CapabilityClaims = match std::env::var("SUMA_AGENT_CLAIMS") {
-        Ok(raw) => serde_json::from_str(&raw)?,
-        Err(_) => CapabilityClaims {
-            mid: machine_id.clone(),
-            sub: "unconfigured".to_string(),
-            caps: Vec::new(),
-            iat: 0,
-            exp: 0,
-            jti: "unconfigured".to_string(),
-        },
+    let auth = match std::env::var("SUMA_AGENT_VERIFY_KEY") {
+        Ok(raw) => AgentAuth::Signed(Arc::new(
+            decode_public_key(&raw).map_err(anyhow::Error::msg)?,
+        )),
+        Err(_) => {
+            tracing::warn!(
+                "SUMA_AGENT_VERIFY_KEY unset: using local-development claims; do not expose this listener"
+            );
+            let claims = match std::env::var("SUMA_AGENT_CLAIMS") {
+                Ok(raw) => serde_json::from_str(&raw)?,
+                Err(_) => CapabilityClaims {
+                    mid: machine_id.clone(),
+                    sub: "unconfigured".to_string(),
+                    caps: Vec::new(),
+                    iat: 0,
+                    exp: 0,
+                    jti: "unconfigured".to_string(),
+                },
+            };
+            AgentAuth::LocalDevelopment(claims)
+        }
     };
 
     // The `vfs` channel is deliberately outside the state mutex: an 8 MiB read
@@ -87,13 +87,13 @@ async fn main() -> anyhow::Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         let state = Arc::clone(&state);
-        let claims = claims.clone();
+        let auth = auth.clone();
         let machine_id = machine_id.clone();
         let vfs_root = vfs_root.clone();
         let watch_bus = watch_bus.clone();
         tokio::spawn(async move {
             if let Err(err) =
-                serve_connection(stream, state, claims, machine_id, vfs_root, watch_bus).await
+                serve_connection(stream, state, auth, machine_id, vfs_root, watch_bus).await
             {
                 tracing::debug!(%peer, error = %err, "mux connection closed");
             }
@@ -106,16 +106,23 @@ async fn main() -> anyhow::Result<()> {
 /// never interleave into the middle of a ctl response.
 type SharedWriter = Arc<Mutex<OwnedWriteHalf>>;
 
+#[derive(Clone)]
+enum AgentAuth {
+    Signed(Arc<Vec<u8>>),
+    LocalDevelopment(CapabilityClaims),
+}
+
 async fn serve_connection(
     stream: TcpStream,
     state: Arc<Mutex<AgentState>>,
-    claims: CapabilityClaims,
+    auth: AgentAuth,
     machine_id: String,
     vfs_root: VfsRoot,
     watch_bus: broadcast::Sender<AgentCtlResponse>,
 ) -> anyhow::Result<()> {
     let (mut reader, write_half) = stream.into_split();
     let writer: SharedWriter = Arc::new(Mutex::new(write_half));
+    let claims = authenticate_connection(&mut reader, &writer, &auth, &machine_id).await?;
     // One pump per PTY this connection has attached to. Aborted on drop, so a
     // client that disconnects stops costing a task per shell it watched.
     let mut pumps: HashMap<String, PumpHandle> = HashMap::new();
@@ -160,6 +167,10 @@ async fn serve_connection(
 
     while let Some(frame) = read_frame(&mut reader).await? {
         match parse_channel(&frame.channel) {
+            Some(Channel::Auth) => {
+                tracing::debug!("repeated auth frame rejected");
+                return Ok(());
+            }
             Some(Channel::Ctl) => {
                 if watch_pump.is_none() {
                     watch_pump = Some(start_event_pump(
@@ -296,6 +307,41 @@ struct PumpHandle(tokio::task::JoinHandle<()>);
 impl Drop for PumpHandle {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+async fn authenticate_connection(
+    reader: &mut OwnedReadHalf,
+    writer: &SharedWriter,
+    auth: &AgentAuth,
+    machine_id: &str,
+) -> anyhow::Result<CapabilityClaims> {
+    match auth {
+        AgentAuth::LocalDevelopment(claims) => Ok(claims.clone()),
+        AgentAuth::Signed(public_key) => {
+            let frame = read_frame(reader)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("connection closed before authentication"))?;
+            if frame.channel != "auth" {
+                anyhow::bail!("first mux frame must authenticate the connection");
+            }
+            let token = std::str::from_utf8(&frame.payload)
+                .map_err(|_| anyhow::anyhow!("capability token is not UTF-8"))?;
+            let claims = verify_capability_token(public_key, token, now_seconds())
+                .map_err(anyhow::Error::msg)?;
+            if claims.mid != machine_id {
+                anyhow::bail!("capability token is bound to a different machine");
+            }
+            write_shared(
+                writer,
+                &Frame {
+                    channel: "auth".to_string(),
+                    payload: b"ok".to_vec(),
+                },
+            )
+            .await?;
+            Ok(claims)
+        }
     }
 }
 

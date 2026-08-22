@@ -38,6 +38,12 @@ import type {
 import type { SavedItem, SavedItemPatch } from "./saves";
 import type { SavedVideo, VideoPipCommand, VideoPipState } from "./videos";
 import type {
+  RemoteAssistantLinkCode,
+  RemoteAssistantOverview,
+  RemoteAssistantPolicy,
+  RemoteAssistantPolicyPatch,
+} from "./remote-assistant";
+import type {
   SelectionActionPayload,
   SelectionToolbarAction,
 } from "./selection";
@@ -693,6 +699,19 @@ export interface SumaInvokeMap {
   "chat:updateSettings": { args: ChatSettingsPatch; result: ChatSettingsInfo };
   "chat:start": { args: ChatStreamRequest; result: void };
   "chat:stop": { args: { requestId: string }; result: void };
+  "remoteAssistant:overview": { args: void; result: RemoteAssistantOverview };
+  "remoteAssistant:createLinkCode": {
+    args: void;
+    result: RemoteAssistantLinkCode;
+  };
+  "remoteAssistant:revokeLink": {
+    args: { linkId: string };
+    result: RemoteAssistantOverview;
+  };
+  "remoteAssistant:updatePolicy": {
+    args: RemoteAssistantPolicyPatch;
+    result: RemoteAssistantPolicy;
+  };
 
   /**
    * The voice assistant (shared/voice.ts). The wake-word engine and the
@@ -1319,6 +1338,10 @@ export const INVOKE_CHANNELS: ReadonlyArray<InvokeChannel> = [
   "chat:updateSettings",
   "chat:start",
   "chat:stop",
+  "remoteAssistant:overview",
+  "remoteAssistant:createLinkCode",
+  "remoteAssistant:revokeLink",
+  "remoteAssistant:updatePolicy",
   "voice:settings",
   "voice:updateSettings",
   "voice:status",

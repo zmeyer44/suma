@@ -12,6 +12,7 @@ anyhow = { workspace = true }
 # Both crates must also stay on one version — the chunk addresses they compute
 # are the same addresses.
 blake3 = "=1.5.5"
+base64 = "=0.22.1"
 libc = "0.2"
 portable-pty = "0.8"
 # TLS for fetch.public (§8.6): ring provider, never aws-lc-rs — the latter
@@ -21,6 +22,7 @@ portable-pty = "0.8"
 # before the 0.23.23 MSRV bump to 1.71→edition drift; walk pins back, never
 # forward, on a failed `cargo check`.
 rustls = { version = "=0.23.22", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+ring = "=0.17.14"
 tokio-rustls = { version = "=0.26.1", default-features = false, features = ["ring", "tls12"] }
 webpki-roots = "=0.26.8"
 # Transitive pin: zeroize 1.9 is edition 2024; 1.8.x is the last 1.79-parseable line.

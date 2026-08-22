@@ -5,12 +5,14 @@ import type {
   InboundAssistantMessage,
   OutboundAssistantMessage,
 } from "@suma/assistant-core/channel";
+import { appendServicePath } from "../url";
 
 export interface BlueBubblesAdapterOptions {
   accountId: string;
   serverUrl: string;
   password: string;
   fetch?: typeof fetch;
+  now?: () => number;
 }
 
 interface BlueBubblesMessageData {
@@ -30,12 +32,15 @@ export class BlueBubblesAdapter implements AssistantChannelAdapter {
   readonly #serverUrl: URL;
   readonly #password: string;
   readonly #fetch: typeof fetch;
+  readonly #now: () => number;
+  readonly #lastStatusAt = new Map<string, number>();
 
   constructor(options: BlueBubblesAdapterOptions) {
     this.#accountId = options.accountId;
     this.#serverUrl = new URL(options.serverUrl);
     this.#password = options.password;
     this.#fetch = options.fetch ?? fetch;
+    this.#now = options.now ?? Date.now;
   }
 
   parseWebhook(body: unknown): InboundAssistantMessage[] {
@@ -56,6 +61,7 @@ export class BlueBubblesAdapter implements AssistantChannelAdapter {
     if (
       deliveryId === "" ||
       externalThreadId === "" ||
+      !isDirectConversation(externalThreadId) ||
       externalUserId === "" ||
       text === ""
     ) {
@@ -86,9 +92,14 @@ export class BlueBubblesAdapter implements AssistantChannelAdapter {
     if (message.kind === "attachment") {
       throw new Error("BlueBubbles attachment delivery is not implemented yet");
     }
-    if (message.kind === "status") return;
+    if (message.kind === "status") {
+      const lastStatusAt = this.#lastStatusAt.get(destination.externalThreadId);
+      const now = this.#now();
+      if (lastStatusAt !== undefined && now - lastStatusAt < 10_000) return;
+      this.#lastStatusAt.set(destination.externalThreadId, now);
+    }
 
-    const url = new URL("/api/v1/message/text", this.#serverUrl);
+    const url = appendServicePath(this.#serverUrl, "api/v1/message/text");
     // BlueBubbles authenticates REST requests with its password/token query.
     url.searchParams.set("password", this.#password);
     const response = await this.#fetch(url, {
@@ -106,6 +117,12 @@ export class BlueBubblesAdapter implements AssistantChannelAdapter {
       );
     }
   }
+}
+
+function isDirectConversation(chatGuid: string): boolean {
+  // BlueBubbles uses `iMessage;-;address` / `SMS;-;address` for one-to-one
+  // chats and `;+;` for groups. V1 ignores group traffic entirely.
+  return chatGuid.includes(";-;");
 }
 
 export function verifyBlueBubblesWebhookSecret(

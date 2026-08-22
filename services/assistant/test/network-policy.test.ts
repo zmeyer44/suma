@@ -14,6 +14,12 @@ describe("safe browser network policy", () => {
     "::1",
     "fd00::1",
     "fe80::1",
+    "[::1]",
+    "::ffff:7f00:1",
+    "::ffff:127.0.0.1",
+    "64:ff9b::7f00:1",
+    "64:ff9b:1::7f00:1",
+    "2002:7f00:1::",
   ])("blocks private address %s", (address) => {
     expect(isBlockedAddress(address)).toBe(true);
   });
@@ -35,5 +41,15 @@ describe("safe browser network policy", () => {
     await expect(
       policy.assertAllowed("https://token@example.com/"),
     ).rejects.toThrow("credentials");
+  });
+
+  it("recognizes bracketed IPv6 literals before DNS resolution", async () => {
+    const policy = new SafeBrowserNetworkPolicy();
+    await expect(policy.assertAllowed("http://[::1]/private")).rejects.toThrow(
+      "blocks address",
+    );
+    await expect(
+      policy.assertAllowed("http://[::ffff:7f00:1]/private"),
+    ).rejects.toThrow("blocks address");
   });
 });

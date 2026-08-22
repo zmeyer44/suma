@@ -85,6 +85,35 @@ const STATEMENTS: ReadonlyArray<string> = [
   // Databases bootstrapped before key-transfer lack the wrapper columns.
   `ALTER TABLE enrollment_codes ADD COLUMN IF NOT EXISTS wrap_salt text`,
   `ALTER TABLE enrollment_codes ADD COLUMN IF NOT EXISTS wrappers jsonb`,
+  `CREATE TABLE IF NOT EXISTS assistant_link_codes (
+    code_hash text PRIMARY KEY,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz NOT NULL,
+    redeemed_at timestamptz
+  )`,
+  `CREATE TABLE IF NOT EXISTS channel_links (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel text NOT NULL,
+    account_id text NOT NULL,
+    external_user_id text NOT NULL,
+    display_name text,
+    created_at timestamptz NOT NULL DEFAULT now()
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS channel_links_external_identity_idx
+    ON channel_links (channel, account_id, external_user_id)`,
+  `CREATE INDEX IF NOT EXISTS channel_links_user_created_idx
+    ON channel_links (user_id, created_at)`,
+  `CREATE TABLE IF NOT EXISTS assistant_policies (
+    user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    model text NOT NULL,
+    enabled_tool_groups text[] NOT NULL,
+    max_steps integer NOT NULL,
+    daily_wake_minutes integer NOT NULL,
+    auto_suspend_minutes integer NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now()
+  )`,
   `CREATE TABLE IF NOT EXISTS machines (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,

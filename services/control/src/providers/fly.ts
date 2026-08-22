@@ -7,13 +7,10 @@
  * provider keeps no state of its own and the control-plane DB stays the only
  * source of truth.
  *
- * Security posture: the agent's TCP port is its own trust boundary today
- * (agent/src/main.rs module docs — no per-request token verification). By
- * default a provisioned machine therefore gets NO public IP; the agent is
- * reachable only inside the Fly private network (`fly proxy` in dev, the
- * sidecar's tunnel later). `FLY_AGENT_PUBLIC=1` opts into dedicated IPs and
- * a public `<app>.fly.dev:<port>` route, and must be treated as what it is:
- * exposing an unauthenticated shell-spawning daemon to the internet.
+ * Every provisioned agent receives the control plane's Ed25519 public key and
+ * requires a signed capability-token mux handshake. Private 6PN addressing
+ * remains defense in depth; `FLY_AGENT_PUBLIC=1` is still an explicit opt-in
+ * to a larger network attack surface.
  */
 
 import { SUSPEND_MEMORY_CEILING_MB, type MachineSpec } from "@suma/protocol";
@@ -55,24 +52,6 @@ const HOME_MOUNT_PATH = "/root";
 
 /** Seconds to wait for a created/started machine to reach `started`. */
 const WAIT_TIMEOUT_SECONDS = 60;
-
-/** Far-future expiry for the env-delivered dev claims (see agent main.rs:
- * claims from the environment are the stand-in until control-plane-issued
- * per-request tokens exist — an expiring one would brick the VM). */
-const CLAIMS_EXP_UNIX = 4102444800; // 2100-01-01
-
-const ALL_AGENT_CAPS = [
-  "pty.spawn",
-  "pty.io",
-  "pty.resize",
-  "pty.kill",
-  "ports.list",
-  "ports.forward",
-  "fetch.public",
-  "fs.read",
-  "fs.write",
-  "log.read",
-] as const;
 
 export class FlyApiError extends Error {
   constructor(
@@ -196,7 +175,33 @@ export class FlySandboxProvider implements SandboxProvider {
   ): Promise<FlyMachine> {
     const machines = (await this.api("GET", `/apps/${app}/machines`)) as FlyMachine[];
     const existing = machines[0];
-    if (existing) return existing;
+    if (existing) {
+      const previousEnv = isRecord(existing.config["env"])
+        ? existing.config["env"]
+        : {};
+      if (
+        previousEnv["SUMA_AGENT_VERIFY_KEY"] === input.agentVerifyKey &&
+        previousEnv["SUMA_MACHINE_ID"] === input.machineId
+      ) {
+        return existing;
+      }
+      const { SUMA_AGENT_CLAIMS: _legacyClaims, ...retainedEnv } = previousEnv;
+      return (await this.api(
+        "POST",
+        `/apps/${app}/machines/${existing.id}`,
+        {
+          config: {
+            ...existing.config,
+            env: {
+              ...retainedEnv,
+              SUMA_MACHINE_ID: input.machineId,
+              SUMA_AGENT_LISTEN: `[::]:${this.config.agentPort}`,
+              SUMA_AGENT_VERIFY_KEY: input.agentVerifyKey,
+            },
+          },
+        },
+      )) as FlyMachine;
+    }
 
     if (input.spec.memoryMb > SUSPEND_MEMORY_CEILING_MB) {
       // Not a hard Fly limit — a Suma one: above 2 GB the suspend path
@@ -206,14 +211,6 @@ export class FlySandboxProvider implements SandboxProvider {
       );
     }
 
-    const claims = {
-      mid: input.machineId,
-      sub: input.userId,
-      caps: [...ALL_AGENT_CAPS],
-      iat: 0,
-      exp: CLAIMS_EXP_UNIX,
-      jti: `provision-${input.machineId}`,
-    };
     return (await this.createMachine(app, {
       name: "compute",
       region: input.region,
@@ -226,7 +223,7 @@ export class FlySandboxProvider implements SandboxProvider {
           // wildcard is dual-stack, so this also preserves the agent's
           // 127.0.0.1 path used by in-VM port-forward and dev probes.
           SUMA_AGENT_LISTEN: `[::]:${this.config.agentPort}`,
-          SUMA_AGENT_CLAIMS: JSON.stringify(claims),
+          SUMA_AGENT_VERIFY_KEY: input.agentVerifyKey,
         },
         mounts: [{ volume: volume.id, path: HOME_MOUNT_PATH }],
         services: [
@@ -345,6 +342,14 @@ export class FlySandboxProvider implements SandboxProvider {
       return null;
     }
   }
+}
+
+function isRecord(value: unknown): value is Record<string, string> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Object.values(value).every((entry) => typeof entry === "string")
+  );
 }
 
 function guestFor(spec: MachineSpec): Record<string, unknown> {

@@ -27,7 +27,10 @@ Stated exactly as in PRD §9:
   contains no name for device enrollment, session records, key material, or
   egress configuration — there is nothing to ask for. A capability token is
   also rejected by every device/user route on the control plane, so a rooted
-  VM cannot escalate into the account.
+  VM cannot escalate into the account. The agent now requires that token in
+  the first mux frame of every production connection and verifies its Ed25519
+  signature, expiry, and machine binding before accepting PTY, VFS, forward,
+  or control traffic.
 - **I-3:** Compute workload abuse cannot contaminate or control the browser's
   identity egress. (Enforced by plane separation — the gateway runs no user
   code and has its own network identity.) **Phase 2:** the gateway is a
@@ -71,7 +74,7 @@ the session plane can observe when and how much a pseudonymous origin churns.
 |---|---|---|
 | Malicious code in VM reads sessions | I-1; nothing to read — zero exceptions | Holds by construction: the agent's capability vocabulary has no name for session state, and no code path carries session records to the compute plane |
 | VM abuse burns browser IP reputation | I-3: separate egress identities; compute abuse throttles/suspends compute only | Implemented (Phase 2): the gateway is a separate service with its own identity; the VM holds no gateway credential. Per-user abuse caps live in the control plane |
-| VM impersonates user's devices | I-2: near-zero-privilege machine credential; no device certs in VM | Implemented (Phase 2): machine-bound, short-TTL capability tokens; capability tokens are refused by device/user routes |
+| VM impersonates user's devices | I-2: near-zero-privilege machine credential; no device certs in VM | Implemented (Phase 2 + assistant hardening): machine-bound, short-TTL capability tokens are verified on every mux connection and refused by device/user routes |
 | Gateway used as an SSRF pivot into Suma's own infrastructure | The CONNECT proxy refuses loopback and private-range targets, and refuses port 25 (spam-egress abuse, §9) | Implemented (Phase 2, `services/egressgw`) |
 | Proxied browsing silently leaks the real IP | QUIC **and** WebRTC UDP are disabled when any space is proxied (a CONNECT proxy tunnels TCP only, so Chromium would otherwise race HTTP/3 or STUN past it); local/private/VPN traffic is bypassed by rule, never tunnelled; a degraded gateway **fails closed** rather than falling back to direct, in the client *and* in sumad itself | Implemented (Phase 2, `packages/egress-policy` + client wiring + `sidecar`) |
 | A rooted VM inflates its own egress figures to throttle the browser | Egress metering is plane-split: agent-authenticated samples may carry compute/storage only and are refused (403) if they carry proxied bytes; egress totals come from a separately-authenticated gateway source, and every numeric field is bounded | Implemented (Phase 2, `services/control`) |
@@ -218,9 +221,39 @@ are fixed and regression-tested. What remains is recorded here:
   stored in R2 unencrypted and Suma operators could technically read them.
   The Files app states this rather than implying otherwise; client-side
   encryption for `~/cloud` remains a roadmap item.
-- **The in-VM agent still performs no per-request token verification** (see
-  §7b) — one configured capability set applies to every connection reaching
-  its port. The Files work inherits that limitation.
+- **The in-VM agent authenticates each mux connection, not each frame.** The
+  first frame must carry a signed, machine-bound capability token and its
+  claims remain fixed for that socket. Short token TTLs therefore rotate on a
+  reconnect; revocation does not interrupt an already-authenticated socket.
+
+## 7d. External assistant plane
+
+The linked-channel assistant deliberately adds a trusted browser plane. This
+is an explicit product choice: when a user enables the feature, Suma may run a
+dedicated remote Chromium profile and act inside authenticated accounts at the
+user's request even while the desktop is closed.
+
+- **I-1 still applies to compute.** Cookies, local storage, and integration
+  headers are held by the private assistant runner and are never sent to the
+  user's VM. Terminal, file, and memory tools use separately minted mux
+  capabilities that have no browser-session vocabulary.
+- Browser state is encrypted at rest with the assistant-plane master key, but
+  it is not end-to-end encrypted from the runner. Compromise of that plane can
+  act as the user in sessions delegated to it. This is a larger trust surface
+  than normal desktop session sync and must be disclosed when linking.
+- External identities are resolved against control on every message. Link
+  deletion or removal of the `assistant` feature stops the next message;
+  plane-wide rotation of `ASSISTANT_SERVICE_TOKEN` is the final kill switch.
+- Browser requests pass an SSRF policy on every redirect and subresource hop,
+  custom auth headers are exact-origin and path-bound, and cross-origin
+  redirects strip injected credentials. Production still needs a matching
+  network-egress rule as defense in depth against DNS rebinding.
+- Channel text and page content are untrusted inputs. Tool permissions and
+  step caps are server-owned policy, independent from desktop chat settings,
+  and the VM capability token contains only the groups enabled for that turn.
+- The validated desktop-session handoff and custom-auth provider are
+  implemented, but their production configuration/continuity trigger is not;
+  neither should be advertised as automatic until that wiring ships.
 
 ## 8. Sections owed before beta (per PRD §9, not yet written)
 

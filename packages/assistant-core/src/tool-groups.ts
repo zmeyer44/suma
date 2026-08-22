@@ -13,8 +13,16 @@ export const ASSISTANT_TOOL_GROUPS = [
   {
     id: "navigate",
     label: "Navigate",
-    description: "Navigate, reload, or move backward and forward in a tab.",
-    tools: ["navigate", "reload", "go_back", "go_forward"],
+    description: "Send a tab to a web address.",
+    tools: ["navigate"],
+  },
+  {
+    id: "history",
+    label: "Control page history",
+    description: "Reload pages or move backward and forward in tab history.",
+    tools: ["reload", "go_back", "go_forward"],
+    /** New capability: legacy settings must not silently grant it. */
+    defaultEnabled: false,
   },
   {
     id: "read",
@@ -83,4 +91,12 @@ export function assistantToolGroupOf(
     if ((group.tools as readonly string[]).includes(toolName)) return group.id;
   }
   return null;
+}
+
+export function assistantToolGroupDefaultEnabled(
+  groupId: AssistantToolGroupId,
+): boolean {
+  const group = ASSISTANT_TOOL_GROUPS.find((candidate) => candidate.id === groupId);
+  if (group === undefined) return false;
+  return !("defaultEnabled" in group) || group.defaultEnabled;
 }

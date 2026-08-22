@@ -459,10 +459,11 @@ mod tests {
         let head = read_response_head(&mut client).await;
         assert!(head.starts_with("HTTP/1.1 200"), "got: {head}");
 
-        client.write_all(b"suma echo test").await.unwrap();
-        let mut echoed = [0u8; 16];
+        const PAYLOAD: &[u8; 14] = b"suma echo test";
+        client.write_all(PAYLOAD).await.unwrap();
+        let mut echoed = [0u8; PAYLOAD.len()];
         client.read_exact(&mut echoed).await.unwrap();
-        assert_eq!(&echoed, b"suma echo test");
+        assert_eq!(&echoed, PAYLOAD);
     }
 
     #[tokio::test]

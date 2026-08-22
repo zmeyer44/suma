@@ -61,6 +61,7 @@ import { GatewayBackedService } from "./gateway/service";
 import { createDownloadPolicyReader } from "./files/prefs";
 import { HistoryService } from "./history";
 import { planeHealthFor, presentSpaces, registerIpc } from "./ipc";
+import { RemoteAssistantSettingsService } from "./remote-assistant-settings";
 import { MigrationService } from "./migration";
 import { BuzzService } from "./nostr/buzz-service";
 import { registerNostrGuestPreload } from "./nostr/guest-preload";
@@ -702,6 +703,9 @@ async function startServices(ctx: {
     shell: assistantShell,
     workspaceFs,
   });
+  const remoteAssistant = new RemoteAssistantSettingsService(() =>
+    auth.controlClient(),
+  );
 
   /* ------------------- Saves: smart bookmarking (double-Shift) ------------ */
 
@@ -1138,7 +1142,8 @@ async function startServices(ctx: {
       emit("machine:changed", status);
       pushHealth();
     },
-    onAgentAddress: (address) => link.setTarget(`tcp://${address}`),
+    onAgentAddress: (address, capabilityToken) =>
+      link.setTarget(`tcp://${address}`, capabilityToken),
     onMachineAwake: () => link.retryNow(),
     onLocalComputerRole: (role) => {
       const next = role === "not-local" ? "unknown" : role;
@@ -1448,6 +1453,7 @@ async function startServices(ctx: {
     credentials,
     tts,
     chat,
+    remoteAssistant,
     voice,
     updates,
     devices,

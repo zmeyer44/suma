@@ -116,7 +116,7 @@ describe("assistant tool composition", () => {
     const { fs } = stubWorkspace({});
     const tools = enabledAssistantTools(
       { browser, memory, shell, workspaceFs: fs },
-      { model: "m", tools: {} },
+      { model: "m", tools: { history: true } },
     );
     for (const group of CHAT_TOOL_GROUPS) {
       for (const name of group.tools) {

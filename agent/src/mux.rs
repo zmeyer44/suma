@@ -32,6 +32,7 @@ pub struct Frame {
 /// A parsed channel label (PRD Appendix C).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Channel {
+    Auth,
     Ctl,
     Pty(String),
     Fwd {
@@ -55,6 +56,7 @@ pub enum Channel {
 /// one stream on a shared connection; the id is any non-empty suffix.
 pub fn parse_channel(name: &str) -> Option<Channel> {
     match name {
+        "auth" => return Some(Channel::Auth),
         "ctl" => return Some(Channel::Ctl),
         "vfs" => return Some(Channel::Vfs),
         "log" => return Some(Channel::Log),
@@ -82,6 +84,7 @@ pub fn parse_channel(name: &str) -> Option<Channel> {
 /// The wire name for a channel — inverse of [`parse_channel`].
 pub fn channel_name(channel: &Channel) -> String {
     match channel {
+        Channel::Auth => "auth".to_string(),
         Channel::Ctl => "ctl".to_string(),
         Channel::Pty(id) => format!("pty/{id}"),
         Channel::Fwd { port, stream: None } => format!("fwd/{port}"),
@@ -152,6 +155,7 @@ mod tests {
 
     #[test]
     fn parses_the_singleton_channels() {
+        assert_eq!(parse_channel("auth"), Some(Channel::Auth));
         assert_eq!(parse_channel("ctl"), Some(Channel::Ctl));
         assert_eq!(parse_channel("vfs"), Some(Channel::Vfs));
         assert_eq!(parse_channel("log"), Some(Channel::Log));
@@ -209,7 +213,15 @@ mod tests {
 
     #[test]
     fn channel_names_round_trip() {
-        for name in ["ctl", "vfs", "log", "pty/t-1", "fwd/3000", "fwd/3000/abc"] {
+        for name in [
+            "auth",
+            "ctl",
+            "vfs",
+            "log",
+            "pty/t-1",
+            "fwd/3000",
+            "fwd/3000/abc",
+        ] {
             let ch = parse_channel(name).unwrap();
             assert_eq!(channel_name(&ch), name);
         }

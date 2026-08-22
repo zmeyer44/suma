@@ -142,6 +142,13 @@ import {
   rpConfigFromEnv,
 } from "./webauthn.js";
 import { setRecoveryWrapper } from "./recovery.js";
+import {
+  ASSISTANT_DISABLED,
+  ASSISTANT_SERVICE_PATHS,
+  assistantRoutes,
+  bearerAssistantService,
+  type AssistantControlOptions,
+} from "./assistant.js";
 
 const DEFAULT_SPACE_NAME = "Personal";
 const DEFAULT_SPACE_COLOR = "#3B82F6";
@@ -634,6 +641,9 @@ export function createApp(
   // away device whether the home Mac's socket is up. Absent (tests,
   // embedded) ⇒ reported offline, which is the honest unknown.
   relayPresence?: { homeOnline(userId: string): boolean },
+  // External-assistant service identity and default remote policy. Closed
+  // unless deployed entrypoints configure ASSISTANT_SERVICE_TOKEN.
+  assistantOptions: AssistantControlOptions = ASSISTANT_DISABLED,
 ): Hono<AuthEnv> {
   const app = new Hono<AuthEnv>();
 
@@ -739,6 +749,7 @@ export function createApp(
   const auth = bearerAuth(db, () => signingPromise);
   const agentAuth = bearerAgent(db, () => signingPromise);
   const gatewayAuth = bearerGateway(process.env);
+  const assistantServiceAuth = bearerAssistantService(assistantOptions);
 
   v1.use("*", async (c, next) => {
     const isSignup = c.req.path === "/v1/accounts" && c.req.method === "POST";
@@ -753,10 +764,14 @@ export function createApp(
     // never against device credentials.
     if (c.req.path === "/v1/admin/invites") return next();
     // Agent routes accept ONLY capability tokens; gateway routes ONLY the
-    // egress-gateway secret; everything else ONLY device/user credentials.
-    // The three families never cross (I-2, I-3).
+    // egress-gateway secret; assistant service routes ONLY the assistant
+    // plane secret; everything else ONLY device/user credentials. The four
+    // families never cross (I-2, I-3).
     if (AGENT_PATHS.has(c.req.path)) return agentAuth(c, next);
     if (GATEWAY_PATHS.has(c.req.path)) return gatewayAuth(c, next);
+    if (ASSISTANT_SERVICE_PATHS.has(c.req.path)) {
+      return assistantServiceAuth(c, next);
+    }
     return auth(c, next);
   });
 
@@ -1139,6 +1154,7 @@ export function createApp(
         machineId: machine.id,
         region: machine.region,
         spec: DEFAULT_MACHINE_SPEC,
+        agentVerifyKey: (await signingPromise).publicKeyBase64(),
       });
       if (provisioned.agentAddress !== null) {
         const [addressed] = await db
@@ -1812,6 +1828,7 @@ export function createApp(
             machineId: machine.id,
             region: machine.region,
             spec,
+            agentVerifyKey: (await signingPromise).publicKeyBase64(),
           });
           if (provisioned.agentAddress !== null) {
             await db
@@ -3340,6 +3357,13 @@ export function createApp(
   // /v1/ai/gateway/* proxy. Mounted like every other /v1 route, so the
   // device-auth middleware above runs first.
   v1.route("/ai", inferenceRoutes(db, inferenceOptions));
+  v1.route(
+    "/",
+    assistantRoutes(db, assistantOptions, {
+      sandbox,
+      getSigning: () => signingPromise,
+    }),
+  );
 
   app.route("/v1", v1);
   return app;

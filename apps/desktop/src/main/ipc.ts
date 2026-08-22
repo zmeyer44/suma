@@ -43,6 +43,7 @@ import {
 import type { AuditService } from "./audit-service";
 import type { SpeakRequest, TtsService } from "./audio/tts-service";
 import type { ChatRunEmitter, ChatService } from "./chat/chat-service";
+import type { RemoteAssistantSettingsService } from "./remote-assistant-settings";
 import type { VoiceService } from "./voice/voice-service";
 import type { UpdateService } from "./updates/update-service";
 import type { AuthService } from "./auth-service";
@@ -95,6 +96,7 @@ export interface IpcDeps {
   tts: TtsService;
   /** The assistant's agent loop — model calls and browser tools in main. */
   chat: ChatService;
+  remoteAssistant: RemoteAssistantSettingsService;
   /** The voice assistant — wake word + the AI SDK agent session in main. */
   voice: VoiceService;
   /** App self-updates — app-level singleton, outlives sign-out (§8.2). */
@@ -737,6 +739,45 @@ export function registerIpc(deps: IpcDeps): void {
     deps.chat.stop(
       requireString(requireRecord(args, "chat:stop")["requestId"], "requestId"),
     );
+  });
+
+  handle("remoteAssistant:overview", () => deps.remoteAssistant.overview());
+  handle("remoteAssistant:createLinkCode", () =>
+    deps.remoteAssistant.createLinkCode(),
+  );
+  handle("remoteAssistant:revokeLink", (args) =>
+    deps.remoteAssistant.revokeLink(
+      requireString(
+        requireRecord(args, "remoteAssistant:revokeLink")["linkId"],
+        "linkId",
+      ),
+    ),
+  );
+  handle("remoteAssistant:updatePolicy", (args) => {
+    const record = requireRecord(args, "remoteAssistant:updatePolicy");
+    const patch: import("../shared/remote-assistant").RemoteAssistantPolicyPatch = {};
+    if (typeof record["model"] === "string") patch.model = record["model"];
+    const groups = record["enabledToolGroups"];
+    if (Array.isArray(groups)) {
+      const valid = groups.filter(
+        (group): group is ChatToolGroupId =>
+          typeof group === "string" && isChatToolGroupId(group),
+      );
+      if (valid.length !== groups.length) throw new Error("unknown tool group");
+      patch.enabledToolGroups = [...new Set(valid)];
+    }
+    for (const key of [
+      "maxSteps",
+      "dailyWakeMinutes",
+      "autoSuspendMinutes",
+    ] as const) {
+      const value = record[key];
+      if (value !== undefined) {
+        if (!Number.isInteger(value)) throw new Error(`${key} must be an integer`);
+        patch[key] = value as number;
+      }
+    }
+    return deps.remoteAssistant.updatePolicy(patch);
   });
 
   /* ----------------------------- voice assistant ------------------------- */

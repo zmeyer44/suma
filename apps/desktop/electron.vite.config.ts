@@ -99,7 +99,17 @@ function serveReactPreamble(): Plugin {
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({ exclude: ["@suma/protocol", "@suma/config", "@suma/sync-engine"] })],
+    plugins: [
+      externalizeDepsPlugin({
+        exclude: [
+          "@suma/agent-client",
+          "@suma/assistant-core",
+          "@suma/protocol",
+          "@suma/config",
+          "@suma/sync-engine",
+        ],
+      }),
+    ],
     build: {
       rollupOptions: {
         input: { index: "src/main/index.ts" },
@@ -108,7 +118,15 @@ export default defineConfig({
   },
   preload: {
     plugins: [
-      externalizeDepsPlugin({ exclude: ["@suma/protocol", "@suma/config", "@suma/sync-engine"] }),
+      externalizeDepsPlugin({
+        exclude: [
+          "@suma/agent-client",
+          "@suma/assistant-core",
+          "@suma/protocol",
+          "@suma/config",
+          "@suma/sync-engine",
+        ],
+      }),
       copyNostrGuestPreload(),
     ],
     build: {

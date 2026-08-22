@@ -1,3 +1,5 @@
+import type { AssistantToolGroupId } from "./tool-groups";
+
 export interface ExternalAttachment {
   id: string;
   mediaType: string;
@@ -53,10 +55,24 @@ export type AssistantTaskStatus =
   | "succeeded"
   | "failed";
 
+/** Control-plane decision attached before an external message is queued. */
+export interface AssistantTaskAuthorization {
+  userId: string;
+  linkId: string;
+  policy: {
+    model: string;
+    enabledToolGroups: AssistantToolGroupId[];
+    maxSteps: number;
+    dailyWakeMinutes: number;
+    autoSuspendMinutes: number;
+  };
+}
+
 export interface AssistantTaskRecord {
   id: string;
   dedupeKey: string;
   conversationId: string;
+  authorization: AssistantTaskAuthorization;
   message: InboundAssistantMessage;
   status: AssistantTaskStatus;
   createdAt: string;

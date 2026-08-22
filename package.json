@@ -16,7 +16,10 @@
     "check-types": "turbo run check-types"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.2.17",
+    "@hono/node-server": "^1.14.0",
     "@playwright/test": "1.62.1",
+    "drizzle-orm": "^0.44.0",
     "prettier": "^3.7.4",
     "turbo": "^2.10.8",
     "typescript": "5.9.2"

@@ -12,6 +12,7 @@
 //! [`dispatch`] fails closed: no valid capability, no side effect. Rooting
 //! the VM therefore grants nothing beyond the VM itself.
 
+pub mod capability_token;
 pub mod caps;
 pub mod chunker;
 pub mod dispatch;

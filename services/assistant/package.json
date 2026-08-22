@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "tsx watch src/dev-server.ts",
     "start": "tsx src/server.ts",
+    "start:runner": "tsx src/runner-server.ts",
     "build": "tsc --noEmit",
     "check-types": "tsc --noEmit",
     "test": "vitest run",
@@ -14,7 +15,9 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.14.0",
+    "@suma/agent-client": "workspace:*",
     "@suma/assistant-core": "workspace:*",
+    "@suma/protocol": "workspace:*",
     "ai": "^7.0.58",
     "hono": "^4.7.0",
     "playwright-core": "^1.62.1"

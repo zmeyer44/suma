@@ -67,6 +67,7 @@ const PROVISION_INPUT = {
   machineId: MACHINE_ID,
   region: "iad",
   spec: DEFAULT_MACHINE_SPEC,
+  agentVerifyKey: "dGVzdC1jb250cm9sLXB1YmxpYy1rZXk=",
 };
 
 describe("FlySandboxProvider.provision", () => {
@@ -103,17 +104,8 @@ describe("FlySandboxProvider.provision", () => {
     const env = (machineConfig as { env: Record<string, string> }).env;
     expect(env["SUMA_MACHINE_ID"]).toBe(MACHINE_ID);
     expect(env["SUMA_AGENT_LISTEN"]).toBe("[::]:2222");
-    const claims = JSON.parse(env["SUMA_AGENT_CLAIMS"] ?? "{}") as {
-      mid: string;
-      sub: string;
-      caps: string[];
-      exp: number;
-    };
-    expect(claims.mid).toBe(MACHINE_ID);
-    expect(claims.sub).toBe("user-1");
-    expect(claims.caps).toContain("pty.spawn");
-    expect(claims.caps).toContain("fs.write");
-    expect(claims.exp).toBeGreaterThan(Date.now() / 1000);
+    expect(env["SUMA_AGENT_VERIFY_KEY"]).toBe(PROVISION_INPUT.agentVerifyKey);
+    expect(env["SUMA_AGENT_CLAIMS"]).toBeUndefined();
 
     // No public exposure by default: nothing touched GraphQL.
     expect(calls.some((c) => c.url.endsWith("/graphql"))).toBe(false);
@@ -128,7 +120,16 @@ describe("FlySandboxProvider.provision", () => {
       [`GET /apps/${APP}`]: () => ({ json: { name: APP } }),
       [`GET /apps/${APP}/volumes`]: () => ({ json: [{ id: "vol_1", name: "home" }] }),
       [`GET /apps/${APP}/machines`]: () => ({
-        json: [{ id: "m_1", state: "started", config: {} }],
+        json: [{
+          id: "m_1",
+          state: "started",
+          config: {
+            env: {
+              SUMA_MACHINE_ID: MACHINE_ID,
+              SUMA_AGENT_VERIFY_KEY: PROVISION_INPUT.agentVerifyKey,
+            },
+          },
+        }],
       }),
       [`GET /apps/${APP}/machines/m_1/wait`]: () => ({ json: { ok: true } }),
     });
@@ -144,7 +145,16 @@ describe("FlySandboxProvider.provision", () => {
       [`GET /apps/${APP}`]: () => ({ json: { name: APP } }),
       [`GET /apps/${APP}/volumes`]: () => ({ json: [{ id: "vol_1", name: "home" }] }),
       [`GET /apps/${APP}/machines`]: () => ({
-        json: [{ id: "m_1", state: "started", config: {} }],
+        json: [{
+          id: "m_1",
+          state: "started",
+          config: {
+            env: {
+              SUMA_MACHINE_ID: MACHINE_ID,
+              SUMA_AGENT_VERIFY_KEY: PROVISION_INPUT.agentVerifyKey,
+            },
+          },
+        }],
       }),
       [`GET /apps/${APP}/machines/m_1/wait`]: () => ({ json: { ok: true } }),
       GRAPHQL: (body) => {

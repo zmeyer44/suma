@@ -11,6 +11,8 @@ export interface ProvisionInput {
   machineId: string;
   region: string;
   spec: MachineSpec;
+  /** Raw Ed25519 control-plane verify key, standard base64. */
+  agentVerifyKey: string;
 }
 
 export interface ProvisionResult {

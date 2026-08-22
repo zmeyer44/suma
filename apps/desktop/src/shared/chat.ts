@@ -13,6 +13,7 @@
 import {
   ASSISTANT_TOOL_GROUP_IDS,
   ASSISTANT_TOOL_GROUPS,
+  assistantToolGroupDefaultEnabled,
   assistantToolGroupOf,
   isAssistantToolGroupId,
   type AssistantToolGroupId,
@@ -104,7 +105,7 @@ export function isToolGroupEnabled(
   settings: ChatSettings,
   group: ChatToolGroupId,
 ): boolean {
-  return settings.tools[group] !== false;
+  return settings.tools[group] ?? assistantToolGroupDefaultEnabled(group);
 }
 
 /** Parse persisted settings; anything malformed falls back field-by-field. */

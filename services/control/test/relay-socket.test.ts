@@ -75,7 +75,17 @@ afterAll(() => {
   server.close();
 });
 
-async function post(path: string, body: unknown, token?: string): Promise<any> {
+interface RelayPostResponse {
+  user: { id: string };
+  device: { id: string };
+  isHomeMachine: boolean;
+}
+
+async function post(
+  path: string,
+  body: unknown,
+  token?: string,
+): Promise<RelayPostResponse> {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "POST",
     headers: {
@@ -85,7 +95,7 @@ async function post(path: string, body: unknown, token?: string): Promise<any> {
     body: JSON.stringify(body),
   });
   expect(response.status).toBe(201);
-  return response.json();
+  return response.json() as Promise<RelayPostResponse>;
 }
 
 let emailCounter = 0;

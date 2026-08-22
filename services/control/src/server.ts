@@ -12,6 +12,7 @@ import { startOutboxDrain } from "./outbox.js";
 import { objectStoreFromEnv } from "./providers/object-store.js";
 import { flySandboxFromEnv } from "./providers/fly.js";
 import { StubSandboxProvider } from "./providers/sandbox.js";
+import { assistantOptionsFromEnv } from "./assistant.js";
 
 const databaseUrl = process.env["DATABASE_URL"];
 if (!databaseUrl) {
@@ -60,6 +61,12 @@ console.log(
 // Home-machine relay (local compute mode): in-memory presence + piping —
 // single-instance by design, see src/relay.ts.
 const relay = new RelayRegistry();
+const assistant = assistantOptionsFromEnv(process.env);
+console.log(
+  assistant.serviceToken === null
+    ? "assistant: disabled (ASSISTANT_SERVICE_TOKEN unset)"
+    : "assistant: channel linking enabled",
+);
 
 // §11: invitation-only beta. The gate defaults ON here — a deployed control
 // plane refuses uninvited signups unless SUMA_INVITES_REQUIRED=0 is set
@@ -74,6 +81,7 @@ const server = serve({
     inviteOptionsFromEnv(process.env),
     inference,
     relay,
+    assistant,
   ).fetch,
   port,
 });

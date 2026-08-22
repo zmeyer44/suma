@@ -1,0 +1,23 @@
+{
+  "name": "@suma/agent-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Electron-free client for the Suma compute-agent mux protocol.",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "check-types": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "lint": "eslint src --max-warnings 0"
+  },
+  "dependencies": { "@suma/protocol": "workspace:*" },
+  "devDependencies": {
+    "@suma/eslint-config": "workspace:*",
+    "@suma/typescript-config": "workspace:*",
+    "@types/node": "^22.15.0",
+    "eslint": "^9.39.1",
+    "typescript": "5.9.2",
+    "vitest": "^3.2.0"
+  }
+}

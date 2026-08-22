@@ -64,12 +64,8 @@ export class EncryptedFileAssistantConversationStore
   save(conversationId: string, messages: ModelMessage[]): Promise<void> {
     return this.#exclusive(conversationId, async () => {
       await mkdir(this.#directory, { recursive: true, mode: 0o700 });
-      let retained = messages.slice(-MAX_MESSAGES);
-      let plaintext = Buffer.from(JSON.stringify(retained), "utf8");
-      while (plaintext.byteLength > MAX_PLAINTEXT_BYTES && retained.length > 1) {
-        retained = retained.slice(Math.ceil(retained.length / 4));
-        plaintext = Buffer.from(JSON.stringify(retained), "utf8");
-      }
+      const retained = retainCompleteConversationTurns(messages);
+      const plaintext = Buffer.from(JSON.stringify(retained), "utf8");
       if (plaintext.byteLength > MAX_PLAINTEXT_BYTES) {
         throw new Error("assistant conversation turn exceeds storage limit");
       }
@@ -106,6 +102,24 @@ export class EncryptedFileAssistantConversationStore
     );
     return result;
   }
+}
+
+/** Truncate only at user-turn boundaries so tool calls keep their results. */
+export function retainCompleteConversationTurns(
+  messages: ModelMessage[],
+): ModelMessage[] {
+  let retained = [...messages];
+  while (
+    retained.length > MAX_MESSAGES ||
+    Buffer.byteLength(JSON.stringify(retained), "utf8") > MAX_PLAINTEXT_BYTES
+  ) {
+    const nextTurn = retained.findIndex(
+      (message, index) => index > 0 && message.role === "user",
+    );
+    if (nextTurn === -1) break;
+    retained = retained.slice(nextTurn);
+  }
+  return retained;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

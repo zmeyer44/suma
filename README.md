@@ -118,6 +118,7 @@ Five planes. The full product spec lives in [`docs/PRD.md`](docs/PRD.md).
 | `agent/`            | suma-agent inside the VM (PTY, ports, VFS; scoped machine credential)                 |
 | `sidecar/`          | sumad client daemon (local proxy, QUIC, chunk cache)                                  |
 | `packages/protocol` | HLC, cookie identity tuple, key hierarchy, sealed records, wire messages              |
+| `packages/agent-client` | Authenticated TypeScript client for the VM agent mux                              |
 | `packages/assistant-core` | Channel-neutral assistant, browser-tool, and capability contracts             |
 | `packages/sync-engine` | Cookie sync semantics: tombstones, causal ancestry, leases, fidelity harness       |
 | `packages/chunking` | FastCDC + BLAKE3 content-defined chunking (pinned against the Rust chunker)           |

@@ -8,9 +8,18 @@ importers:
 
   .:
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.2.17
+        version: 0.2.17
+      '@hono/node-server':
+        specifier: ^1.14.0
+        version: 1.19.17(hono@4.13.0)
       '@playwright/test':
         specifier: 1.62.1
         version: 1.62.1
+      drizzle-orm:
+        specifier: ^0.44.0
+        version: 0.44.7(@cloudflare/workers-types@5.20260804.1)(@electric-sql/pglite@0.2.17)(postgres@3.4.9)
       prettier:
         specifier: ^3.7.4
         version: 3.7.4
@@ -23,6 +32,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@suma/agent-client':
+        specifier: workspace:*
+        version: link:../../packages/agent-client
       '@suma/assistant-core':
         specifier: workspace:*
         version: link:../../packages/assistant-core
@@ -270,6 +282,31 @@ importers:
         specifier: 5.9.2
         version: 5.9.2
 
+  packages/agent-client:
+    dependencies:
+      '@suma/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+    devDependencies:
+      '@suma/eslint-config':
+        specifier: workspace:*
+        version: link:../eslint-config
+      '@suma/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@types/node':
+        specifier: ^22.15.0
+        version: 22.15.3
+      eslint:
+        specifier: ^9.39.1
+        version: 9.39.1(jiti@2.7.0)
+      typescript:
+        specifier: 5.9.2
+        version: 5.9.2
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@22.15.3)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.23.5)
+
   packages/assistant-core:
     dependencies:
       ai:
@@ -454,9 +491,15 @@ importers:
       '@hono/node-server':
         specifier: ^1.14.0
         version: 1.19.17(hono@4.13.0)
+      '@suma/agent-client':
+        specifier: workspace:*
+        version: link:../../packages/agent-client
       '@suma/assistant-core':
         specifier: workspace:*
         version: link:../../packages/assistant-core
+      '@suma/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       ai:
         specifier: ^7.0.58
         version: 7.0.58(zod@3.25.76)
@@ -497,6 +540,9 @@ importers:
       '@hono/zod-validator':
         specifier: ^0.4.2
         version: 0.4.3(hono@4.13.0)(zod@3.25.76)
+      '@suma/assistant-core':
+        specifier: workspace:*
+        version: link:../../packages/assistant-core
       '@suma/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -3809,6 +3855,7 @@ packages:
   eslint@9.39.1:
     resolution: {integrity: sha512-BhHmn2yNOFA9H9JmmIVKJmd288g9hrVRDkdoIgRCRuSySRUHH7r/DI6aAXW9T1WwUuY3DFgrcaqB+deURBLR5g==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'

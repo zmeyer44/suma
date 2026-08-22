@@ -8,6 +8,7 @@
     ".": "./src/index.ts",
     "./browser": "./src/browser.ts",
     "./channel": "./src/channel.ts",
+    "./computer": "./src/computer.ts",
     "./tool-groups": "./src/tool-groups.ts"
   },
   "scripts": {

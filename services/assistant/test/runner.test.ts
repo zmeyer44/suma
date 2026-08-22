@@ -1,12 +1,19 @@
 import type { AssistantHarness, AssistantTaskRecord } from "@suma/assistant-core/channel";
+import { serve } from "@hono/node-server";
+import type { Server } from "node:http";
 import { describe, expect, it } from "vitest";
 import { RemoteRunnerClient, createAssistantRunnerApp } from "../src/harness";
 
 describe("private assistant runner boundary", () => {
   it("requires service authentication and transports assistant output", async () => {
+    let releaseRunner: (() => void) | undefined;
+    const runnerGate = new Promise<void>((resolve) => {
+      releaseRunner = resolve;
+    });
     const harness: AssistantHarness = {
       async run(task, emit) {
         await emit({ kind: "status", text: "working" });
+        await runnerGate;
         await emit({ kind: "text", text: `ran ${task.message.text}` });
       },
     };
@@ -19,19 +26,90 @@ describe("private assistant runner boundary", () => {
     expect(unauthorized.status).toBe(401);
 
     const emitted: unknown[] = [];
+    let requestedPath = "";
     const client = new RemoteRunnerClient({
-      runnerUrl: "https://runner.internal",
+      runnerUrl: "https://runner.internal/mounted/",
       token: "runner-token",
-      fetch: async (input, init) => app.request(new Request(input, init)),
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requestedPath = new URL(request.url).pathname;
+        return app.request(
+          new Request("https://runner.internal/v1/tasks/run", {
+            method: request.method,
+            headers: request.headers,
+            body: await request.text(),
+          }),
+        );
+      },
     });
-    await client.run(makeTask(), (message) => {
+    let sawStatus: (() => void) | undefined;
+    const statusSeen = new Promise<void>((resolve) => {
+      sawStatus = resolve;
+    });
+    const running = client.run(makeTask(), (message) => {
       emitted.push(message);
+      if (message.kind === "status") sawStatus?.();
       return Promise.resolve();
     });
+    await statusSeen;
+    expect(emitted).toEqual([{ kind: "status", text: "working" }]);
+    releaseRunner?.();
+    await running;
     expect(emitted).toEqual([
       { kind: "status", text: "working" },
       { kind: "text", text: "ran inspect the build" },
     ]);
+    expect(requestedPath).toBe("/mounted/v1/tasks/run");
+  });
+
+  it("streams status before completion over a real HTTP socket", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const harness: AssistantHarness = {
+      async run(_task, emit) {
+        await emit({ kind: "status", text: "socket working" });
+        await gate;
+        await emit({ kind: "text", text: "socket done" });
+      },
+    };
+    const app = createAssistantRunnerApp({ token: "runner-token", harness });
+    const server = serve({ fetch: app.fetch, port: 0 }) as Server;
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("runner socket did not bind");
+    }
+    try {
+      const client = new RemoteRunnerClient({
+        runnerUrl: `http://127.0.0.1:${String(address.port)}`,
+        token: "runner-token",
+      });
+      const emitted: string[] = [];
+      let sawStatus: (() => void) | undefined;
+      const statusSeen = new Promise<void>((resolve) => {
+        sawStatus = resolve;
+      });
+      const running = client.run(makeTask(), (message) => {
+        emitted.push(message.text ?? "");
+        if (message.kind === "status") sawStatus?.();
+        return Promise.resolve();
+      });
+
+      await statusSeen;
+      expect(emitted).toEqual(["socket working"]);
+      release?.();
+      await running;
+      expect(emitted).toEqual(["socket working", "socket done"]);
+    } finally {
+      release?.();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) =>
+          error === undefined ? resolve() : reject(error),
+        );
+      });
+    }
   });
 });
 
@@ -40,6 +118,17 @@ function makeTask(): AssistantTaskRecord {
     id: "task-1",
     dedupeKey: "delivery-1",
     conversationId: "conversation-1",
+    authorization: {
+      userId: "user-1",
+      linkId: "link-1",
+      policy: {
+        model: "test/model",
+        enabledToolGroups: ["tabs", "navigate", "read"],
+        maxSteps: 12,
+        dailyWakeMinutes: 30,
+        autoSuspendMinutes: 10,
+      },
+    },
     status: "running",
     createdAt: new Date(0).toISOString(),
     updatedAt: new Date(0).toISOString(),

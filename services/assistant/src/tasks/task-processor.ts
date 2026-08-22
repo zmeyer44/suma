@@ -3,6 +3,7 @@ import type {
   AssistantChannelAdapter,
   AssistantDestination,
   AssistantHarness,
+  AssistantTaskAuthorization,
   AssistantTaskRecord,
   AssistantTaskStore,
   InboundAssistantMessage,
@@ -28,13 +29,17 @@ export class AssistantTaskProcessor {
     );
   }
 
-  async enqueue(message: InboundAssistantMessage): Promise<AssistantTaskRecord> {
+  async enqueue(
+    message: InboundAssistantMessage,
+    authorization: AssistantTaskAuthorization,
+  ): Promise<AssistantTaskRecord> {
     const now = new Date().toISOString();
     const dedupeKey = `${message.channel}\u0000${message.accountId}\u0000${message.deliveryId}`;
     return this.#store.enqueue({
       id: randomUUID(),
       dedupeKey,
-      conversationId: conversationIdFor(message),
+      conversationId: conversationIdFor(message, authorization.userId),
+      authorization,
       message,
       status: "queued",
       createdAt: now,
@@ -77,22 +82,49 @@ export class AssistantTaskProcessor {
           updatedAt: new Date().toISOString(),
         });
       } catch (error) {
-        await this.#fail(task, safeError(error));
+        await this.#fail(task, safeError(error), adapter, destination);
       }
     }
   }
 
-  async #fail(task: AssistantTaskRecord, error: string): Promise<void> {
-    await this.#store.update(task.id, {
-      status: "failed",
-      updatedAt: new Date().toISOString(),
-      error,
-    });
+  async #fail(
+    task: AssistantTaskRecord,
+    error: string,
+    adapter?: AssistantChannelAdapter,
+    destination?: AssistantDestination,
+  ): Promise<void> {
+    let storeFailure: unknown;
+    try {
+      await this.#store.update(task.id, {
+        status: "failed",
+        updatedAt: new Date().toISOString(),
+        error,
+      });
+    } catch (failure) {
+      storeFailure = failure;
+    }
+
+    // Generic task retries can duplicate browser or computer side effects.
+    // Fail at most once, but always tell the user when the channel is alive.
+    if (adapter !== undefined && destination !== undefined) {
+      await adapter
+        .send(destination, {
+          kind: "text",
+          text: "I couldn't complete that request. Please try again.",
+        })
+        .catch(() => undefined);
+    }
+    if (storeFailure !== undefined) throw storeFailure;
   }
 }
 
-function conversationIdFor(message: InboundAssistantMessage): string {
+function conversationIdFor(
+  message: InboundAssistantMessage,
+  userId: string,
+): string {
   return createHash("sha256")
+    .update(userId)
+    .update("\u0000")
     .update(message.channel)
     .update("\u0000")
     .update(message.accountId)

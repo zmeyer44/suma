@@ -73,6 +73,60 @@ export const enrollmentCodes = pgTable("enrollment_codes", {
   wrappers: jsonb("wrappers").$type<Array<{ credentialId: string; wrapped: string }>>(),
 });
 
+// One-time codes minted by an enrolled device to link an external assistant
+// identity. As with enrollment codes, only the digest is retained: a control
+// database read cannot recover a code that is still valid in a chat.
+export const assistantLinkCodes = pgTable("assistant_link_codes", {
+  codeHash: text("code_hash").primaryKey(),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "date" }).notNull(),
+  redeemedAt: timestamp("redeemed_at", { withTimezone: true, mode: "date" }),
+});
+
+// External identities are unique within a configured channel account. The
+// gateway re-resolves this row for every inbound message so DELETE is an
+// immediate kill switch rather than a cache invalidation promise.
+export const channelLinks = pgTable(
+  "channel_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    channel: text("channel").notNull(),
+    accountId: text("account_id").notNull(),
+    externalUserId: text("external_user_id").notNull(),
+    displayName: text("display_name"),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("channel_links_external_identity_idx").on(
+      t.channel,
+      t.accountId,
+      t.externalUserId,
+    ),
+    index("channel_links_user_created_idx").on(t.userId, t.createdAt),
+  ],
+);
+
+// Server-enforced policy for remote turns. Desktop-local chat.json remains a
+// separate policy domain: an external channel never inherits permissions
+// merely because the desktop assistant once had them enabled.
+export const assistantPolicies = pgTable("assistant_policies", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  model: text("model").notNull(),
+  enabledToolGroups: text("enabled_tool_groups").array().notNull(),
+  maxSteps: integer("max_steps").notNull(),
+  dailyWakeMinutes: integer("daily_wake_minutes").notNull(),
+  autoSuspendMinutes: integer("auto_suspend_minutes").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+});
+
 export const passkeys = pgTable("passkeys", {
   // WebAuthn credential id (base64url).
   id: text("id").primaryKey(),

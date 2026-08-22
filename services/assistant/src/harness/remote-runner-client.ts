@@ -3,6 +3,7 @@ import type {
   AssistantTaskRecord,
   OutboundAssistantMessage,
 } from "@suma/assistant-core/channel";
+import { appendServicePath } from "../url";
 
 export interface RemoteRunnerClientOptions {
   runnerUrl: string;
@@ -17,7 +18,7 @@ export class RemoteRunnerClient implements AssistantHarness {
   readonly #fetch: typeof fetch;
 
   constructor(options: RemoteRunnerClientOptions) {
-    this.#runnerUrl = new URL("/v1/tasks/run", options.runnerUrl);
+    this.#runnerUrl = appendServicePath(options.runnerUrl, "v1/tasks/run");
     this.#token = options.token;
     this.#fetch = options.fetch ?? fetch;
   }
@@ -37,15 +38,42 @@ export class RemoteRunnerClient implements AssistantHarness {
     if (!response.ok) {
       throw new Error(`assistant runner failed with HTTP ${String(response.status)}`);
     }
-    const body = (await response.json()) as { messages?: unknown };
-    if (!Array.isArray(body.messages)) {
-      throw new Error("assistant runner returned malformed messages");
+    if (response.body === null) {
+      throw new Error("assistant runner returned an empty stream");
     }
-    for (const candidate of body.messages) {
-      const message = parseOutboundMessage(candidate);
-      if (message !== null) await emit(message);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+    while (true) {
+      const chunk = await reader.read();
+      buffered += decoder.decode(chunk.value, { stream: !chunk.done });
+      let newline = buffered.indexOf("\n");
+      while (newline !== -1) {
+        const line = buffered.slice(0, newline).trim();
+        buffered = buffered.slice(newline + 1);
+        if (line !== "") await emit(parseOutboundLine(line));
+        newline = buffered.indexOf("\n");
+      }
+      if (chunk.done) break;
+    }
+    if (buffered.trim() !== "") {
+      await emit(parseOutboundLine(buffered.trim()));
     }
   }
+}
+
+function parseOutboundLine(line: string): OutboundAssistantMessage {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    throw new Error("assistant runner returned malformed NDJSON");
+  }
+  const message = parseOutboundMessage(parsed);
+  if (message === null) {
+    throw new Error("assistant runner returned a malformed message");
+  }
+  return message;
 }
 
 function parseOutboundMessage(value: unknown): OutboundAssistantMessage | null {

@@ -3,6 +3,7 @@ import type {
   AssistantTaskRecord,
   OutboundAssistantMessage,
 } from "@suma/assistant-core/channel";
+import { assistantToolGroupOf } from "@suma/assistant-core/tool-groups";
 import {
   generateText,
   stepCountIs,
@@ -10,8 +11,6 @@ import {
   type ModelMessage,
   type ToolSet,
 } from "ai";
-
-const MAX_STEPS = 40;
 
 const EXTERNAL_SYSTEM_PROMPT = `You are Suma, a trusted remote assistant acting for the user from an external messaging channel. You have the same browser, files, terminals, coding agents, and memory as Suma desktop.
 
@@ -31,10 +30,12 @@ export type GenerateAssistantTurn = (input: {
   system: string;
   messages: ModelMessage[];
   tools: ToolSet;
+  maxSteps: number;
 }) => Promise<{ text: string; responseMessages: ModelMessage[] }>;
 
 export interface AiSdkAssistantHarnessOptions {
   model: LanguageModel;
+  modelForTask?: (modelId: string) => LanguageModel;
   conversations: AssistantConversationStore;
   toolsForTask(task: AssistantTaskRecord): Promise<ToolSet>;
   generate?: GenerateAssistantTurn;
@@ -44,6 +45,7 @@ export interface AiSdkAssistantHarnessOptions {
 /** Channel-neutral AI loop; only the transport and tool backends vary. */
 export class AiSdkAssistantHarness implements AssistantHarness {
   readonly #model: LanguageModel;
+  readonly #modelForTask: (modelId: string) => LanguageModel;
   readonly #conversations: AssistantConversationStore;
   readonly #toolsForTask: AiSdkAssistantHarnessOptions["toolsForTask"];
   readonly #generate: GenerateAssistantTurn;
@@ -51,6 +53,7 @@ export class AiSdkAssistantHarness implements AssistantHarness {
 
   constructor(options: AiSdkAssistantHarnessOptions) {
     this.#model = options.model;
+    this.#modelForTask = options.modelForTask ?? (() => this.#model);
     this.#conversations = options.conversations;
     this.#toolsForTask = options.toolsForTask;
     this.#generate = options.generate ?? generateTurn;
@@ -66,13 +69,14 @@ export class AiSdkAssistantHarness implements AssistantHarness {
       ...history,
       { role: "user", content: task.message.text },
     ];
-    const tools = await this.#toolsForTask(task);
+    const tools = filterToolsForTask(await this.#toolsForTask(task), task);
     await emit({ kind: "status", text: "Working…" });
     const result = await this.#generate({
-      model: this.#model,
+      model: this.#modelForTask(task.authorization.policy.model),
       system: this.#systemPrompt,
       messages,
       tools,
+      maxSteps: task.authorization.policy.maxSteps,
     });
     await this.#conversations.save(task.conversationId, [
       ...messages,
@@ -88,10 +92,25 @@ async function generateTurn(input: {
   system: string;
   messages: ModelMessage[];
   tools: ToolSet;
+  maxSteps: number;
 }): Promise<{ text: string; responseMessages: ModelMessage[] }> {
+  const { maxSteps, ...turn } = input;
   const result = await generateText({
-    ...input,
-    stopWhen: stepCountIs(MAX_STEPS),
+    ...turn,
+    stopWhen: stepCountIs(maxSteps),
   });
   return { text: result.text, responseMessages: result.response.messages };
+}
+
+function filterToolsForTask(
+  tools: ToolSet,
+  task: AssistantTaskRecord,
+): ToolSet {
+  const enabled = new Set(task.authorization.policy.enabledToolGroups);
+  return Object.fromEntries(
+    Object.entries(tools).filter(([name]) => {
+      const group = assistantToolGroupOf(name);
+      return group !== null && enabled.has(group);
+    }),
+  );
 }

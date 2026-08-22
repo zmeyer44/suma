@@ -261,3 +261,40 @@ describe("MachineService in local compute mode", () => {
     expect(calls.filter((c) => c === "transitionMachine")).toEqual([]);
   });
 });
+
+describe("MachineService cloud agent authentication", () => {
+  it("mints and reuses a signed capability token before retargeting the mux", async () => {
+    let mints = 0;
+    const client = {
+      getMachine: async () => ({
+        mode: "cloud" as const,
+        machine: { ...machine(), agentAddress: "vm.internal:2222" },
+        events: [],
+      }),
+      getMachineLifecycle: async () => null,
+      mintMachineCapabilityToken: async () => {
+        mints += 1;
+        return {
+          token: "signed-capability-token",
+          exp: Math.floor(Date.now() / 1_000) + 300,
+          caps: [],
+        };
+      },
+    } as unknown as ControlClient;
+    const targets: Array<{ address: string; token: string }> = [];
+    const service = new MachineService({
+      control: () => client,
+      emit: () => undefined,
+      onAgentAddress: (address, token) => targets.push({ address, token }),
+    });
+
+    await service.refresh();
+    await service.refresh();
+
+    expect(mints).toBe(1);
+    expect(targets).toEqual([
+      { address: "vm.internal:2222", token: "signed-capability-token" },
+      { address: "vm.internal:2222", token: "signed-capability-token" },
+    ]);
+  });
+});

@@ -9,7 +9,7 @@
 import { clearInterval, setInterval } from "node:timers";
 import type { MachineStatus } from "../../shared/ipc";
 import type { ControlClient } from "../control-client";
-import type { MachineState } from "@suma/protocol";
+import { CAPABILITIES, type MachineState } from "@suma/protocol";
 import {
   isAwakeState,
   localAwayMachineStatus,
@@ -27,7 +27,7 @@ export interface MachineDeps {
   emit: (status: MachineStatus) => void;
   /** Called whenever a refresh learns the VM's agent address — the hook that
    *  retargets the agent link from the simulator to the real machine. */
-  onAgentAddress?: (address: string) => void;
+  onAgentAddress?: (address: string, capabilityToken: string) => void;
   /** Called when a refresh reports the VM in an awake state — the hook that
    *  tells the agent link to skip its reconnect backoff and dial now, so a
    *  freshly booted machine (first provision, wake) connects within a poll. */
@@ -48,6 +48,7 @@ export class MachineService {
   private current: MachineStatus = localOnlyMachineStatus();
   private reachable = true;
   private timer: NodeJS.Timeout | null = null;
+  private agentGrant: { address: string; token: string; exp: number } | null = null;
 
   constructor(private readonly deps: MachineDeps) {}
 
@@ -107,10 +108,26 @@ export class MachineService {
         typeof machine.agentAddress === "string" &&
         machine.agentAddress.length > 0
       ) {
-        this.deps.onAgentAddress?.(machine.agentAddress);
         // Awake per the control plane but possibly not yet dialed: nudge the
         // link out of its backoff so connecting tracks the poll cadence.
         if (isAwakeState(machine.state as MachineState)) {
+          const nowSeconds = Date.now() / 1_000;
+          if (
+            this.agentGrant === null ||
+            this.agentGrant.address !== machine.agentAddress ||
+            this.agentGrant.exp <= nowSeconds + 60
+          ) {
+            const grant = await client.mintMachineCapabilityToken([...CAPABILITIES]);
+            this.agentGrant = {
+              address: machine.agentAddress,
+              token: grant.token,
+              exp: grant.exp,
+            };
+          }
+          this.deps.onAgentAddress?.(
+            machine.agentAddress,
+            this.agentGrant.token,
+          );
           this.deps.onMachineAwake?.();
         }
       }
@@ -186,6 +203,7 @@ export class MachineService {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.agentGrant = null;
   }
 
   /* ------------------------------ internals ------------------------------ */

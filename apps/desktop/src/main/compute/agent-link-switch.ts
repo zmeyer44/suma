@@ -49,11 +49,18 @@ export class SwitchableAgentLink implements AgentLink {
    * Point the link at a real agent (idempotent per URL). No-op when pinned
    * by SUMA_AGENT_URL or already targeting this URL.
    */
-  setTarget(url: string): void {
+  setTarget(url: string, capabilityToken?: string): void {
+    const key = capabilityToken === undefined ? url : `${url}#${capabilityToken}`;
     // Guard before constructing: a TcpAgentClient dials in its constructor,
     // and a pinned link must cause no connection attempt at all.
-    if (this.pinned || url === this.targetUrl) return;
-    this.setLink(new TcpAgentClient(url), url);
+    if (this.pinned || key === this.targetUrl) return;
+    this.setLink(
+      new TcpAgentClient(
+        url,
+        capabilityToken === undefined ? {} : { capabilityToken },
+      ),
+      key,
+    );
   }
 
   /**

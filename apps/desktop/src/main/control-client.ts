@@ -11,11 +11,18 @@
  */
 
 import { clearTimeout, setTimeout } from "node:timers";
+import type { Capability } from "@suma/protocol";
 import {
   refreshDelayMs,
   shouldRefreshToken,
   tokenExpSeconds,
 } from "./auth-token";
+import type {
+  RemoteAssistantLink,
+  RemoteAssistantLinkCode,
+  RemoteAssistantPolicy,
+  RemoteAssistantPolicyPatch,
+} from "../shared/remote-assistant";
 
 export const DEFAULT_CONTROL_URL = "http://localhost:8787";
 
@@ -484,6 +491,12 @@ export class ControlClient {
     );
   }
 
+  async mintMachineCapabilityToken(
+    caps: Capability[],
+  ): Promise<{ token: string; exp: number; caps: Capability[] }> {
+    return this.request("POST", "/v1/machine/capability-token", { caps });
+  }
+
   async listAudit(limit: number): Promise<ControlAuditEvent[]> {
     return (
       await this.request<{ events: ControlAuditEvent[] }>(
@@ -491,6 +504,49 @@ export class ControlClient {
         `/v1/audit?limit=${limit}`,
       )
     ).events;
+  }
+
+  /* ----------------------- external assistant access --------------------- */
+
+  createAssistantLinkCode(): Promise<RemoteAssistantLinkCode> {
+    return this.request("POST", "/v1/channels/link-code", {});
+  }
+
+  async listAssistantLinks(): Promise<RemoteAssistantLink[]> {
+    return (
+      await this.request<{ links: RemoteAssistantLink[] }>(
+        "GET",
+        "/v1/channels/links",
+      )
+    ).links;
+  }
+
+  async revokeAssistantLink(linkId: string): Promise<void> {
+    await this.request<{ deleted: true }>(
+      "DELETE",
+      `/v1/channels/links/${encodeURIComponent(linkId)}`,
+    );
+  }
+
+  async getAssistantPolicy(): Promise<RemoteAssistantPolicy> {
+    return (
+      await this.request<{ policy: RemoteAssistantPolicy }>(
+        "GET",
+        "/v1/assistant/policy",
+      )
+    ).policy;
+  }
+
+  async updateAssistantPolicy(
+    patch: RemoteAssistantPolicyPatch,
+  ): Promise<RemoteAssistantPolicy> {
+    return (
+      await this.request<{ policy: RemoteAssistantPolicy }>(
+        "PATCH",
+        "/v1/assistant/policy",
+        patch,
+      )
+    ).policy;
   }
 
   /* ------------------------------ internals ------------------------------ */

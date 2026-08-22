@@ -93,7 +93,7 @@ export function checkCapability(
  * Channels
  * ------------------------------------------------------------------ */
 
-export type AgentChannelKind = "ctl" | "pty" | "fwd" | "vfs" | "log";
+export type AgentChannelKind = "auth" | "ctl" | "pty" | "fwd" | "vfs" | "log";
 
 /**
  * Parse a mux channel name (`ctl`, `pty/<id>`, `fwd/<port>[/<streamId>]`,
@@ -108,7 +108,9 @@ export type AgentChannelKind = "ctl" | "pty" | "fwd" | "vfs" | "log";
 export function parseChannel(
   name: string,
 ): { kind: AgentChannelKind; id?: string; port?: number } | null {
-  if (name === "ctl" || name === "vfs" || name === "log") return { kind: name };
+  if (name === "auth" || name === "ctl" || name === "vfs" || name === "log") {
+    return { kind: name };
+  }
   const slash = name.indexOf("/");
   if (slash < 0) return null;
   const head = name.slice(0, slash);

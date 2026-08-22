@@ -12,6 +12,7 @@ import {
   chromium,
   type Browser,
   type BrowserContext,
+  type CDPSession,
   type Page,
 } from "playwright-core";
 import {
@@ -26,32 +27,89 @@ import type {
 } from "./session-store";
 
 const PAGE_TEXT_LIMIT = 60_000;
+const SAFE_POPUP_BINDING = "__sumaOpenGuardedPopup";
+const SAFE_POPUP_SCRIPT = `(() => {
+  const openGuarded = (value) => {
+    const raw = value == null ? "" : String(value);
+    void globalThis.${SAFE_POPUP_BINDING}(raw).catch(() => undefined);
+    return null;
+  };
+  Object.defineProperty(globalThis, "open", {
+    value: openGuarded,
+    writable: false,
+    configurable: false,
+  });
+  document.addEventListener("click", (event) => {
+    const path = event.composedPath();
+    const anchor = path.find((candidate) => candidate instanceof HTMLAnchorElement);
+    if (!anchor) return;
+    const baseTarget = document.querySelector("base")?.target || "";
+    const target = (anchor.target || baseTarget).toLowerCase();
+    if (target === "" || target === "_self" || target === "_top" || target === "_parent") return;
+    event.preventDefault();
+    openGuarded(anchor.href);
+  }, true);
+  document.addEventListener("submit", (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    const target = form.target.toLowerCase();
+    if (target !== "" && target !== "_self" && target !== "_top" && target !== "_parent") {
+      form.target = "_self";
+    }
+  }, true);
+  const nativeSubmit = HTMLFormElement.prototype.submit;
+  Object.defineProperty(HTMLFormElement.prototype, "submit", {
+    value: function guardedSubmit() {
+      const target = this.target.toLowerCase();
+      if (target !== "" && target !== "_self" && target !== "_top" && target !== "_parent") {
+        this.target = "_self";
+      }
+      return nativeSubmit.call(this);
+    },
+    writable: false,
+    configurable: false,
+  });
+})();`;
+
+interface PausedBrowserRequest {
+  requestId: string;
+  request: { url: string; headers: Record<string, string> };
+}
 
 export interface PlaywrightBrowserRuntimeOptions {
   executablePath?: string;
   headless?: boolean;
+  /** Test seam; production always uses Playwright's Chromium launcher. */
+  launch?: () => Promise<Browser>;
 }
 
 export class PlaywrightBrowserRuntime {
   readonly #options: PlaywrightBrowserRuntimeOptions;
-  #browser: Browser | null = null;
+  #browserPromise: Promise<Browser> | null = null;
 
   constructor(options: PlaywrightBrowserRuntimeOptions = {}) {
     this.#options = options;
   }
 
   async browser(): Promise<Browser> {
-    this.#browser ??= await chromium.launch({
-      executablePath: this.#options.executablePath,
-      headless: this.#options.headless ?? true,
-      args: ["--disable-dev-shm-usage"],
+    this.#browserPromise ??= (
+      this.#options.launch?.() ??
+      chromium.launch({
+        executablePath: this.#options.executablePath,
+        headless: this.#options.headless ?? true,
+        args: ["--disable-dev-shm-usage"],
+      })
+    ).catch((error: unknown) => {
+      this.#browserPromise = null;
+      throw error;
     });
-    return this.#browser;
+    return this.#browserPromise;
   }
 
   async close(): Promise<void> {
-    await this.#browser?.close();
-    this.#browser = null;
+    const browserPromise = this.#browserPromise;
+    this.#browserPromise = null;
+    if (browserPromise !== null) await (await browserPromise).close();
   }
 }
 
@@ -72,6 +130,7 @@ export class PlaywrightBrowserBackend implements BrowserBackend {
   readonly #authProvider: BrowserAuthProvider;
   #context: BrowserContext | null = null;
   readonly #pages = new Map<string, Page>();
+  readonly #pageGuards = new Map<Page, Promise<void>>();
   #activeTabId: string | null = null;
 
   constructor(options: PlaywrightBrowserBackendOptions) {
@@ -94,6 +153,7 @@ export class PlaywrightBrowserBackend implements BrowserBackend {
   async openTab(url?: string): Promise<BrowserTab> {
     const context = await this.#ensureContext();
     const page = await context.newPage();
+    await this.#registerPage(page);
     const tabId = this.#tabIdFor(page);
     this.#activeTabId = tabId;
     if (url !== undefined && url.trim() !== "") {
@@ -297,6 +357,7 @@ export class PlaywrightBrowserBackend implements BrowserBackend {
       await this.#context.close();
       this.#context = null;
       this.#pages.clear();
+      this.#pageGuards.clear();
       this.#activeTabId = null;
     }
     await this.#store.save(this.#sessionKey, state);
@@ -308,6 +369,7 @@ export class PlaywrightBrowserBackend implements BrowserBackend {
     await this.#context.close();
     this.#context = null;
     this.#pages.clear();
+    this.#pageGuards.clear();
     this.#activeTabId = null;
   }
 
@@ -321,33 +383,91 @@ export class PlaywrightBrowserBackend implements BrowserBackend {
       acceptDownloads: false,
       serviceWorkers: "block",
     });
-    await context.route("**/*", async (route) => {
-      const requestUrl = route.request().url();
-      if (!/^https?:/iu.test(requestUrl)) {
-        await route.continue();
-        return;
-      }
-      try {
-        await this.#networkPolicy.assertAllowed(requestUrl);
-        const headers = await this.#authProvider.headersFor(new URL(requestUrl));
-        await route.continue({ headers: { ...route.request().headers(), ...headers } });
-      } catch {
-        await route.abort("blockedbyclient");
-      }
-    });
+    await context.exposeBinding(
+      SAFE_POPUP_BINDING,
+      async ({ frame }, rawUrl: unknown) => {
+        if (typeof rawUrl !== "string" || rawUrl.trim() === "") return false;
+        const url = new URL(rawUrl, frame.url());
+        await this.#networkPolicy.assertAllowed(url.href);
+        const popup = await context.newPage();
+        await this.#registerPage(popup);
+        await this.#navigatePage(popup, url.href);
+        this.#activeTabId = this.#tabIdFor(popup);
+        return true;
+      },
+    );
+    await context.addInitScript(SAFE_POPUP_SCRIPT);
     context.on("page", (page) => {
-      const tabId = randomUUID();
-      this.#pages.set(tabId, page);
-      this.#activeTabId ??= tabId;
-      page.on("close", () => {
-        this.#pages.delete(tabId);
-        if (this.#activeTabId === tabId) {
-          this.#activeTabId = this.#pages.keys().next().value ?? null;
-        }
+      void this.#registerPage(page).catch(() => {
+        if (!page.isClosed()) void page.close();
       });
     });
     this.#context = context;
     return context;
+  }
+
+  #registerPage(page: Page): Promise<void> {
+    const existing = this.#pageGuards.get(page);
+    if (existing !== undefined) return existing;
+
+    const tabId = randomUUID();
+    this.#pages.set(tabId, page);
+    this.#activeTabId ??= tabId;
+    page.on("close", () => {
+      this.#pages.delete(tabId);
+      this.#pageGuards.delete(page);
+      if (this.#activeTabId === tabId) {
+        this.#activeTabId = this.#pages.keys().next().value ?? null;
+      }
+    });
+    const guard = this.#installNetworkGuard(page);
+    this.#pageGuards.set(page, guard);
+    return guard;
+  }
+
+  async #installNetworkGuard(page: Page): Promise<void> {
+    const session = await page.context().newCDPSession(page);
+    session.on("Fetch.requestPaused", (event) => {
+      void this.#continueGuardedRequest(session, event);
+    });
+    await session.send("Fetch.enable", {
+      patterns: [
+        { urlPattern: "http://*", requestStage: "Request" },
+        { urlPattern: "https://*", requestStage: "Request" },
+      ],
+    });
+  }
+
+  async #continueGuardedRequest(
+    session: CDPSession,
+    event: PausedBrowserRequest,
+  ): Promise<void> {
+    try {
+      await this.#networkPolicy.assertAllowed(event.request.url);
+      const managed = new Set(
+        this.#authProvider.managedHeaderNames().map((name) => name.toLowerCase()),
+      );
+      const headers = Object.entries(event.request.headers)
+        .filter(([name]) => !managed.has(name.toLowerCase()))
+        .map(([name, value]) => ({ name, value }));
+      const injected = await this.#authProvider.headersFor(
+        new URL(event.request.url),
+      );
+      for (const [name, value] of Object.entries(injected)) {
+        headers.push({ name, value });
+      }
+      await session.send("Fetch.continueRequest", {
+        requestId: event.requestId,
+        headers,
+      });
+    } catch {
+      await session
+        .send("Fetch.failRequest", {
+          requestId: event.requestId,
+          errorReason: "BlockedByClient",
+        })
+        .catch(() => undefined);
+    }
   }
 
   async #navigatePage(page: Page, rawUrl: string): Promise<void> {

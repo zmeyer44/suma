@@ -16,6 +16,7 @@
   "dependencies": {
     "@hono/node-server": "^1.14.0",
     "@hono/zod-validator": "^0.4.2",
+    "@suma/assistant-core": "workspace:*",
     "@suma/config": "workspace:*",
     "@suma/protocol": "workspace:*",
     "drizzle-orm": "^0.44.0",
